@@ -77,7 +77,9 @@ async function rdpFingerprint(host, port) {
     return await probeRdp(host, port, {});
   } catch (e) {
     if (!/KEY_USAGE_BIT_INCORRECT/.test(e.message)) throw e;
-    return probeRdp(host, port, RSA_KEY_EXCHANGE);
+    return probeRdp(host, port, RSA_KEY_EXCHANGE).catch(() => {
+      throw new Error(`${host}'s certificate only allows RSA key exchange, which the server refused, so its identity could not be read`);
+    });
   }
 }
 

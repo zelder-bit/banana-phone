@@ -849,7 +849,9 @@ async function rdpFingerprint(host, port) {
     return await probeRdp(host, port, {});
   } catch (e) {
     if (!/KEY_USAGE_BIT_INCORRECT/.test(e.message)) throw e;
-    return probeRdp(host, port, RSA_KEY_EXCHANGE);
+    return probeRdp(host, port, RSA_KEY_EXCHANGE).catch(() => {
+      throw new Error(`${host}'s certificate only allows RSA key exchange, which the server refused, so its identity could not be read`);
+    });
   }
 }
 ```
@@ -864,6 +866,7 @@ The fix asks for exactly what the certificate permits. TLS 1.2 with **RSA key ex
 
 * `/KEY_USAGE_BIT_INCORRECT/.test(e.message)` is a **regular expression** test: true if the text appears anywhere in the error message.
 * `throw e` re-throws every other error unchanged, so only this one case is retried.
+* `.catch(() => { throw … })` replaces the retry's error, if it fails too, with one naming the real cause: a server can turn RSA key exchange off, and then this certificate cannot be read at all.
 * `{ ...tlsOptions }` spreads the options into the `tls.connect` call: nothing for the first try, the TLS 1.2 limits for the retry.
 
 Plain Node also uses OpenSSL, so the unit tests would pass even with the bug. `npm run test:electron` runs `guacd.test.js` inside Electron's runtime (`ELECTRON_RUN_AS_NODE=1` makes the Electron binary behave like `node`), where a certificate made with `-addext keyUsage=keyEncipherment,dataEncipherment` reproduces the Windows case. CI runs it in the `ui` job, which already has Electron.
