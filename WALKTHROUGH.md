@@ -1529,6 +1529,15 @@ Both scan the **whole history**, not only the newest files: a password committed
 
 `fetch-depth: 0` means "all commits" (the default fetches only the newest). gitleaks runs from its official Docker image at a fixed version, so the hook and CI behave the same. `--redact` hides the found values in the output, so the log does not leak them a second time.
 
+The hook runs the same image, with one difference. In a second working copy made with `git worktree add`, the commit history is not inside the folder. It stays in the main checkout's `.git` folder, and the worktree only has a small `.git` file pointing there by absolute path. Docker sees only the folders it is given, so the hook mounts both at their real paths:
+
+```sh
+common=$(cd "$(git rev-parse --git-common-dir)" && pwd)
+  docker run --rm -v "$repo:$repo" -v "$common:$common" "$image" git "$repo" --config "$repo/.gitleaks.toml" --redact --verbose
+```
+
+`git rev-parse --git-common-dir` prints that shared `.git` folder, and `cd … && pwd` turns it into an absolute path. Without the second mount, git inside the container could not find any history, so gitleaks scanned nothing and reported "no leaks".
+
 `.gitleaks.toml` starts from gitleaks' built-in rules (hundreds of patterns for API keys, tokens, private keys and the like) and adds two for personal data:
 
 ```toml
