@@ -3,12 +3,15 @@
 # Turn on once per clone:  git config core.hooksPath .githooks
 # Bypass for a known false positive:  git push --no-verify  (CI scans again anyway)
 repo=$(git rev-parse --show-toplevel)
+# In a linked worktree (git worktree add) the history lives in the main checkout's .git, outside $repo.
+common=$(cd "$(git rev-parse --git-common-dir)" && pwd)
 image=ghcr.io/gitleaks/gitleaks:v8.28.0 # keep in step with .github/workflows/scan.yml
 
 if command -v gitleaks >/dev/null 2>&1; then
   gitleaks git "$repo" --config "$repo/.gitleaks.toml" --redact --verbose
 elif command -v docker >/dev/null 2>&1; then
-  docker run --rm -v "$repo:/repo" "$image" git /repo --config /repo/.gitleaks.toml --redact --verbose
+  # Mount both at their real paths: a worktree's .git file points at $common by absolute path.
+  docker run --rm -v "$repo:$repo" -v "$common:$common" "$image" git "$repo" --config "$repo/.gitleaks.toml" --redact --verbose
 else
   echo "pre-push: neither gitleaks nor Docker found; skipping the local scan (CI will still scan)." >&2
   exit 0
