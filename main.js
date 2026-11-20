@@ -74,15 +74,44 @@ ipcMain.handle('store:bulkApply', (_e, filter, patch) => {
 
 // ---- sessions ---------------------------------------------------------------
 
+// An unreadable file must not count as "no hosts known": that would silently re-trust every server.
 function knownHosts() {
-  try { return JSON.parse(fs.readFileSync(HOSTS, 'utf8')); } catch { return {}; }
+  try { return JSON.parse(fs.readFileSync(HOSTS, 'utf8')); }
+  catch (e) {
+    if (e.code === 'ENOENT') return {};
+    throw new Error(`${HOSTS} is unreadable (${e.message}); fix or delete it to trust servers anew`);
+  }
 }
+const saveHosts = (hosts) => store.save(HOSTS, hosts); // atomic write, mode 600
+
+// Trust on first use, for SSH host keys and RDP certificates alike. Returns the fingerprint saved
+// before this call: undefined the first time (fp is saved now), equal to fp if unchanged.
+function trust(id, fp) {
+  const hosts = knownHosts();
+  const saved = hosts[id];
+  if (!saved) { hosts[id] = fp; saveHosts(hosts); }
+  return saved;
+}
+const sshId = (c) => `${c.host}:${c.port || 22}`;
+const rdpId = (c) => `rdp ${c.host}:${c.port || 3389}`;
+
+// For a renewed certificate or reinstalled server: forget what was saved so the next connect saves it anew.
+ipcMain.handle('store:forgetHost', (_e, connId) => {
+  const c = data.connections.find((x) => x.id === connId);
+  if (!c) return false;
+  const hosts = knownHosts();
+  const id = c.protocol === 'rdp' ? rdpId(c) : sshId(c);
+  if (!(id in hosts)) return false;
+  delete hosts[id];
+  saveHosts(hosts);
+  return true;
+});
 
 function openSsh(id, conn, cols, rows) {
   const client = new Client();
   let stream;
   const out = (s) => send('session:data', id, s);
-  const hostId = `${conn.host}:${conn.port || 22}`;
+  const hostId = sshId(conn);
   const password = dec(conn.password);
 
   client.on('ready', () => {
@@ -111,16 +140,14 @@ function openSsh(id, conn, cols, rows) {
     hostHash: 'sha256',
     // Trust on first use; refuse if a known host's key changes.
     hostVerifier: (fp) => {
-      const hosts = knownHosts();
-      if (!hosts[hostId]) {
-        hosts[hostId] = fp;
-        fs.writeFileSync(HOSTS, JSON.stringify(hosts, null, 2), { mode: 0o600 });
-        out(`\x1b[33mNew host key for ${hostId} saved (SHA256 ${fp}).\x1b[0m\r\n`);
-        return true;
+      let saved;
+      try { saved = trust(hostId, fp); } catch (e) { out(`\x1b[31m${e.message}\x1b[0m\r\n`); return false; }
+      if (!saved) out(`\x1b[33mNew host key for ${hostId} saved (SHA256 ${fp}).\x1b[0m\r\n`);
+      else if (saved !== fp) {
+        out(`\x1b[31mHOST KEY CHANGED for ${hostId}! Refusing to connect.\r\nExpected ${saved}, got ${fp}.\r\nIf this is expected, right-click the connection and choose "Forget saved key".\x1b[0m\r\n`);
+        return false;
       }
-      if (hosts[hostId] === fp) return true;
-      out(`\x1b[31mHOST KEY CHANGED for ${hostId}! Refusing to connect.\r\nExpected ${hosts[hostId]}, got ${fp}.\r\nIf this is expected, remove the entry from ${HOSTS}.\x1b[0m\r\n`);
-      return false;
+      return true;
     },
   });
   return {
@@ -151,7 +178,19 @@ function openLocal(id, cols, rows) {
 ipcMain.handle('session:open', async (_e, connId, cols = 80, rows = 24) => {
   const conn = connId === 'local' ? { protocol: 'local' } : data.connections.find((c) => c.id === connId);
   if (!conn) throw new Error('Connection not found');
-  if (conn.protocol === 'rdp' || conn.protocol === 'vnc') {
+  if (conn.protocol === 'rdp') {
+    // Check the server's identity ourselves first (clear errors, trust on first use);
+    // guacd then accepts only that exact certificate on its own connection.
+    const cert = await guacd.rdpFingerprint(conn.host, conn.port || 3389);
+    const fp = cert.fingerprint;
+    const saved = trust(rdpId(conn), fp);
+    if (saved && saved !== fp) {
+      throw new Error(`The certificate of ${conn.host} has CHANGED, so banana-phone refused to connect: this can mean someone is impersonating the server. Expected SHA256 ${saved}, got ${fp}. If the certificate was renewed or the server reinstalled, right-click the connection and choose "Forget saved key".`);
+    }
+    const notice = saved ? undefined : `Saved the certificate of ${conn.host}: SHA256 ${fp}`;
+    return { kind: 'remote', url: await guacd.openRemote(conn, dec(conn.password), cert), notice };
+  }
+  if (conn.protocol === 'vnc') {
     return { kind: 'remote', url: await guacd.openRemote(conn, dec(conn.password)) };
   }
   const id = crypto.randomUUID();

@@ -1,11 +1,12 @@
 // Runs guacd in Docker and a guacamole-lite websocket bridge on localhost, for RDP/VNC panes.
 const { execFile, execFileSync } = require('child_process');
 const net = require('net');
+const tls = require('tls');
 const crypto = require('crypto');
 const GuacamoleLite = require('guacamole-lite');
 
 const NAME = 'banana-phone-guacd';
-const IMAGE = 'guacamole/guacd:1.5.5'; // matches guacamole-common-js 1.5.x in the renderer
+const IMAGE = 'guacamole/guacd:1.6.0'; // 1.6 adds cert-fingerprints; still serves guacamole-common-js 1.5 clients
 const GUACD_PORT = 4822;
 const key = crypto.randomBytes(32); // per-launch: tokens die with the app
 
@@ -24,8 +25,9 @@ let starting;
 let startedHere = false; // only stop a guacd this launch created
 function ensureGuacd() {
   return (starting ||= (async () => {
-    const running = await docker(['inspect', '-f', '{{.State.Running}}', NAME]).catch(() => 'false');
-    if (running !== 'true') {
+    // Reuse a running container only if it is the image this version expects.
+    const running = await docker(['inspect', '-f', '{{.State.Running}} {{.Config.Image}}', NAME]).catch(() => '');
+    if (running !== `true ${IMAGE}`) {
       await docker(['rm', '-f', NAME]).catch(() => {});
       await docker(['run', '-d', '--rm', '--name', NAME, '-p', `127.0.0.1:${GUACD_PORT}:4822`, IMAGE]);
       startedHere = true;
@@ -61,7 +63,40 @@ function encryptToken(obj) {
   return Buffer.from(JSON.stringify({ iv: iv.toString('base64'), value: value.toString('base64') })).toString('base64');
 }
 
-async function openRemote(conn, password) {
+// Asks an RDP server to switch to TLS, as every RDP client does first, and returns
+// { fingerprint: SHA-256 of its certificate ("AB:CD:…"), nla: whether it picked NLA over plain TLS }.
+// Fails if the server only offers legacy RDP security, which has no certificate to check.
+function rdpFingerprint(host, port) {
+  return new Promise((resolve, reject) => {
+    const sock = net.connect(port, host);
+    const fail = (msg) => { sock.destroy(); reject(new Error(msg)); }; // no-op once resolved
+    sock.setTimeout(10000, () => fail(`${host}:${port} did not answer in time`)); // idle timer, covers the TLS handshake too
+    sock.once('error', (e) => fail(`${host}:${port}: ${e.message}`));
+    sock.once('close', () => fail(`${host}:${port} closed the connection`));
+    // TPKT header (4 bytes) + X.224 Connection Request (7) + RDP_NEG_REQ (8) asking for TLS (1) or NLA (2)
+    sock.write(Buffer.from([3, 0, 0, 19, 14, 0xe0, 0, 0, 0, 0, 0, 1, 0, 8, 0, 3, 0, 0, 0]));
+    let buf = Buffer.alloc(0);
+    sock.on('data', function onData(d) {
+      buf = Buffer.concat([buf, d]);
+      if (buf[0] !== 3) return fail(`${host}:${port} does not look like an RDP server`); // TPKT version is always 3
+      if (buf.length < 4 || buf.length < buf.readUInt16BE(2)) return; // TPKT length says more is coming
+      sock.off('data', onData);
+      // byte 11: 2 = RDP_NEG_RSP, 3 = RDP_NEG_FAILURE; bytes 15-18: the protocol picked (or failure code)
+      if (buf.length >= 19 && buf[11] === 3) return fail(`${host} refused TLS and NLA (failure code ${buf.readUInt32LE(15)})`);
+      const selected = buf.length >= 19 && buf[11] === 2 ? buf.readUInt32LE(15) : 0;
+      if ((selected & 3) === 0) return fail(`${host} only offers legacy RDP security, so its identity cannot be checked`);
+      const t = tls.connect({ socket: sock, rejectUnauthorized: false }, () => {
+        const fingerprint = t.getPeerCertificate().fingerprint256;
+        t.destroy();
+        fingerprint ? resolve({ fingerprint, nla: (selected & 2) !== 0 }) : reject(new Error(`${host} sent no certificate`));
+      });
+      t.once('error', (e) => fail(`${host}: TLS failed: ${e.message}`));
+    });
+  });
+}
+
+// cert: required for RDP (the result of rdpFingerprint), ignored for VNC.
+async function openRemote(conn, password, cert) {
   if (starting && !(await portOpen())) starting = null; // container died or Docker restarted: start again
   await ensureGuacd();
   const port = await ensureBridge();
@@ -69,9 +104,11 @@ async function openRemote(conn, password) {
   if (conn.protocol === 'rdp') {
     Object.assign(settings, {
       username: conn.username || '', domain: conn.domain || '',
-      security: 'any',
-      // shortcut: accepts any RDP certificate (typical for self-signed AD hosts); add per-connection pinning if needed.
-      'ignore-cert': 'true',
+      // Exactly the security the server picked when checked: never 'any', which would let an
+      // impostor fall back to legacy RDP (no certificate) and slip past the pinned fingerprint.
+      security: cert.nla ? 'nla' : 'tls',
+      // Accept exactly this certificate, self-signed or not; anything else is refused by FreeRDP in guacd.
+      'cert-fingerprints': `sha256:${cert.fingerprint}`,
       'resize-method': 'display-update',
     });
   } else if (conn.username) settings.username = conn.username;
@@ -85,4 +122,4 @@ function stopGuacd() {
   try { execFileSync('docker', ['stop', '-t', '1', NAME], { timeout: 10000, stdio: 'ignore' }); } catch {}
 }
 
-module.exports = { openRemote, stopGuacd, encryptToken, key };
+module.exports = { openRemote, rdpFingerprint, stopGuacd, encryptToken, key };

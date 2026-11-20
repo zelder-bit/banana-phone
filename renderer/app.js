@@ -16,12 +16,12 @@ const MAX_PANES = 4;
 let view = { folders: [], connections: [] };
 let selected = null;
 
-function toast(msg) {
+function toast(msg, ms = 2600) {
   const t = $('#toast');
   t.textContent = msg;
   t.hidden = false;
   clearTimeout(toast.timer);
-  toast.timer = setTimeout(() => (t.hidden = true), 2600);
+  toast.timer = setTimeout(() => (t.hidden = true), ms);
 }
 
 // ---------------------------------------------------------------- theme
@@ -157,6 +157,7 @@ function connMenu(e, c) {
     ['Edit…', () => editConn(c)],
     ['Duplicate', () => { const { id, hasPassword, ...rest } = c; editConn({ ...rest, name: c.name + ' copy' }); if (hasPassword) toast('Passwords are not copied: enter it for the copy'); }],
     ['Bulk edit everyone with this username…', () => openBulk('username', c.username || '')],
+    ...(c.protocol === 'ssh' || c.protocol === 'rdp' ? [['Forget saved key', async () => toast(await window.bp.forgetHost(c.id) ? `Forgot the saved key of ${c.host}; the next connect saves the new one` : 'No saved key for this host')]] : []),
     '-',
     ['Delete', async () => { if (confirm(`Delete "${c.name}"?`)) refresh(await window.bp.remove(c.id)); }, 'danger'],
   ]);
@@ -553,7 +554,8 @@ window.bp.onExit((id) => {
 
 async function openRemote(p, c) {
   status(p, `Connecting to ${c.host}…`);
-  const url = (await window.bp.open(c.id)).url;
+  const { url, notice } = await window.bp.open(c.id);
+  if (notice) toast(notice, 12000); // long enough to compare the fingerprint
   if (p.closed) return; // pane closed while guacd was starting
   const [base, query] = url.split('?');
   const client = new Guacamole.Client(new Guacamole.WebSocketTunnel(base));
