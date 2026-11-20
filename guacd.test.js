@@ -51,3 +51,13 @@ test('rdpFingerprint refuses servers that only offer legacy RDP security', async
   const { server, port } = await fakeRdp(0);
   try { await assert.rejects(rdpFingerprint('127.0.0.1', port), /legacy RDP security/); } finally { server.close(); }
 });
+
+test('RDP settings: pinned certificate, and the admin (console) session only when asked', () => {
+  const { remoteSettings } = require('./guacd');
+  const cert = { fingerprint: 'AA:BB', nla: true };
+  const base = { protocol: 'rdp', host: 'dc01', username: 'admin', domain: 'CORP' };
+  const s = remoteSettings(base, 'pw', cert);
+  assert.deepStrictEqual([s.security, s['cert-fingerprints'], s.port, 'console' in s], ['nla', 'sha256:AA:BB', '3389', false]);
+  assert.strictEqual(remoteSettings({ ...base, adminSession: true }, 'pw', cert).console, 'true');
+  assert.ok(!('console' in remoteSettings({ protocol: 'vnc', host: 'k', adminSession: true }, 'pw')));
+});

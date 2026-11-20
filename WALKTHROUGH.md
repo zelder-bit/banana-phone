@@ -856,6 +856,11 @@ async function openRemote(conn, password, cert) {
   if (starting && !(await portOpen())) starting = null; // container died or Docker restarted: start again
   await ensureGuacd();
   const port = await ensureBridge();
+  const token = encryptToken({ connection: { type: conn.protocol, settings: remoteSettings(conn, password, cert) } });
+  return `ws://127.0.0.1:${port}/?token=${encodeURIComponent(token)}`;
+}
+
+function remoteSettings(conn, password, cert) {
   const settings = { hostname: conn.host, port: String(conn.port || (conn.protocol === 'rdp' ? 3389 : 5900)), password: password || '' };
   if (conn.protocol === 'rdp') {
     Object.assign(settings, {
@@ -867,15 +872,18 @@ async function openRemote(conn, password, cert) {
       'cert-fingerprints': `sha256:${cert.fingerprint}`,
       'resize-method': 'display-update',
     });
+    if (conn.adminSession) settings.console = 'true'; // the server's console / admin session, like mstsc /admin
   } else if (conn.username) settings.username = conn.username;
-  const token = encryptToken({ connection: { type: conn.protocol, settings } });
-  return `ws://127.0.0.1:${port}/?token=${encodeURIComponent(token)}`;
+  return settings;
 }
 ```
+
+The settings are built by their own function, `remoteSettings`, which only computes values and never touches Docker or the network. That lets `guacd.test.js` check them directly without starting guacd.
 
 * For **Active Directory**, RDP sends `username` + `domain` + `password` (the equivalent of typing `CORP\admin` at a Windows login). `security` is NLA or TLS, whichever the server chose during the identity check (see above).
 * `cert-fingerprints` pins the certificate checked above, as explained in the previous section.
 * `resize-method: display-update` lets the remote desktop change resolution live when you resize a pane or switch from one pane to a 2×2 grid.
+* `console: 'true'` is set only when the connection's **Admin session (mstsc /admin)** box is ticked. It connects to the server's console session (session 0 on older Windows, the "admin" session on Remote Desktop Session Host servers) instead of a new user session. Admins use it to reach a server directly when a session-host farm's load balancing would send them elsewhere, or when the normal session limit is reached. guacd's parameters are all strings, hence `'true'` rather than `true`.
 * `Object.assign(target, source)` copies `source`'s properties onto `target`.
 * `encodeURIComponent` makes the token safe to put in a URL (escaping `+`, `/`, `=`).
 
@@ -1487,6 +1495,8 @@ keywords = ["/home/", "/users/"]
 The rules were tested by committing throwaway fakes (a random AWS-style key, a random GitHub-style token, a freshly generated private key, an email address and a `/home/<name>/` path) to a scratch copy: each was reported and the push was blocked, while the allowed addresses and paths passed. For a genuine false positive, `git push --no-verify` skips the hook, and the pattern belongs in an allowlist.
 
 Covered: multi-word search, that an empty password removes the saved one while a missing one keeps it, that Duplicate's `copyPasswordFrom` copies the encrypted password unless a new one is given, bulk update by username, by folder (including subfolders but not `Production` when asking for `Prod`), respecting unticked ids, backup and round-trip of the file, and (in `guacd.test.js`) that a token with a non-ASCII password decrypts correctly with guacamole-lite's own code, that `rdpFingerprint` returns the right fingerprint from a fake RDP server using a throwaway certificate made with `openssl`, and that it refuses a server offering only legacy RDP security, and that it fails quickly when the server hangs up or is not an RDP server at all.
+
+`guacd.test.js` also checks `remoteSettings`: the RDP settings pin the certificate, and ask for the admin session only when it is ticked.
 
 ---
 
