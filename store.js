@@ -54,7 +54,12 @@ function bulkUpdate(data, filter, patch) {
   return hits.length;
 }
 
-function upsert(data, conn) {
+function upsert(data, input) {
+  const { copyPasswordFrom, ...conn } = input;
+  if (copyPasswordFrom && !conn.id && conn.password === undefined) { // new connections only
+    const src = data.connections.find((c) => c.id === copyPasswordFrom);
+    if (src?.password) conn.password = src.password; // copied still encrypted: never decrypted on the way
+  }
   if (!conn.id) conn.id = crypto.randomUUID();
   const i = data.connections.findIndex((c) => c.id === conn.id);
   if (i >= 0) data.connections[i] = { ...data.connections[i], ...conn };
