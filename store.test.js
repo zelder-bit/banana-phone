@@ -32,6 +32,19 @@ test('an empty password removes the saved one, undefined keeps it', () => {
   assert.deepStrictEqual(d.connections.map((c) => c.password), ['', '', undefined, 'ENC']);
 });
 
+test('copyPasswordFrom copies the encrypted password unless a new one is given', () => {
+  const d = sample();
+  d.connections[0].password = 'ENC';
+  const copy = store.upsert(d, { name: 'dc01 copy', copyPasswordFrom: 'a' });
+  assert.strictEqual(copy.password, 'ENC');
+  assert.ok(!('copyPasswordFrom' in d.connections.at(-1)));
+  assert.strictEqual(store.upsert(d, { name: 'other', password: 'NEW', copyPasswordFrom: 'a' }).password, 'NEW');
+  assert.strictEqual(store.upsert(d, { name: 'cleared', password: '', copyPasswordFrom: 'a' }).password, '');
+  assert.strictEqual(store.upsert(d, { name: 'gone', copyPasswordFrom: 'nope' }).password, undefined);
+  store.upsert(d, { id: 'b', copyPasswordFrom: 'a' });
+  assert.strictEqual(d.connections[1].password, undefined);
+});
+
 test('bulk update by username changes only that username', () => {
   const d = sample();
   assert.strictEqual(store.bulkUpdate(d, { username: 'admin' }, { password: 'ENC' }), 3);

@@ -313,7 +313,12 @@ function bulkUpdate(data, filter, patch) {
 `upsert` ("update or insert") and `remove` round out the file:
 
 ```js
-function upsert(data, conn) {
+function upsert(data, input) {
+  const { copyPasswordFrom, ...conn } = input;
+  if (copyPasswordFrom && !conn.id && conn.password === undefined) { // new connections only
+    const src = data.connections.find((c) => c.id === copyPasswordFrom);
+    if (src?.password) conn.password = src.password; // copied still encrypted: never decrypted on the way
+  }
   if (!conn.id) conn.id = crypto.randomUUID();
   const i = data.connections.findIndex((c) => c.id === conn.id);
   if (i >= 0) data.connections[i] = { ...data.connections[i], ...conn };
@@ -323,6 +328,8 @@ function upsert(data, conn) {
 ```
 
 `{ ...old, ...conn }` builds a new object with all of `old`'s properties, then `conn`'s on top. That is how a partial update such as `{ id, folder }` (used when you drag a connection onto another folder) changes only the folder.
+
+The first lines handle **Duplicate**. The page never sees passwords, so it cannot copy one into the duplicate. It sends `copyPasswordFrom: <id of the original>` instead, and `upsert` copies the original's stored value, which is still encrypted. The same keyring key encrypted it, so the copy decrypts just like the original. The rest pattern `{ copyPasswordFrom, ...conn }` keeps the helper field out of the saved file. `src?.password` is **optional chaining**: if no connection has that id, `src` is `undefined` and the expression gives `undefined` instead of throwing. A password typed in the dialog (or `''` from "Remove the saved password") always wins, because the copy only happens while `conn.password` is still `undefined`, and only for a new connection (no `id` yet), so an existing connection can never have its password swapped this way.
 
 ---
 
@@ -1479,7 +1486,7 @@ keywords = ["/home/", "/users/"]
 
 The rules were tested by committing throwaway fakes (a random AWS-style key, a random GitHub-style token, a freshly generated private key, an email address and a `/home/<name>/` path) to a scratch copy: each was reported and the push was blocked, while the allowed addresses and paths passed. For a genuine false positive, `git push --no-verify` skips the hook, and the pattern belongs in an allowlist.
 
-Covered: multi-word search, that an empty password removes the saved one while a missing one keeps it, bulk update by username, by folder (including subfolders but not `Production` when asking for `Prod`), respecting unticked ids, backup and round-trip of the file, and (in `guacd.test.js`) that a token with a non-ASCII password decrypts correctly with guacamole-lite's own code, that `rdpFingerprint` returns the right fingerprint from a fake RDP server using a throwaway certificate made with `openssl`, and that it refuses a server offering only legacy RDP security, and that it fails quickly when the server hangs up or is not an RDP server at all.
+Covered: multi-word search, that an empty password removes the saved one while a missing one keeps it, that Duplicate's `copyPasswordFrom` copies the encrypted password unless a new one is given, bulk update by username, by folder (including subfolders but not `Production` when asking for `Prod`), respecting unticked ids, backup and round-trip of the file, and (in `guacd.test.js`) that a token with a non-ASCII password decrypts correctly with guacamole-lite's own code, that `rdpFingerprint` returns the right fingerprint from a fake RDP server using a throwaway certificate made with `openssl`, and that it refuses a server offering only legacy RDP security, and that it fails quickly when the server hangs up or is not an RDP server at all.
 
 ---
 

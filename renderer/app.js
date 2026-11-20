@@ -155,7 +155,7 @@ function connMenu(e, c) {
     ['Connect in split', () => connect(c.id, true)],
     '-',
     ['Edit…', () => editConn(c)],
-    ['Duplicate', () => { const { id, hasPassword, ...rest } = c; editConn({ ...rest, name: c.name + ' copy' }); if (hasPassword) toast('Passwords are not copied: enter it for the copy'); }],
+    ['Duplicate', () => { const { id, ...rest } = c; editConn({ ...rest, name: c.name + ' copy', copyPasswordFrom: c.hasPassword ? id : undefined }); }],
     ['Bulk edit everyone with this username…', () => openBulk('username', c.username || '')],
     ...(c.protocol === 'ssh' || c.protocol === 'rdp' ? [['Forget saved key', async () => toast(await window.bp.forgetHost(c.id) ? `Forgot the saved key of ${c.host}; the next connect saves the new one` : 'No saved key for this host')]] : []),
     '-',
@@ -208,7 +208,7 @@ function editConn(c = { protocol: 'ssh' }) {
   $('#edit-title').textContent = c.id ? 'Edit connection' : 'New connection';
   for (const k of ['name', 'protocol', 'folder', 'host', 'port', 'username', 'domain', 'keyPath']) form.elements[k].value = c[k] ?? '';
   form.elements.tags.value = (c.tags || []).join(', ');
-  form.elements.password.placeholder = c.hasPassword ? '•••••• (unchanged)' : '';
+  form.elements.password.placeholder = c.hasPassword ? (c.copyPasswordFrom ? '•••••• (copied)' : '•••••• (unchanged)') : '';
   $('#clear-pw').hidden = !c.hasPassword;
   form.elements.password.disabled = false;
   form.elements.clearPassword.onchange = (e) => { form.elements.password.disabled = e.target.checked; };
@@ -225,6 +225,7 @@ function editConn(c = { protocol: 'ssh' }) {
       host: f.host.value.trim(), port: f.port.value ? Number(f.port.value) : undefined, username: f.username.value.trim(),
       domain: f.domain.value.trim(), keyPath: f.keyPath.value.trim(),
       tags: f.tags.value.split(',').map((t) => t.trim()).filter(Boolean),
+      copyPasswordFrom: c.copyPasswordFrom, // main copies the encrypted password unless a new one is given
     };
     if (f.clearPassword.checked) conn.password = ''; // '' = remove the saved one
     else if (f.password.value) conn.password = f.password.value; // empty = keep existing
