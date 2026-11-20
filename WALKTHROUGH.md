@@ -1369,6 +1369,16 @@ async function openRemote(p, c) {
 * `Guacamole.Keyboard(p.body)` listens **only on that pane**, so with four desktops in a grid your typing goes only to the one you clicked. It sends X11 "keysyms", which handle keyboard layouts and modifier keys properly. `return false` stops the browser acting on the key itself (e.g. Ctrl+W would otherwise not reach Windows).
 * A ResizeObserver scales the display to fit the pane straight away, then (after the pane has been still for 300 ms, a **debounce**) calls `client.sendSize(w, h)` to ask the remote desktop for the new resolution.
 * `client.onstatechange` and `client.onerror` drive the status overlay: it disappears when connected (state 3) and shows the error message, for example "Connection failed (server unreachable?)", if guacd cannot reach the host.
+* Signing out of Windows (or choosing Disconnect in its Start menu) closes the pane by itself. guacd ends every session with an *error* message, even a normal one, and attaches a status code. Code `0` means SUCCESS: guacd uses it when you logged off or disconnected yourself ("Manually logged off."). Anything else (server unreachable, idle timeout, another login took the session, the network dropped) keeps the pane open with the message, so you can see what happened.
+
+```js
+client.onerror = (e) => {
+  if (e.code === 0) return void (p.closed || closePane(p));
+  p.failed = true; status(p, `${c.host}: ${e.message || 'connection error'}`, true);
+};
+```
+
+`p.closed || closePane(p)` runs `closePane` only when the pane is not closed already (`||` stops at the first true value). `return void …` returns nothing, so the rest of the function is skipped.
 
 ### Errors you can see
 
