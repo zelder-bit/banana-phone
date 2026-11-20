@@ -77,6 +77,8 @@ banana-phone/
 ├── scripts/
 │   └── check-walkthrough.js   CI check that this document matches the code
 ├── .github/workflows/ci.yml   runs the tests and that check on every push / PR
+├── .github/workflows/release.yml  builds and publishes the AppImage for a version tag
+├── requirements.txt    what a machine needs to run the AppImage (shipped with each release)
 ├── build/icon.png      AppImage icon
 └── renderer/           everything the window shows
     ├── index.html      layout and dialogs
@@ -146,7 +148,7 @@ The channel names (`'store:get'`, `'session:write'`…) are just strings. The `s
     "start": "electron .",
     "test": "node --test",
     "postinstall": "electron-builder install-app-deps",
-    "dist": "electron-builder --linux AppImage"
+    "dist": "electron-builder --linux AppImage --publish never"
   },
   ...
 }
@@ -156,7 +158,7 @@ The channel names (`'store:get'`, `'session:write'`…) are just strings. The `s
 * `npm start` runs `electron .`, meaning "run the app in this folder".
 * `npm test` runs Node's built-in test runner, which finds every `*.test.js` file.
 * `postinstall` runs automatically after `npm install`. `node-pty` contains C++ code compiled for one specific version of Node; Electron ships its own Node with a different binary interface (ABI), so `install-app-deps` recompiles it for Electron.
-* `npm run dist` builds the AppImage into `dist/`.
+* `npm run dist` builds the AppImage into `dist/`. `--publish never` stops electron-builder from trying to upload anything itself when it notices it is running for a git tag; publishing is the release workflow's job (see [§14](#14-building-and-running-the-appimage)).
 
 The `"build"` section configures **electron-builder**:
 
@@ -172,7 +174,7 @@ The `"build"` section configures **electron-builder**:
 * `files` lists what goes into the package. `**` means "this folder and everything below it". Dev-only packages (Electron itself, electron-builder) are left out automatically.
 * electron-builder packs the app into one archive file called `app.asar`. Native `.node` libraries cannot be loaded from inside an archive, so `asarUnpack` keeps `node-pty` as real files next to it.
 
-`allowScripts` is an npm 11 safety feature: packages may only run install scripts you have approved. Only `node-pty` is allowed (it must compile); `ssh2`'s optional native speed-up and `cpu-features` are denied because `ssh2` works fine in pure JavaScript.
+`allowScripts` is an npm 11 safety feature: packages may only run install scripts you have approved. Two are allowed: `node-pty` (it must compile) and `cpu-features`, a small native helper `ssh2` uses to pick the fastest cipher. `cpu-features`'s install script generates a build file (`buildcheck.gypi`) that `electron-builder install-app-deps` needs when it recompiles native modules for Electron; with the script denied, a fresh `npm ci` fails. `ssh2`'s own optional native crypto binding stays denied because `ssh2` works fine in pure JavaScript.
 
 ---
 
@@ -1443,6 +1445,46 @@ Requirements on the machine running it:
 Data lives in `~/.config/banana-phone/`: `connections.json`, `connections.json.bak`, `known_hosts.json`.
 
 ---
+
+### Releases
+
+A release is a GitHub Release page with the AppImage and `requirements.txt` attached, built by GitHub Actions rather than on anyone's machine. To make one, set `version` in `package.json`, merge to `main`, and push a tag for that version:
+
+```bash
+git tag v0.1.0 && git push origin v0.1.0
+```
+
+`.github/workflows/release.yml` runs for any tag starting with `v`:
+
+```yaml
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write # create the release and upload its files
+```
+
+```yaml
+      - name: Tag matches package.json version
+        run: |
+          version=$(node -p "require('./package.json').version")
+          [ "$GITHUB_REF_NAME" = "v$version" ] || { echo "Tag $GITHUB_REF_NAME does not match package.json version $version"; exit 1; }
+      - run: npm ci # also rebuilds node-pty for Electron (postinstall)
+      - run: npm test
+      - run: node scripts/check-walkthrough.js
+      - run: npm run dist
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/banana-phone-*.AppImage requirements.txt --title "banana-phone $GITHUB_REF_NAME" --generate-notes
+```
+
+* `permissions: contents: write` lets the workflow's built-in token create releases; by default it can only read.
+* `$GITHUB_REF_NAME` is the tag that triggered the run, e.g. `v0.1.0`. `node -p` prints the result of a JavaScript expression, here the version from `package.json`. `[ a = b ] || { …; exit 1; }` fails the job when they differ, so a release can never be labelled with the wrong version.
+* Unlike the CI workflow, this one runs `npm ci` **with** install scripts, because it needs the real native modules for the AppImage.
+* The tests and the walkthrough check run again, so nothing that fails them is ever published.
+* `gh release create` makes the release and uploads the files. `--generate-notes` writes the release notes from the merged pull requests since the previous tag.
 
 ## 15. JavaScript syntax cheat sheet
 

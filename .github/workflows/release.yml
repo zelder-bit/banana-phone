@@ -1,0 +1,30 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write # create the release and upload its files
+
+jobs:
+  appimage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - name: Tag matches package.json version
+        run: |
+          version=$(node -p "require('./package.json').version")
+          [ "$GITHUB_REF_NAME" = "v$version" ] || { echo "Tag $GITHUB_REF_NAME does not match package.json version $version"; exit 1; }
+      - run: npm ci # also rebuilds node-pty for Electron (postinstall)
+      - run: npm test
+      - run: node scripts/check-walkthrough.js
+      - run: npm run dist
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/banana-phone-*.AppImage requirements.txt --title "banana-phone $GITHUB_REF_NAME" --generate-notes
