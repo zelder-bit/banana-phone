@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src ws://127.0.0.1:*; font-src 'self'">
+  <title>banana-phone</title>
+  <link rel="stylesheet" href="../node_modules/@xterm/xterm/css/xterm.css">
+  <link rel="stylesheet" href="fruit.css">
+</head>
+<body>
+  <header class="top">
+    <button class="icon-btn" id="toggle-side" title="Show / hide connections (Ctrl+B)" aria-label="Show or hide the connections list" aria-controls="side" aria-expanded="true">☰</button>
+    <div class="brand"><img src="svg/banana.svg" alt=""> banana-phone</div>
+    <button class="search-pill" id="open-search" title="Search connections (Ctrl+K)"><span>Search connections…</span><kbd>Ctrl K</kbd></button>
+    <div class="top-right">
+      <button class="btn small" id="new-term" title="Local terminal (Ctrl+Shift+T)"><img class="ico" src="svg/kiwi.svg" alt=""> Terminal</button>
+      <button class="btn small" id="new-conn">+ Connection</button>
+      <button class="btn small" id="bulk">Bulk edit</button>
+      <button class="icon-btn" id="theme" title="Light / dark" aria-label="Toggle light or dark theme">◐</button>
+    </div>
+  </header>
+
+  <div class="app">
+    <aside class="side" id="side">
+      <div class="side-head">
+        <span>Connections</span>
+        <button class="icon-btn small" id="new-folder" title="New folder" aria-label="New folder">＋</button>
+      </div>
+      <div id="tree" class="tree" role="tree"></div>
+      <p id="keyring-warn" class="warn small" hidden>No system keyring found: stored passwords are only obfuscated. Install gnome-keyring or KWallet.</p>
+    </aside>
+
+    <section class="work">
+      <nav class="tabbar">
+        <div id="tabs" class="tabs"></div>
+        <div class="layouts" role="group" aria-label="Layout of this tab">
+          <button class="icon-btn small" data-layout="h" title="Split side by side">◫</button>
+          <button class="icon-btn small" data-layout="v" title="Split stacked">⬒</button>
+          <button class="icon-btn small" data-layout="grid" title="Grid">⊞</button>
+          <span class="sep"></span>
+          <button class="btn small ghost" id="merge" title="Put every open session in this tab (up to 4)">Split all</button>
+          <button class="btn small ghost" id="explode" title="Give every session in this tab its own tab">Tab all</button>
+        </div>
+      </nav>
+      <div id="stage" class="stage">
+        <div id="empty" class="empty">
+          <img src="svg/empty.svg" alt="">
+          <h2>Ring ring!</h2>
+          <p class="muted">Double-click a connection, or press <kbd>Ctrl K</kbd>.<br><kbd>Shift</kbd>+open puts it in a split next to the current one.</p>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <!-- quick search -->
+  <dialog id="search-dlg" class="search-dlg">
+    <div class="dialog">
+      <input id="search-in" type="search" placeholder="Name, host, user, folder, tag…" aria-label="Search connections">
+      <ul id="search-list" class="search-list" role="listbox"></ul>
+      <p class="muted small">↵ open in new tab · Shift ↵ open in split · Esc close</p>
+    </div>
+  </dialog>
+
+  <!-- edit connection -->
+  <dialog id="edit-dlg">
+    <form id="edit-form" class="dialog" method="dialog">
+      <h2 id="edit-title">Connection</h2>
+      <label class="field">Name <input name="name" type="text" required></label>
+      <div class="row">
+        <label class="field">Type
+          <select name="protocol">
+            <option value="ssh">SSH (Linux)</option>
+            <option value="rdp">RDP (Windows / xrdp)</option>
+            <option value="vnc">VNC</option>
+            <option value="local">Local terminal</option>
+          </select>
+        </label>
+        <label class="field grow">Folder <input name="folder" type="text" list="folder-list" placeholder="Prod/Windows"></label>
+      </div>
+      <div class="row net">
+        <label class="field grow">Host <input name="host" type="text"></label>
+        <label class="field port">Port <input name="port" type="number" min="1" max="65535"></label>
+      </div>
+      <div class="row net">
+        <label class="field grow">Username <input name="username" type="text" autocomplete="off"></label>
+        <label class="field grow rdp-only">Domain <input name="domain" type="text" placeholder="CORP"></label>
+      </div>
+      <label class="field net">Password <input name="password" type="password" autocomplete="new-password"></label>
+      <label class="field ssh-only">Private key file <input name="keyPath" type="text" placeholder="~/.ssh/id_ed25519"></label>
+      <label class="field">Tags <input name="tags" type="text" placeholder="comma, separated"></label>
+      <div class="actions">
+        <button class="btn" type="button" data-cancel>Cancel</button>
+        <button class="btn primary" value="ok">Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- bulk edit -->
+  <dialog id="bulk-dlg" class="bulk-dlg">
+    <form id="bulk-form" class="dialog" method="dialog">
+      <h2>Bulk edit credentials</h2>
+      <div class="row">
+        <label class="field">Match
+          <select name="by">
+            <option value="username">Username is</option>
+            <option value="folder">In folder</option>
+          </select>
+        </label>
+        <label class="field grow">&nbsp;<input name="value" type="text" list="bulk-values" autocomplete="off"></label>
+      </div>
+      <div id="bulk-matches" class="matches"></div>
+      <p class="muted small">Leave a field empty to keep it as it is.</p>
+      <div class="row">
+        <label class="field grow">New username <input name="username" type="text" autocomplete="off"></label>
+        <label class="field grow">New domain <input name="domain" type="text"></label>
+      </div>
+      <div class="row">
+        <label class="field grow">New password <input name="password" type="password" autocomplete="new-password"></label>
+        <label class="field grow">Repeat password <input name="password2" type="password" autocomplete="new-password"></label>
+      </div>
+      <p id="bulk-err" class="error small" hidden></p>
+      <div class="actions">
+        <button class="btn" type="button" data-cancel>Cancel</button>
+        <button class="btn primary" value="ok" id="bulk-apply">Update</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="prompt-dlg">
+    <form class="dialog" method="dialog">
+      <h2 id="prompt-title"></h2>
+      <input id="prompt-in" type="text">
+      <div class="actions">
+        <button class="btn" type="button" data-cancel>Cancel</button>
+        <button class="btn primary" value="ok">OK</button>
+      </div>
+    </form>
+  </dialog>
+
+  <datalist id="folder-list"></datalist>
+  <datalist id="bulk-values"></datalist>
+  <div id="menu" class="menu" hidden></div>
+  <div id="toast" class="toast" hidden></div>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>

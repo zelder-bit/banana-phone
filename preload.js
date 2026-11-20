@@ -1,0 +1,16 @@
+const { contextBridge, ipcRenderer } = require('electron');
+
+contextBridge.exposeInMainWorld('bp', {
+  get: () => ipcRenderer.invoke('store:get'),
+  save: (conn) => ipcRenderer.invoke('store:save', conn),
+  remove: (id) => ipcRenderer.invoke('store:delete', id),
+  folder: (op) => ipcRenderer.invoke('store:folder', op),
+  bulkPreview: (filter) => ipcRenderer.invoke('store:bulkPreview', filter),
+  bulkApply: (filter, patch) => ipcRenderer.invoke('store:bulkApply', filter, patch),
+  open: (connId, cols, rows) => ipcRenderer.invoke('session:open', connId, cols, rows),
+  write: (id, d) => ipcRenderer.send('session:write', id, d),
+  resize: (id, c, r) => ipcRenderer.send('session:resize', id, c, r),
+  close: (id) => ipcRenderer.send('session:close', id),
+  onData: (fn) => ipcRenderer.on('session:data', (_e, id, d) => fn(id, d)),
+  onExit: (fn) => ipcRenderer.on('session:exit', (_e, id) => fn(id)),
+});
