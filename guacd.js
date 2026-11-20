@@ -3,6 +3,7 @@ const { execFile, execFileSync } = require('child_process');
 const net = require('net');
 const tls = require('tls');
 const crypto = require('crypto');
+const dns = require('dns');
 const GuacamoleLite = require('guacamole-lite');
 
 const NAME = 'banana-phone-guacd';
@@ -117,8 +118,20 @@ async function openRemote(conn, password, cert) {
   if (starting && !(await portOpen())) starting = null; // container died or Docker restarted: start again
   await ensureGuacd();
   const port = await ensureBridge();
-  const token = encryptToken({ connection: { type: conn.protocol, settings: remoteSettings(conn, password, cert) } });
+  const host = await resolveHost(conn.host);
+  const token = encryptToken({ connection: { type: conn.protocol, settings: remoteSettings({ ...conn, host }, password, cert) } });
   return `ws://127.0.0.1:${port}/?token=${encodeURIComponent(token)}`;
+}
+
+// guacd runs in Docker, whose DNS is only a copy of /etc/resolv.conf: no /etc/hosts, mDNS or VPN
+// split DNS. So look the name up here, the way the rest of the system (and other RDP apps) does,
+// and give guacd the address. IPv4 first: Docker's default bridge network has no IPv6.
+async function resolveHost(host) {
+  try {
+    return (await dns.promises.lookup(host, { order: 'ipv4first' })).address;
+  } catch (e) {
+    throw new Error(`Could not look up ${host}: ${e.code || e.message}`);
+  }
 }
 
 // The guacd connection parameters for one RDP or VNC connection.
@@ -145,4 +158,4 @@ function stopGuacd() {
   try { execFileSync('docker', ['stop', '-t', '1', NAME], { timeout: 10000, stdio: 'ignore' }); } catch {}
 }
 
-module.exports = { openRemote, remoteSettings, rdpFingerprint, stopGuacd, encryptToken, key };
+module.exports = { openRemote, remoteSettings, resolveHost, rdpFingerprint, stopGuacd, encryptToken, key };
