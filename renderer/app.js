@@ -614,7 +614,11 @@ async function openRemote(p, c) {
     if (s === 3) { status(p, null); clip.onConnected(); } // CONNECTED
     if (s === 5 && !p.closed && !p.failed) status(p, 'Disconnected', true);
   };
-  client.onerror = (e) => { p.failed = true; status(p, `${c.host}: ${e.message || 'connection error'}`, true); };
+  client.onerror = (e) => {
+    // Status 0 (SUCCESS) is guacd's normal end, e.g. "Manually logged off." when you sign out: just close.
+    if (e.code === 0) return void (p.closed || closePane(p));
+    p.failed = true; status(p, `${c.host}: ${e.message || 'connection error'}`, true);
+  };
 
   const mouse = new Guacamole.Mouse(display.getElement());
   mouse.onEach(['mousedown', 'mouseup', 'mousemove'], (e) => { client.sendMouseState(e.state, true); });
