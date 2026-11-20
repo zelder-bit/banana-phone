@@ -1,0 +1,21 @@
+#!/bin/sh
+# Blocks a push if gitleaks finds secrets or personal data in the repository's history (rules: .gitleaks.toml).
+# Turn on once per clone:  git config core.hooksPath .githooks
+# Bypass for a known false positive:  git push --no-verify  (CI scans again anyway)
+repo=$(git rev-parse --show-toplevel)
+image=ghcr.io/gitleaks/gitleaks:v8.28.0 # keep in step with .github/workflows/scan.yml
+
+if command -v gitleaks >/dev/null 2>&1; then
+  gitleaks git "$repo" --config "$repo/.gitleaks.toml" --redact --verbose
+elif command -v docker >/dev/null 2>&1; then
+  docker run --rm -v "$repo:/repo" "$image" git /repo --config /repo/.gitleaks.toml --redact --verbose
+else
+  echo "pre-push: neither gitleaks nor Docker found; skipping the local scan (CI will still scan)." >&2
+  exit 0
+fi
+status=$?
+if [ $status -ne 0 ]; then
+  echo >&2
+  echo "pre-push: push blocked. Remove the secret or personal data above from the commits (rewrite them if already committed), then push again." >&2
+fi
+exit $status

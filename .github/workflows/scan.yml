@@ -1,0 +1,16 @@
+name: Secret scan
+
+# Every push to any branch, and every pull request: fails if secrets or personal data are in the history.
+on:
+  push:
+  pull_request:
+
+jobs:
+  gitleaks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # whole history: something removed in a later commit is still in the repository
+      - name: Scan for secrets and personal data
+        run: docker run --rm -v "$PWD:/repo" ghcr.io/gitleaks/gitleaks:v8.28.0 git /repo --config /repo/.gitleaks.toml --redact --verbose

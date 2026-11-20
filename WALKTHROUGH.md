@@ -79,6 +79,9 @@ banana-phone/
 ├── .github/workflows/ci.yml   runs the tests and that check on every push / PR
 ├── .github/workflows/release.yml  builds and publishes the AppImage for a version tag
 ├── .npmrc              npm settings for this project (skip optional dependencies)
+├── .github/workflows/scan.yml     scans every push and PR for secrets and personal data
+├── .gitleaks.toml      rules for that scan
+├── .githooks/pre-push  runs the same scan before a push leaves your machine
 ├── requirements.txt    what a machine needs to run the AppImage (shipped with each release)
 ├── build/icon.png      AppImage icon
 └── renderer/           everything the window shows
@@ -1407,6 +1410,63 @@ const corpus = sources.map((f) => fs.readFileSync(path.join(root, f), 'utf8').sp
 ```
 
 `npm ci` installs exactly what `package-lock.json` lists. `--ignore-scripts` and `ELECTRON_SKIP_BINARY_DOWNLOAD` skip compiling `node-pty` and downloading Electron, which neither the tests nor the check need, so CI takes seconds.
+
+### Secrets and personal data
+
+Nothing private should ever reach GitHub: no passwords, API keys or private keys, and no personal details such as email addresses or home-directory paths that reveal a username. **gitleaks** scans for these, in two places:
+
+1. `.githooks/pre-push` runs before `git push` sends anything, and blocks the push if it finds something. This is the layer that actually keeps a secret off GitHub.
+2. `.github/workflows/scan.yml` runs the same scan on GitHub for every push and pull request, as a backstop for clones where the hook is not turned on.
+
+Git does not run hooks from the repository by default (a cloned repository must not be able to run code on your machine on its own), so each clone turns it on once:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+Both scan the **whole history**, not only the newest files: a password committed and then deleted in the next commit is still in the repository, and anyone with a clone can read it. The workflow therefore checks out everything:
+
+```yaml
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # whole history: something removed in a later commit is still in the repository
+      - name: Scan for secrets and personal data
+        run: docker run --rm -v "$PWD:/repo" ghcr.io/gitleaks/gitleaks:v8.28.0 git /repo --config /repo/.gitleaks.toml --redact --verbose
+```
+
+`fetch-depth: 0` means "all commits" (the default fetches only the newest). gitleaks runs from its official Docker image at a fixed version, so the hook and CI behave the same. `--redact` hides the found values in the output, so the log does not leak them a second time.
+
+`.gitleaks.toml` starts from gitleaks' built-in rules (hundreds of patterns for API keys, tokens, private keys and the like) and adds two for personal data:
+
+```toml
+[extend]
+useDefault = true # gitleaks' built-in rules: API keys, tokens, private keys, passwords in URLs, ...
+
+[[rules]]
+id = "email-address"
+description = "Email address (personal data)"
+regex = '''[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}'''
+keywords = ["@"]
+
+[[rules.allowlists]]
+description = "Placeholder and bot addresses"
+regexes = ['''@(?:example\.(?:com|org|net)|[a-z0-9-]+\.(?:test|invalid|localhost))$''', '''^noreply@anthropic\.com$''', '''^git@github\.com$''']
+
+[[rules]]
+id = "home-directory-path"
+description = "Home directory path (reveals a local username)"
+# The username is reported as the finding: gitleaks' defaults ignore findings that look like whole paths.
+regex = '''(?:/home|/Users)/([a-z_][a-z0-9._-]*)/'''
+secretGroup = 1
+keywords = ["/home/", "/users/"]
+```
+
+* TOML is a simple settings format. `[[rules]]` (double brackets) starts one more entry in a list of rules; `[[rules.allowlists]]` attaches an exception list to the rule just above it. `'''…'''` is a "literal" string in which backslashes are not special, convenient for regular expressions.
+* `keywords` is a fast pre-filter: gitleaks only runs the (slower) regular expression on text containing one of them.
+* The email allowlist lets through addresses that cannot belong to a person: the reserved `example.com` / `.test` / `.invalid` domains, the commit co-author bot address, and GitHub's SSH user. `package-lock.json` is skipped by gitleaks itself; it quotes package maintainers' public contacts.
+* `secretGroup = 1` makes the **username** (the part in parentheses) the finding rather than the whole path. gitleaks' built-in exceptions ignore anything that looks like a full Unix path, which would otherwise have silenced this rule entirely; a second allowlist (not shown) skips generic names such as `runner`, the account GitHub's CI machines use.
+
+The rules were tested by committing throwaway fakes (a random AWS-style key, a random GitHub-style token, a freshly generated private key, an email address and a `/home/<name>/` path) to a scratch copy: each was reported and the push was blocked, while the allowed addresses and paths passed. For a genuine false positive, `git push --no-verify` skips the hook, and the pattern belongs in an allowlist.
 
 Covered: multi-word search, bulk update by username, by folder (including subfolders but not `Production` when asking for `Prod`), respecting unticked ids, backup and round-trip of the file, and (in `guacd.test.js`) that a token with a non-ASCII password decrypts correctly with guacamole-lite's own code, that `rdpFingerprint` returns the right fingerprint from a fake RDP server using a throwaway certificate made with `openssl`, and that it refuses a server offering only legacy RDP security, and that it fails quickly when the server hangs up or is not an RDP server at all.
 
