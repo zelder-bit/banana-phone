@@ -799,10 +799,10 @@ function encryptToken(obj) {
 
 ### Checking the RDP server's identity
 
-Every RDP connection starts the same way: the client sends a short binary *Connection Request* saying which security it supports, the server answers which one it picked, and if that is TLS (or NLA, which runs inside TLS) both sides switch to TLS. The server's TLS certificate is its identity. `rdpFingerprint` performs just that opening and reads the certificate, without logging in:
+Every RDP connection starts the same way: the client sends a short binary *Connection Request* saying which security it supports, the server answers which one it picked, and if that is TLS (or NLA, which runs inside TLS) both sides switch to TLS. The server's TLS certificate is its identity. `rdpFingerprint` performs just that opening and reads the certificate, without logging in. The real work happens in `probeRdp`:
 
 ```js
-function rdpFingerprint(host, port) {
+function probeRdp(host, port, tlsOptions) {
   return new Promise((resolve, reject) => {
     const sock = net.connect(port, host);
     const fail = (msg) => { sock.destroy(); reject(new Error(msg)); }; // no-op once resolved
@@ -821,7 +821,7 @@ function rdpFingerprint(host, port) {
       if (buf.length >= 19 && buf[11] === 3) return fail(`${host} refused TLS and NLA (failure code ${buf.readUInt32LE(15)})`);
       const selected = buf.length >= 19 && buf[11] === 2 ? buf.readUInt32LE(15) : 0;
       if ((selected & 3) === 0) return fail(`${host} only offers legacy RDP security, so its identity cannot be checked`);
-      const t = tls.connect({ socket: sock, rejectUnauthorized: false }, () => {
+      const t = tls.connect({ socket: sock, rejectUnauthorized: false, ...tlsOptions }, () => {
         const fingerprint = t.getPeerCertificate().fingerprint256;
         t.destroy();
         fingerprint ? resolve({ fingerprint, nla: (selected & 2) !== 0 }) : reject(new Error(`${host} sent no certificate`));
@@ -840,6 +840,33 @@ function rdpFingerprint(host, port) {
 * `tls.connect({ socket: sock, … })` upgrades the existing TCP connection to TLS. `rejectUnauthorized: false` is deliberate here: Windows servers usually have self-signed certificates that no certificate authority vouches for. Trust comes from the fingerprint matching what was seen before, not from an authority.
 * `nla: (selected & 2) !== 0` records whether the server chose NLA (bit 2) or plain TLS (bit 1).
 * `fingerprint256` is the SHA-256 hash of the certificate, written as hex pairs separated by colons (`07:34:83:…`).
+
+`rdpFingerprint` wraps `probeRdp` to handle one Windows quirk:
+
+```js
+async function rdpFingerprint(host, port) {
+  try {
+    return await probeRdp(host, port, {});
+  } catch (e) {
+    if (!/KEY_USAGE_BIT_INCORRECT/.test(e.message)) throw e;
+    return probeRdp(host, port, RSA_KEY_EXCHANGE);
+  }
+}
+```
+
+```js
+const RSA_KEY_EXCHANGE = { maxVersion: 'TLSv1.2', ciphers: 'AES256-GCM-SHA384:AES128-GCM-SHA256:AES256-SHA:AES128-SHA' };
+```
+
+A certificate lists what its key may be used for (**key usage**). The self-signed certificate Windows makes for RDP usually says only *key encipherment*: the client may encrypt a secret to the key. Modern TLS handshakes (ECDHE key exchange, and every TLS 1.3 handshake) instead need the server to *sign* with its key, which that certificate doesn't allow. Electron uses Google's **BoringSSL** rather than OpenSSL, and BoringSSL enforces the rule, failing with `KEY_USAGE_BIT_INCORRECT`. FreeRDP inside guacd uses OpenSSL, which doesn't, so only this probe is affected.
+
+The fix asks for exactly what the certificate permits. TLS 1.2 with **RSA key exchange**, the `AES…-SHA` cipher suites without `ECDHE` in their name, is "encrypt a secret to the server's key", which is key encipherment. Modern handshakes are still tried first, because some hardened servers turn RSA key exchange off. The weaker exchange is fine for this connection: it only reads the certificate, which the server sends in the clear anyway, and nothing secret is sent over it.
+
+* `/KEY_USAGE_BIT_INCORRECT/.test(e.message)` is a **regular expression** test: true if the text appears anywhere in the error message.
+* `throw e` re-throws every other error unchanged, so only this one case is retried.
+* `{ ...tlsOptions }` spreads the options into the `tls.connect` call: nothing for the first try, the TLS 1.2 limits for the retry.
+
+Plain Node also uses OpenSSL, so the unit tests would pass even with the bug. `npm run test:electron` runs `guacd.test.js` inside Electron's runtime (`ELECTRON_RUN_AS_NODE=1` makes the Electron binary behave like `node`), where a certificate made with `-addext keyUsage=keyEncipherment,dataEncipherment` reproduces the Windows case. CI runs it in the `ui` job, which already has Electron.
 
 The app then hands both results to guacd, so that FreeRDP (the RDP library inside guacd) accepts **exactly** that certificate, over exactly that kind of security, on its own connection:
 

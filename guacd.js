@@ -66,7 +66,22 @@ function encryptToken(obj) {
 // Asks an RDP server to switch to TLS, as every RDP client does first, and returns
 // { fingerprint: SHA-256 of its certificate ("AB:CD:…"), nla: whether it picked NLA over plain TLS }.
 // Fails if the server only offers legacy RDP security, which has no certificate to check.
-function rdpFingerprint(host, port) {
+// Windows' self-signed RDP certificates usually allow only "key encipherment". Electron's TLS library
+// (BoringSSL) then rejects a modern (ECDHE) handshake with KEY_USAGE_BIT_INCORRECT, while FreeRDP in guacd
+// accepts it. RSA key exchange is exactly what key encipherment permits, so retry with that; the probe
+// only reads the certificate and sends nothing secret.
+const RSA_KEY_EXCHANGE = { maxVersion: 'TLSv1.2', ciphers: 'AES256-GCM-SHA384:AES128-GCM-SHA256:AES256-SHA:AES128-SHA' };
+
+async function rdpFingerprint(host, port) {
+  try {
+    return await probeRdp(host, port, {});
+  } catch (e) {
+    if (!/KEY_USAGE_BIT_INCORRECT/.test(e.message)) throw e;
+    return probeRdp(host, port, RSA_KEY_EXCHANGE);
+  }
+}
+
+function probeRdp(host, port, tlsOptions) {
   return new Promise((resolve, reject) => {
     const sock = net.connect(port, host);
     const fail = (msg) => { sock.destroy(); reject(new Error(msg)); }; // no-op once resolved
@@ -85,7 +100,7 @@ function rdpFingerprint(host, port) {
       if (buf.length >= 19 && buf[11] === 3) return fail(`${host} refused TLS and NLA (failure code ${buf.readUInt32LE(15)})`);
       const selected = buf.length >= 19 && buf[11] === 2 ? buf.readUInt32LE(15) : 0;
       if ((selected & 3) === 0) return fail(`${host} only offers legacy RDP security, so its identity cannot be checked`);
-      const t = tls.connect({ socket: sock, rejectUnauthorized: false }, () => {
+      const t = tls.connect({ socket: sock, rejectUnauthorized: false, ...tlsOptions }, () => {
         const fingerprint = t.getPeerCertificate().fingerprint256;
         t.destroy();
         fingerprint ? resolve({ fingerprint, nla: (selected & 2) !== 0 }) : reject(new Error(`${host} sent no certificate`));
