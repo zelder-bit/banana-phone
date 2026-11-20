@@ -11,7 +11,8 @@
     "postinstall": "electron-builder install-app-deps",
     "dist": "electron-builder --linux AppImage --publish never",
     "check:walkthrough": "node scripts/check-walkthrough.js",
-    "test:ui": "node --test scripts/ui.e2e.js"
+    "test:ui": "node --test scripts/ui.e2e.js",
+    "test:electron": "ELECTRON_RUN_AS_NODE=1 electron guacd.test.js"
   },
   "build": {
     "appId": "dev.fruit.banana-phone",

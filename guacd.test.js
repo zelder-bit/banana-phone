@@ -18,9 +18,9 @@ const { execFileSync } = require('child_process');
 const { X509Certificate } = require('crypto');
 const { rdpFingerprint } = require('./guacd');
 
-function fakeRdp(selected) {
+function fakeRdp(selected, extra = []) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bp-cert-'));
-  execFileSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1', '-subj', '/CN=fake-rdp',
+  execFileSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1', '-subj', '/CN=fake-rdp', ...extra,
     '-keyout', path.join(dir, 'k.pem'), '-out', path.join(dir, 'c.pem')], { stdio: 'ignore' });
   const key = fs.readFileSync(path.join(dir, 'k.pem'));
   const cert = fs.readFileSync(path.join(dir, 'c.pem'));
@@ -34,6 +34,13 @@ function fakeRdp(selected) {
 
 test('rdpFingerprint returns the certificate fingerprint after the RDP-to-TLS switch', async () => {
   const { server, port, fp } = await fakeRdp(2); // 2 = server picked NLA
+  try { assert.deepStrictEqual(await rdpFingerprint('127.0.0.1', port), { fingerprint: fp, nla: true }); } finally { server.close(); }
+});
+
+// Windows' self-signed RDP certificate allows only key encipherment. Electron's BoringSSL refuses that in a
+// modern handshake (plain Node's OpenSSL does not), so run this file with `npm run test:electron` too.
+test('rdpFingerprint reads a Windows-style certificate (key encipherment only)', async () => {
+  const { server, port, fp } = await fakeRdp(2, ['-addext', 'keyUsage=keyEncipherment,dataEncipherment', '-addext', 'extendedKeyUsage=serverAuth']);
   try { assert.deepStrictEqual(await rdpFingerprint('127.0.0.1', port), { fingerprint: fp, nla: true }); } finally { server.close(); }
 });
 

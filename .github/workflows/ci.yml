@@ -35,3 +35,5 @@ jobs:
       - run: npm ci
       # xvfb-run gives Electron a virtual display; CI=true (set by GitHub) adds --no-sandbox.
       - run: xvfb-run -a npm run test:ui
+      # The RDP certificate probe again, inside Electron: its TLS library (BoringSSL) is stricter than Node's.
+      - run: npm run test:electron
