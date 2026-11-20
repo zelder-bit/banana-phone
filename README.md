@@ -22,4 +22,14 @@ git tag v0.1.1 && git push origin v0.1.1
 
 The Release workflow runs the tests and the walkthrough check, builds the AppImage, and publishes a GitHub release with the AppImage and `requirements.txt` attached. The tag must match the version in `package.json`.
 
+## Before your first push
+
+Turn on the pre-push scan for secrets and personal data (once per clone):
+
+```bash
+git config core.hooksPath .githooks
+```
+
+GitHub runs the same scan on every push and pull request.
+
 How it all works, file by file: [WALKTHROUGH.md](WALKTHROUGH.md).

@@ -1,0 +1,27 @@
+# Secret and personal-data scan, used by .githooks/pre-push and .github/workflows/scan.yml.
+title = "banana-phone: secrets and personal data"
+
+[extend]
+useDefault = true # gitleaks' built-in rules: API keys, tokens, private keys, passwords in URLs, ...
+
+[[rules]]
+id = "email-address"
+description = "Email address (personal data)"
+regex = '''[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}'''
+keywords = ["@"]
+
+[[rules.allowlists]]
+description = "Placeholder and bot addresses"
+regexes = ['''@(?:example\.(?:com|org|net)|[a-z0-9-]+\.(?:test|invalid|localhost))$''', '''^noreply@anthropic\.com$''', '''^git@github\.com$''']
+
+[[rules]]
+id = "home-directory-path"
+description = "Home directory path (reveals a local username)"
+# The username is reported as the finding: gitleaks' defaults ignore findings that look like whole paths.
+regex = '''(?:/home|/Users)/([a-z_][a-z0-9._-]*)/'''
+secretGroup = 1
+keywords = ["/home/", "/users/"]
+
+[[rules.allowlists]]
+description = "Generic or CI accounts"
+regexes = ['''^(?:runner|user|username|you|me)$''']
