@@ -85,6 +85,7 @@ banana-phone/
 ├── .githooks/pre-push  runs the same scan before a push leaves your machine
 ├── requirements.txt    what a machine needs to run the AppImage (shipped with each release)
 ├── build/icon.png      AppImage icon
+├── docs/screenshots/   README pictures (made-up hosts and names)
 └── renderer/           everything the window shows
     ├── index.html      layout and dialogs
     ├── fruit.css       theme (light "orchard" and dark "night grove")
