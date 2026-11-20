@@ -100,6 +100,12 @@ async function openRemote(conn, password, cert) {
   if (starting && !(await portOpen())) starting = null; // container died or Docker restarted: start again
   await ensureGuacd();
   const port = await ensureBridge();
+  const token = encryptToken({ connection: { type: conn.protocol, settings: remoteSettings(conn, password, cert) } });
+  return `ws://127.0.0.1:${port}/?token=${encodeURIComponent(token)}`;
+}
+
+// The guacd connection parameters for one RDP or VNC connection.
+function remoteSettings(conn, password, cert) {
   const settings = { hostname: conn.host, port: String(conn.port || (conn.protocol === 'rdp' ? 3389 : 5900)), password: password || '' };
   if (conn.protocol === 'rdp') {
     Object.assign(settings, {
@@ -111,9 +117,9 @@ async function openRemote(conn, password, cert) {
       'cert-fingerprints': `sha256:${cert.fingerprint}`,
       'resize-method': 'display-update',
     });
+    if (conn.adminSession) settings.console = 'true'; // the server's console / admin session, like mstsc /admin
   } else if (conn.username) settings.username = conn.username;
-  const token = encryptToken({ connection: { type: conn.protocol, settings } });
-  return `ws://127.0.0.1:${port}/?token=${encodeURIComponent(token)}`;
+  return settings;
 }
 
 // Sync so it finishes before the process exits.
@@ -122,4 +128,4 @@ function stopGuacd() {
   try { execFileSync('docker', ['stop', '-t', '1', NAME], { timeout: 10000, stdio: 'ignore' }); } catch {}
 }
 
-module.exports = { openRemote, rdpFingerprint, stopGuacd, encryptToken, key };
+module.exports = { openRemote, remoteSettings, rdpFingerprint, stopGuacd, encryptToken, key };

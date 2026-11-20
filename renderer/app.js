@@ -213,6 +213,7 @@ function editConn(c = { protocol: 'ssh' }) {
   form.elements.password.disabled = false;
   form.elements.clearPassword.onchange = (e) => { form.elements.password.disabled = e.target.checked; };
   d.dataset.proto = c.protocol || 'ssh';
+  form.elements.adminSession.checked = !!c.adminSession;
   form.elements.port.placeholder = DEFAULT_PORT[d.dataset.proto] || '';
   form.elements.protocol.onchange = () => { d.dataset.proto = form.elements.protocol.value; form.elements.port.placeholder = DEFAULT_PORT[d.dataset.proto] || ''; };
   d.returnValue = ''; // Esc keeps the old value, so clear it
@@ -230,6 +231,7 @@ function editConn(c = { protocol: 'ssh' }) {
     else if (f.password.value) conn.password = f.password.value; // empty = keep existing
     if (!conn.id) delete conn.id;
     if (conn.folder) { openFolders.add(conn.folder); saveOpen(); }
+    conn.adminSession = conn.protocol === 'rdp' && f.adminSession.checked;
     refresh(await window.bp.save(conn));
   }, { once: true });
 }
