@@ -6,6 +6,8 @@ The machine running it still needs:
 
 Always
   - 64-bit x86 Linux (built for x64 only, not ARM)
+  - glibc 2.34 or newer: Debian 12+, Ubuntu 22.04+, Fedora 35+, RHEL 9+
+      check with:  ldd --version
   - The file made executable:  chmod +x banana-phone-*.AppImage
   - FUSE 2:  libfuse2t64 (Debian 13, Ubuntu 24.04+) or libfuse2 (older releases)
       without it, run:  APPIMAGE_EXTRACT_AND_RUN=1 ./banana-phone-*.AppImage
