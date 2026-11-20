@@ -209,6 +209,9 @@ function editConn(c = { protocol: 'ssh' }) {
   for (const k of ['name', 'protocol', 'folder', 'host', 'port', 'username', 'domain', 'keyPath']) form.elements[k].value = c[k] ?? '';
   form.elements.tags.value = (c.tags || []).join(', ');
   form.elements.password.placeholder = c.hasPassword ? '•••••• (unchanged)' : '';
+  $('#clear-pw').hidden = !c.hasPassword;
+  form.elements.password.disabled = false;
+  form.elements.clearPassword.onchange = (e) => { form.elements.password.disabled = e.target.checked; };
   d.dataset.proto = c.protocol || 'ssh';
   form.elements.port.placeholder = DEFAULT_PORT[d.dataset.proto] || '';
   form.elements.protocol.onchange = () => { d.dataset.proto = form.elements.protocol.value; form.elements.port.placeholder = DEFAULT_PORT[d.dataset.proto] || ''; };
@@ -223,7 +226,8 @@ function editConn(c = { protocol: 'ssh' }) {
       domain: f.domain.value.trim(), keyPath: f.keyPath.value.trim(),
       tags: f.tags.value.split(',').map((t) => t.trim()).filter(Boolean),
     };
-    if (f.password.value) conn.password = f.password.value; // empty = keep existing
+    if (f.clearPassword.checked) conn.password = ''; // '' = remove the saved one
+    else if (f.password.value) conn.password = f.password.value; // empty = keep existing
     if (!conn.id) delete conn.id;
     if (conn.folder) { openFolders.add(conn.folder); saveOpen(); }
     refresh(await window.bp.save(conn));
@@ -271,10 +275,12 @@ $('#bulk-apply').onclick = async (e) => {
   const err = (m) => { $('#bulk-err').textContent = m; $('#bulk-err').hidden = false; };
   const ids = [...document.querySelectorAll('#bulk-matches input:checked')].map((i) => i.value);
   if (!bulkFilter || !ids.length) return err('Nothing selected.');
+  if (f.clearPassword.checked && (f.password.value || f.password2.value)) return err('Either set a new password or remove it, not both.');
   if (f.password.value !== f.password2.value) return err('Passwords do not match.');
-  const patch = { username: f.username.value.trim() || undefined, password: f.password.value || undefined, domain: f.domain.value.trim() || undefined };
-  if (!patch.username && !patch.password && patch.domain === undefined) return err('Fill in at least one new value.');
-  if (!confirm(`Update ${ids.length} connection${ids.length > 1 ? 's' : ''}? A backup of the old file is kept.`)) return;
+  const patch = { username: f.username.value.trim() || undefined, password: f.password.value || undefined, domain: f.domain.value.trim() || undefined, clearPassword: f.clearPassword.checked };
+  if (!patch.username && !patch.password && !patch.clearPassword && patch.domain === undefined) return err('Fill in at least one new value.');
+  const what = patch.clearPassword ? 'Remove the saved password of' : 'Update';
+  if (!confirm(`${what} ${ids.length} connection${ids.length > 1 ? 's' : ''}? A backup of the old file is kept.`)) return;
   const res = await window.bp.bulkApply({ ...bulkFilter, ids }, patch);
   $('#bulk-dlg').close();
   refresh(res.view);

@@ -86,6 +86,7 @@
         <label class="field grow rdp-only">Domain <input name="domain" type="text" placeholder="CORP"></label>
       </div>
       <label class="field net">Password <input name="password" type="password" autocomplete="new-password"></label>
+      <label class="check net" id="clear-pw"><input name="clearPassword" type="checkbox"> Remove the saved password</label>
       <label class="field ssh-only">Private key file <input name="keyPath" type="text" placeholder="~/.ssh/id_ed25519"></label>
       <label class="field">Tags <input name="tags" type="text" placeholder="comma, separated"></label>
       <div class="actions">
@@ -118,6 +119,7 @@
         <label class="field grow">New password <input name="password" type="password" autocomplete="new-password"></label>
         <label class="field grow">Repeat password <input name="password2" type="password" autocomplete="new-password"></label>
       </div>
+      <label class="check"><input name="clearPassword" type="checkbox"> Remove their saved passwords instead</label>
       <p id="bulk-err" class="error small" hidden></p>
       <div class="actions">
         <button class="btn" type="button" data-cancel>Cancel</button>

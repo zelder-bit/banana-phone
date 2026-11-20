@@ -21,6 +21,17 @@ test('search matches every word across fields', () => {
   assert.strictEqual(d.connections.filter((c) => store.matches(c, '')).length, 4);
 });
 
+test('an empty password removes the saved one, undefined keeps it', () => {
+  const d = sample();
+  store.bulkUpdate(d, { username: 'admin' }, { password: 'ENC' });
+  store.upsert(d, { id: 'a', name: 'dc01' });
+  assert.strictEqual(d.connections[0].password, 'ENC');
+  store.upsert(d, { id: 'a', password: '' });
+  assert.strictEqual(d.connections[0].password, '');
+  store.bulkUpdate(d, { folder: 'Prod' }, { password: '' });
+  assert.deepStrictEqual(d.connections.map((c) => c.password), ['', '', undefined, 'ENC']);
+});
+
 test('bulk update by username changes only that username', () => {
   const d = sample();
   assert.strictEqual(store.bulkUpdate(d, { username: 'admin' }, { password: 'ENC' }), 3);
