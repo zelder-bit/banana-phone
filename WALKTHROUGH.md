@@ -82,6 +82,7 @@ banana-phone/
     ├── index.html      layout and dialogs
     ├── fruit.css       theme (light "orchard" and dark "night grove")
     ├── app.js          all interface behaviour
+    ├── clipboard.js    copy/paste between this computer and remote desktops
     ├── icon.png        window icon
     ├── fonts/          Fredoka (headings) and Nunito (text)
     └── svg/            fruit icons
@@ -316,7 +317,7 @@ function upsert(data, conn) {
 ### Imports and state
 
 ```js
-const { app, BrowserWindow, ipcMain, safeStorage, Menu, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, safeStorage, Menu, dialog, clipboard } = require('electron');
 const { Client } = require('ssh2');
 const pty = require('node-pty');
 const store = require('./store');
@@ -609,6 +610,8 @@ The full list of channels:
 | `session:close` | send | end a terminal session |
 | `session:data` | main → page | terminal output |
 | `session:exit` | main → page | the shell or SSH connection ended |
+| `clipboard:read` | invoke | the system clipboard's text |
+| `clipboard:write` | send | put text on the system clipboard |
 
 Note `onData` strips the IPC event object (`_e`) before calling the page's function, so no Electron internals leak into the page either.
 
@@ -948,6 +951,7 @@ How the user's actions map onto it:
 | Folder menu → Open all in split | opens up to 4 connections of that folder in one tab |
 | Ctrl+Alt+Arrow | move focus between panes in the tab |
 | Ctrl+Tab / Ctrl+Shift+Tab | next / previous tab |
+| Ctrl+Shift+C / Ctrl+Shift+V in a terminal | copy selection / paste |
 
 ### The draggable gutter
 
@@ -1078,6 +1082,84 @@ addEventListener('unhandledrejection', (e) => toast(String(e.reason?.message || 
 
 Every call to `window.bp` returns a Promise. If main throws (keyring locked, disk full), the Promise **rejects**; if nothing catches that, the browser fires `unhandledrejection`. One listener turns all of those into a toast message at the bottom of the window instead of failing silently.
 
+### Clipboard: `clipboard.js` and terminal shortcuts
+
+Copy and paste works between this computer and remote desktops, as text. The page is sandboxed, so it cannot touch the system clipboard itself; main does it with Electron's `clipboard` module:
+
+```js
+ipcMain.handle('clipboard:read', () => clipboard.readText());
+ipcMain.on('clipboard:write', (_e, text) => { if (typeof text === 'string') clipboard.writeText(text); });
+```
+
+`renderer/clipboard.js` connects one Guacamole client to that:
+
+```js
+export const clean = (text) => text.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '');
+
+export function shareClipboard(client, target, bp) {
+  let last = null; // last text seen on either side, so it is never echoed back
+  let received = 0; // bumped on every remote copy, so a slow push can tell it is out of date
+  let connected = false;
+
+  client.onclipboard = (stream, mimetype) => {
+    if (!mimetype.startsWith('text/')) return stream.sendAck('Unsupported clipboard type', 0x0100);
+    const reader = new Guacamole.StringReader(stream);
+    let text = '';
+    reader.ontext = (t) => (text += t);
+    reader.onend = () => {
+      // Only the pane you are working in may change your clipboard; empty means nothing was copied.
+      if (!text || document.activeElement !== target || !document.hasFocus()) return;
+      received++;
+      last = clean(text);
+      bp.clipboardWrite(last);
+    };
+  };
+
+  const push = async () => {
+    if (!connected) return;
+    const before = received;
+    const text = await bp.clipboardRead();
+    if (!text || text === last || received !== before) return;
+    last = text;
+    const writer = new Guacamole.StringWriter(client.createClipboardStream('text/plain'));
+    writer.sendText(text);
+    writer.sendEnd();
+  };
+  target.addEventListener('focus', push);
+
+  return { onConnected: () => { connected = true; push(); } };
+}
+```
+
+* **`clean`** removes control characters except tab and newlines. A hostile remote host could otherwise put an escape sequence on your clipboard, such as `ESC[201~`, which ends a terminal's *bracketed paste* early: anything after it would run as typed commands when you paste into a local shell. `[\x00-\x08…]` is a regex character class of ranges written as hexadecimal character codes.
+* **Remote → local.** When you copy on the remote desktop, guacd sends a `clipboard` instruction that opens a **stream**, then the text in one or more `blob` chunks, then `end`. `Guacamole.StringReader` reassembles the chunks (and decodes UTF-8, so `pässwörd ✓` arrives intact); `onend` writes the result to your clipboard, but only if that pane is the one you are using (`document.activeElement === target`, with the window focused) and the text is not empty. A pane in the background, or in another tab, can never replace what you just copied. Anything that is not text (an image, for example) is refused with an **ack** carrying an error code, which tells guacd to stop sending that stream.
+* **Local → remote.** There is no event for "the system clipboard changed", so the pane pushes your clipboard to the remote side whenever it **gains focus**: when you click into it, and also when you come back to the window from another app (the focused element receives `focus` again). Paste on the remote desktop then pastes what you copied locally. `createClipboardStream` opens the outgoing stream and `StringWriter` sends the text.
+* `received` guards a small race. Reading the clipboard is an IPC round trip; if a remote copy lands while `push` is waiting for it, the text `push` read is already out of date, so it gives up instead of overwriting the remote side with it. The counter changing across the `await` is how it notices.
+* `last` stops ping-pong: text that just arrived from the remote side is not sent straight back to it, and focusing the same pane twice does not resend the same text.
+* `connected` holds pushes until the session is up; Guacamole drops data sent before then. `app.js` calls `onConnected()` from its state handler:
+
+```js
+  const clip = shareClipboard(client, p.body, window.bp);
+  client.onstatechange = (s) => {
+    if (s === 3) { status(p, null); clip.onConnected(); } // CONNECTED
+```
+
+Each remote pane has its own `shareClipboard`, so with two desktops in a split, text goes to the one you click into.
+
+Terminals get the usual Linux shortcuts, because plain Ctrl+C must stay "interrupt" in a shell:
+
+```js
+  term.attachCustomKeyEventHandler((e) => {
+    if (e.type !== 'keydown' || !e.ctrlKey || !e.shiftKey) return true;
+    const k = e.key.toLowerCase();
+    if (k === 'c' && term.hasSelection()) { window.bp.clipboardWrite(term.getSelection()); return false; }
+    if (k === 'v') { e.preventDefault(); window.bp.clipboardRead().then((t) => t && term.paste(clean(t))); return false; }
+    return true;
+  });
+```
+
+`attachCustomKeyEventHandler` lets the app see each key before xterm.js does; returning `false` means "handled, don't send this key to the shell". `term.paste` (rather than writing the text directly) uses *bracketed paste* when the shell supports it, so a pasted multi-line command is not run line by line by accident; `clean` makes sure the text cannot switch that protection off.
+
 ### Bulk edit dialog
 
 ```js
@@ -1145,6 +1227,7 @@ You hold **Shift** and double-click `dc01` (RDP, `admin` / `CORP`) while an SSH 
 | SSH man-in-the-middle | Trust-on-first-use host key fingerprints; a changed key refuses to connect. |
 | Other machines using your guacd | guacd and the websocket bridge listen on `127.0.0.1` only. |
 | Shell injection | `docker` is called with `execFile` and an argument array, never a shell string. |
+| Clipboard leaking to remote hosts | Only text, and only to the remote pane you click into; the page can read the clipboard through `clipboard:read`, but the CSP leaves it nowhere to send it except localhost. |
 | A bad bulk edit | Preview with checkboxes, a confirmation, and `connections.json.bak` before every bulk edit or delete. |
 | Half-written file after a crash | Write to `.tmp`, then atomic rename. |
 

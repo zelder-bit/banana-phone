@@ -13,4 +13,6 @@ contextBridge.exposeInMainWorld('bp', {
   close: (id) => ipcRenderer.send('session:close', id),
   onData: (fn) => ipcRenderer.on('session:data', (_e, id, d) => fn(id, d)),
   onExit: (fn) => ipcRenderer.on('session:exit', (_e, id) => fn(id)),
+  clipboardRead: () => ipcRenderer.invoke('clipboard:read'),
+  clipboardWrite: (text) => ipcRenderer.send('clipboard:write', text),
 });
