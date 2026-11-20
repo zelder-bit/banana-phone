@@ -1701,7 +1701,7 @@ Data lives in `~/.config/banana-phone/`: `connections.json`, `connections.json.b
 A release is a GitHub Release page with the AppImage and `requirements.txt` attached, built by GitHub Actions rather than on anyone's machine. To make one, set `version` in `package.json`, merge to `main`, and push a tag for that version:
 
 ```bash
-git tag v0.1.1 && git push origin v0.1.1
+git tag v0.1.2 && git push origin v0.1.2
 ```
 
 `.github/workflows/release.yml` runs for any tag starting with `v`, in two jobs. The first builds the AppImage:
@@ -1729,7 +1729,7 @@ git tag v0.1.1 && git push origin v0.1.1
 ```
 
 * **Why a container.** Compiled code on Linux records the newest version of the C library (**glibc**) it was built against, and refuses to load on a system with an older one. The first release was built directly on GitHub's newest Ubuntu image, so `node-pty` demanded glibc 2.42 and the app crashed at start on Debian 13 (glibc 2.41). `container: node:24-bookworm` runs every step inside the official Node.js image for Debian 12 (glibc 2.36), so the result needs only glibc 2.34 and runs on Debian 12+, Ubuntu 22.04+ and similar. That minimum is listed in `requirements.txt`. You can check what a native module needs with `objdump -T pty.node | grep GLIBC`.
-* `$GITHUB_REF_NAME` is the tag that triggered the run, e.g. `v0.1.1`. `node -p` prints the result of a JavaScript expression, here the version from `package.json`. `[ a = b ] || { …; exit 1; }` fails the job when they differ, so a release can never be labelled with the wrong version.
+* `$GITHUB_REF_NAME` is the tag that triggered the run, e.g. `v0.1.2`. `node -p` prints the result of a JavaScript expression, here the version from `package.json`. `[ a = b ] || { …; exit 1; }` fails the job when they differ, so a release can never be labelled with the wrong version.
 * Unlike the CI workflow, this one runs `npm ci` **with** install scripts, because it needs the real native modules for the AppImage. The tests and the walkthrough check run again, so nothing that fails them is ever published.
 * `upload-artifact` hands the built file to the next job; jobs run on separate machines and share nothing otherwise.
 
