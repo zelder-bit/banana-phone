@@ -93,6 +93,28 @@ function trust(id, fp) {
   if (!saved) { hosts[id] = fp; saveHosts(hosts); }
   return saved;
 }
+// A known server now shows a different key or certificate. Ask, with Cancel as the default (Enter and
+// Esc both refuse); Trust replaces the saved fingerprint. Resolves true when trusted.
+async function confirmChanged(id, what, host, saved, fp) {
+  const { response } = await dialog.showMessageBox(win, {
+    type: 'warning',
+    title: `${host}: ${what} changed`,
+    message: `The ${what} of ${host} has changed since you last connected.`,
+    detail: 'This is expected after the server is reinstalled or its certificate is renewed. It can also mean '
+      + 'someone is impersonating the server to capture your password. Only trust it if you expected the change.'
+      + `\n\nSaved fingerprint (SHA256):\n${saved}\n\nNew fingerprint (SHA256):\n${fp}`,
+    buttons: ['Cancel', `Trust the new ${what}`],
+    defaultId: 0,
+    cancelId: 0,
+    noLink: true,
+  });
+  if (response !== 1) return false;
+  const hosts = knownHosts();
+  hosts[id] = fp;
+  saveHosts(hosts);
+  return true;
+}
+
 const sshId = (c) => `${c.host}:${c.port || 22}`;
 const rdpId = (c) => `rdp ${c.host}:${c.port || 3389}`;
 
@@ -139,16 +161,18 @@ function openSsh(id, conn, cols, rows) {
     password: privateKey ? undefined : password || undefined, privateKey, passphrase: privateKey ? password || undefined : undefined,
     agent: process.env.SSH_AUTH_SOCK, tryKeyboard: !privateKey, readyTimeout: 20000,
     hostHash: 'sha256',
-    // Trust on first use; refuse if a known host's key changes.
-    hostVerifier: (fp) => {
+    // Trust on first use; if a known host's key changes, ask. ssh2 waits until verify() is called.
+    hostVerifier: (fp, verify) => {
       let saved;
-      try { saved = trust(hostId, fp); } catch (e) { out(`\x1b[31m${e.message}\x1b[0m\r\n`); return false; }
+      try { saved = trust(hostId, fp); } catch (e) { out(`\x1b[31m${e.message}\x1b[0m\r\n`); return verify(false); }
       if (!saved) out(`\x1b[33mNew host key for ${hostId} saved (SHA256 ${fp}).\x1b[0m\r\n`);
-      else if (saved !== fp) {
-        out(`\x1b[31mHOST KEY CHANGED for ${hostId}! Refusing to connect.\r\nExpected ${saved}, got ${fp}.\r\nIf this is expected, right-click the connection and choose "Forget saved key".\x1b[0m\r\n`);
-        return false;
-      }
-      return true;
+      if (!saved || saved === fp) return verify(true);
+      out(`\x1b[31mThe host key of ${hostId} has CHANGED.\r\nSaved ${saved}\r\nNow   ${fp}\x1b[0m\r\n`
+        + 'Waiting for your answer in the dialog. After 20 seconds the connection gives up, but a key you trust is still saved: open it again.\r\n');
+      confirmChanged(hostId, 'host key', hostId, saved, fp).then((ok) => {
+        out(ok ? '\x1b[33mTrusted the new host key.\x1b[0m\r\n' : '\x1b[31mNot trusted: connection refused.\x1b[0m\r\n');
+        try { verify(ok); } catch {} // the connection may have timed out or been closed meanwhile
+      }, () => { try { verify(false); } catch {} });
     },
   });
   return {
@@ -185,10 +209,11 @@ ipcMain.handle('session:open', async (_e, connId, cols = 80, rows = 24) => {
     const cert = await guacd.rdpFingerprint(conn.host, conn.port || 3389);
     const fp = cert.fingerprint;
     const saved = trust(rdpId(conn), fp);
-    if (saved && saved !== fp) {
-      throw new Error(`The certificate of ${conn.host} has CHANGED, so banana-phone refused to connect: this can mean someone is impersonating the server. Expected SHA256 ${saved}, got ${fp}. If the certificate was renewed or the server reinstalled, right-click the connection and choose "Forget saved key".`);
+    if (saved && saved !== fp && !(await confirmChanged(rdpId(conn), 'certificate', `${conn.host}:${conn.port || 3389}`, saved, fp))) {
+      throw new Error(`The certificate of ${conn.host} has changed and was not trusted, so banana-phone did not connect. Expected SHA256 ${saved}, got ${fp}.`);
     }
-    const notice = saved ? undefined : `Saved the certificate of ${conn.host}: SHA256 ${fp}`;
+    const notice = !saved ? `Saved the certificate of ${conn.host}: SHA256 ${fp}`
+      : saved !== fp ? `Trusted the new certificate of ${conn.host}: SHA256 ${fp}` : undefined;
     return { kind: 'remote', url: await guacd.openRemote(conn, dec(conn.password), cert), notice };
   }
   if (conn.protocol === 'vnc') {

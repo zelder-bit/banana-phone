@@ -477,7 +477,7 @@ Connecting:
     password: privateKey ? undefined : password || undefined, privateKey, passphrase: privateKey ? password || undefined : undefined,
     agent: process.env.SSH_AUTH_SOCK, tryKeyboard: !privateKey, readyTimeout: 20000,
     hostHash: 'sha256',
-    hostVerifier: (fp) => { … },
+    hostVerifier: (fp, verify) => { … },
   });
 ```
 
@@ -510,21 +510,42 @@ function trust(id, fp) {
 ```
 
 ```js
-    hostVerifier: (fp) => {
+    hostVerifier: (fp, verify) => {
       let saved;
-      try { saved = trust(hostId, fp); } catch (e) { out(`\x1b[31m${e.message}\x1b[0m\r\n`); return false; }
+      try { saved = trust(hostId, fp); } catch (e) { out(`\x1b[31m${e.message}\x1b[0m\r\n`); return verify(false); }
       if (!saved) out(`\x1b[33mNew host key for ${hostId} saved (SHA256 ${fp}).\x1b[0m\r\n`);
-      else if (saved !== fp) {
-        out(`\x1b[31mHOST KEY CHANGED for ${hostId}! Refusing to connect.\r\nExpected ${saved}, got ${fp}.\r\nIf this is expected, right-click the connection and choose "Forget saved key".\x1b[0m\r\n`);
-        return false;
-      }
-      return true;
-    },
+      if (!saved || saved === fp) return verify(true);
 ```
 
-If `known_hosts.json` exists but cannot be read (half-written, hand-edited into broken JSON), `knownHosts` refuses instead of pretending no server was ever seen, which would quietly trust impostors; saving reuses `store.save`, so the file is written to a temporary file and renamed, never half-written. `trust` returns what was saved *before* the call. `undefined` (falsy) means the host was never seen: its fingerprint is saved now and the connection continues. Equal to `fp`: same server as last time. Anything else: a different key, possibly an impostor, so refuse. `fp` is a SHA-256 fingerprint of the server's public key; if someone ever intercepts the connection, their key will differ.
+```js
+      confirmChanged(hostId, 'host key', hostId, saved, fp).then((ok) => {
+        out(ok ? '\x1b[33mTrusted the new host key.\x1b[0m\r\n' : '\x1b[31mNot trusted: connection refused.\x1b[0m\r\n');
+        try { verify(ok); } catch {} // the connection may have timed out or been closed meanwhile
+      }, () => { try { verify(false); } catch {} });
+```
 
-Fingerprints live in `~/.config/banana-phone/known_hosts.json`. When a server is legitimately reinstalled, right-click its connection and choose **Forget saved key**; the next connection saves the new one:
+If `known_hosts.json` exists but cannot be read (half-written, hand-edited into broken JSON), `knownHosts` refuses instead of pretending no server was ever seen, which would quietly trust impostors; saving reuses `store.save`, so the file is written to a temporary file and renamed, never half-written. `trust` returns what was saved *before* the call. `undefined` (falsy) means the host was never seen: its fingerprint is saved now and the connection continues. Equal to `fp`: same server as last time. Anything else: a different key. `fp` is a SHA-256 fingerprint of the server's public key; if someone ever intercepts the connection, their key will differ.
+
+A changed key is legitimate after a server is reinstalled, and suspicious otherwise, and only you can tell which. So banana-phone **asks**:
+
+```js
+async function confirmChanged(id, what, host, saved, fp) {
+  const { response } = await dialog.showMessageBox(win, {
+```
+
+```js
+    buttons: ['Cancel', `Trust the new ${what}`],
+    defaultId: 0,
+    cancelId: 0,
+```
+
+* `dialog.showMessageBox` shows a native warning dialog over the window, with both fingerprints. It returns a Promise of `{ response }`, the index of the button you pressed.
+* `defaultId: 0` makes **Cancel** the button Enter presses, and `cancelId: 0` is what Esc or closing the dialog counts as. Refusing is therefore the default, and trusting takes a deliberate click. Only then is the new fingerprint saved over the old one.
+* `const { response } = await …` waits for your answer and **destructures** the `response` property out of the result object.
+
+`ssh2` lets the check take its time. A `hostVerifier` that takes a second parameter, `verify`, may answer later by calling `verify(true)` or `verify(false)`, and the handshake waits until then. `.then(onOk, onError)` runs the first function with the dialog's answer, or the second if showing the dialog failed, which also refuses. The handshake still has an overall limit, `readyTimeout` (20 seconds, which also covers reaching the server at all). If you take longer to answer, that session ends, but a key you trust is still saved, so opening the connection again goes straight through. `try { verify(ok); } catch {}` is there because ssh2 throws if it is answered after it gave up.
+
+Fingerprints live in `~/.config/banana-phone/known_hosts.json`. To make banana-phone forget a server without connecting, right-click its connection and choose **Forget saved key**; the next connection saves whatever key it sees:
 
 ```js
 ipcMain.handle('store:forgetHost', (_e, connId) => {
@@ -594,10 +615,11 @@ ipcMain.handle('session:open', async (_e, connId, cols = 80, rows = 24) => {
     const cert = await guacd.rdpFingerprint(conn.host, conn.port || 3389);
     const fp = cert.fingerprint;
     const saved = trust(rdpId(conn), fp);
-    if (saved && saved !== fp) {
-      throw new Error(`The certificate of ${conn.host} has CHANGED, so banana-phone refused to connect: …`);
+    if (saved && saved !== fp && !(await confirmChanged(rdpId(conn), 'certificate', `${conn.host}:${conn.port || 3389}`, saved, fp))) {
+      throw new Error(`The certificate of ${conn.host} has changed and was not trusted, so banana-phone did not connect. Expected SHA256 ${saved}, got ${fp}.`);
     }
-    const notice = saved ? undefined : `Saved the certificate of ${conn.host}: SHA256 ${fp}`;
+    const notice = !saved ? `Saved the certificate of ${conn.host}: SHA256 ${fp}`
+      : saved !== fp ? `Trusted the new certificate of ${conn.host}: SHA256 ${fp}` : undefined;
     return { kind: 'remote', url: await guacd.openRemote(conn, dec(conn.password), cert), notice };
   }
   if (conn.protocol === 'vnc') {
@@ -611,7 +633,7 @@ ipcMain.handle('session:open', async (_e, connId, cols = 80, rows = 24) => {
 
 * `async` makes the function return a **Promise** and lets it use `await`, which pauses this function (not the whole app) until another Promise settles. `guacd.openRemote` may need to start a Docker container, which takes a while.
 * `throw new Error(...)` inside a `handle` rejects the Promise on the page side, where `connect()` catches it and shows the message in the pane.
-* **RDP server identity** works like SSH host keys: the certificate's fingerprint is saved the first time and must match afterwards. A changed certificate stops the connection with an explanation in the pane; a new one is announced with a `notice` carrying the full fingerprint, which the page shows as a toast for 12 seconds so you can compare it with the one the server's administrator sees. See [`rdpFingerprint`](#checking-the-rdp-servers-identity) for how the certificate is fetched.
+* **RDP server identity** works like SSH host keys: the certificate's fingerprint is saved the first time and must match afterwards. A changed certificate opens a warning dialog with both fingerprints: Cancel (the default) stops the connection with an explanation in the pane, and Trust saves the new one and connects. A newly saved or newly trusted certificate is announced with a `notice` carrying the full fingerprint, which the page shows as a toast for 12 seconds so you can compare it with the one the server's administrator sees. See [`rdpFingerprint`](#checking-the-rdp-servers-identity) for how the certificate is fetched.
 * VNC has no certificate to check: guacd's VNC support has no TLS, so VNC is best kept on trusted networks or inside a VPN.
 * The page only ever sends a connection **id**. It cannot ask main to connect to an arbitrary host with stored credentials.
 
@@ -1484,8 +1506,8 @@ You hold **Shift** and double-click `dc01` (RDP, `admin` / `CORP`) while an SSH 
 | Page compromised by injected HTML | No user data is ever written with `innerHTML`; a strict Content-Security-Policy blocks outside scripts and connections. |
 | Page doing more than it should | `contextIsolation` + `sandbox`; only the functions in `preload.js` exist. The page asks for sessions by **id**, never by host + password. |
 | Passwords visible to the page | Never sent. Remote desktop credentials go into an AES token encrypted with a per-launch key. |
-| SSH man-in-the-middle | Trust-on-first-use host key fingerprints; a changed key refuses to connect. |
-| RDP server impersonation | The certificate fingerprint is saved on first use and pinned in guacd (`cert-fingerprints`); a changed certificate refuses to connect. guacd is told to use exactly the TLS or NLA security seen during the check, so an impostor cannot fall back to legacy RDP; servers offering only legacy RDP security are refused. |
+| SSH man-in-the-middle | Trust-on-first-use host key fingerprints; a changed key is only accepted after you confirm it in a warning dialog that defaults to Cancel. |
+| RDP server impersonation | The certificate fingerprint is saved on first use and pinned in guacd (`cert-fingerprints`); a changed certificate is only accepted after you confirm it, and the newly trusted one is pinned instead. guacd is told to use exactly the TLS or NLA security seen during the check, so an impostor cannot fall back to legacy RDP; servers offering only legacy RDP security are refused. |
 | Other machines using your guacd | guacd and the websocket bridge listen on `127.0.0.1` only. |
 | Shell injection | `docker` is called with `execFile` and an argument array, never a shell string. |
 | Clipboard leaking to remote hosts | Only text, and only to the remote pane you click into; the page can read the clipboard through `clipboard:read`, but the CSP leaves it nowhere to send it except localhost. |
