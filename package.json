@@ -9,7 +9,7 @@
     "start": "electron .",
     "test": "node --test",
     "postinstall": "electron-builder install-app-deps",
-    "dist": "electron-builder --linux AppImage",
+    "dist": "electron-builder --linux AppImage --publish never",
     "check:walkthrough": "node scripts/check-walkthrough.js"
   },
   "build": {
@@ -47,9 +47,9 @@
   },
   "allowScripts": {
     "node-pty@1.1.0": true,
-    "cpu-features": false,
     "ssh2": false,
-    "electron-winstaller": false
+    "electron-winstaller": false,
+    "cpu-features@0.0.10": true
   },
   "desktopName": "banana-phone.desktop"
 }

@@ -1,0 +1,30 @@
+banana-phone: what a machine needs to run the AppImage
+=======================================================
+
+The AppImage contains the app itself (Electron, Node, the terminal libraries).
+The machine running it still needs:
+
+Always
+  - 64-bit x86 Linux (built for x64 only, not ARM)
+  - The file made executable:  chmod +x banana-phone-*.AppImage
+  - FUSE 2:  libfuse2t64 (Debian 13, Ubuntu 24.04+) or libfuse2 (older releases)
+      without it, run:  APPIMAGE_EXTRACT_AND_RUN=1 ./banana-phone-*.AppImage
+
+For RDP and VNC connections
+  - Docker, with your user in the "docker" group
+  - Internet access on the first RDP/VNC connection, to download the
+    guacamole/guacd:1.6.0 image (about 100 MB); it is cached afterwards
+  (SSH and local terminals work without Docker)
+
+For saved passwords
+  - A system keyring: GNOME Keyring or KWallet
+      without one, passwords are only obfuscated and the app shows a warning
+
+Good to know
+  - Connections are stored per machine in ~/.config/banana-phone/connections.json.
+    The file can be copied to another machine, but saved passwords will not
+    decrypt there (they are locked to the original machine's keyring);
+    re-enter them, e.g. with Bulk edit by username or folder.
+  - Ubuntu 23.10 and newer: AppArmor may stop Electron AppImages from starting
+    with a "SUID sandbox helper" error; start it with --no-sandbox to work around it.
+  - Tested on Debian 13.

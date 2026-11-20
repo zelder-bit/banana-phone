@@ -10,18 +10,16 @@ npm run dist       # build dist/banana-phone-<version>.AppImage
 
 ## Running the AppImage on another machine
 
-Only the AppImage file is needed: Electron, Node and the terminal libraries are inside it. The machine still needs:
+Download `banana-phone-<version>.AppImage` from the [latest release](https://github.com/zelder-bit/banana-phone/releases/latest), or build it with `npm run dist`. Only that file is needed, but the machine needs FUSE 2, Docker for RDP/VNC, and a keyring for saved passwords: see [requirements.txt](requirements.txt) for the full list.
 
-| Need | For | Notes |
-| --- | --- | --- |
-| 64-bit x86 Linux | everything | built for x64 only, not ARM |
-| `chmod +x banana-phone-*.AppImage` | everything | |
-| FUSE 2 | everything | `libfuse2t64` (Debian 13, Ubuntu 24.04+) or `libfuse2` (older). Without it: `APPIMAGE_EXTRACT_AND_RUN=1 ./banana-phone-*.AppImage` |
-| Docker, with your user in the `docker` group | RDP and VNC | the first RDP/VNC connection downloads `guacamole/guacd` (about 100 MB, needs internet); SSH and local terminals work without Docker |
-| A system keyring (GNOME Keyring or KWallet) | saved passwords | without one, passwords are only obfuscated and the app shows a warning |
+## Releasing
 
-Connections are stored per machine in `~/.config/banana-phone/connections.json`. You can copy that file to another machine, but saved passwords will not decrypt there because they are locked to the original machine's keyring; re-enter them (bulk edit by username or folder makes that quick).
+Bump `version` in `package.json`, merge to `main`, then tag that commit:
 
-On Ubuntu 23.10 and newer, AppArmor may stop Electron AppImages from starting with a "SUID sandbox helper" error; starting it with `--no-sandbox` works around it. Only Debian 13 has been tested so far.
+```bash
+git tag v0.1.0 && git push origin v0.1.0
+```
+
+The Release workflow runs the tests and the walkthrough check, builds the AppImage, and publishes a GitHub release with the AppImage and `requirements.txt` attached. The tag must match the version in `package.json`.
 
 How it all works, file by file: [WALKTHROUGH.md](WALKTHROUGH.md).
