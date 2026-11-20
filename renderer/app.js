@@ -1,6 +1,7 @@
 import { Terminal } from '../node_modules/@xterm/xterm/lib/xterm.mjs';
 import { FitAddon } from '../node_modules/@xterm/addon-fit/lib/addon-fit.mjs';
 import Guacamole from '../node_modules/guacamole-common-js/dist/esm/guacamole-common.js';
+import { shareClipboard, clean } from './clipboard.js';
 
 const $ = (s) => document.querySelector(s);
 const el = (tag, props = {}, ...kids) => {
@@ -524,6 +525,14 @@ async function openTerm(p, c) {
   p.sid = res.id;
   terms.set(p.sid, p);
   term.onData((d) => window.bp.write(p.sid, d));
+  // Ctrl+Shift+C / Ctrl+Shift+V, as in most Linux terminals (plain Ctrl+C must stay "interrupt").
+  term.attachCustomKeyEventHandler((e) => {
+    if (e.type !== 'keydown' || !e.ctrlKey || !e.shiftKey) return true;
+    const k = e.key.toLowerCase();
+    if (k === 'c' && term.hasSelection()) { window.bp.clipboardWrite(term.getSelection()); return false; }
+    if (k === 'v') { e.preventDefault(); window.bp.clipboardRead().then((t) => t && term.paste(clean(t))); return false; }
+    return true;
+  });
   term.onResize(({ cols, rows }) => window.bp.resize(p.sid, cols, rows));
   const ro = new ResizeObserver(() => { if (box.offsetWidth) fit.fit(); });
   ro.observe(box);
@@ -569,8 +578,9 @@ async function openRemote(p, c) {
   ro.observe(p.body);
   display.onresize = fitDisplay;
 
+  const clip = shareClipboard(client, p.body, window.bp);
   client.onstatechange = (s) => {
-    if (s === 3) status(p, null); // CONNECTED
+    if (s === 3) { status(p, null); clip.onConnected(); } // CONNECTED
     if (s === 5 && !p.closed && !p.failed) status(p, 'Disconnected', true);
   };
   client.onerror = (e) => { p.failed = true; status(p, `${c.host}: ${e.message || 'connection error'}`, true); };

@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, safeStorage, Menu, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, safeStorage, Menu, dialog, clipboard } = require('electron');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -162,6 +162,11 @@ ipcMain.handle('session:open', async (_e, connId, cols = 80, rows = 24) => {
 ipcMain.on('session:write', (_e, id, d) => sessions.get(id)?.write(d));
 ipcMain.on('session:resize', (_e, id, c, r) => sessions.get(id)?.resize(c, r));
 ipcMain.on('session:close', (_e, id) => sessions.get(id)?.close());
+
+// ---- clipboard (text only, shared with remote desktops) ----------------------
+
+ipcMain.handle('clipboard:read', () => clipboard.readText());
+ipcMain.on('clipboard:write', (_e, text) => { if (typeof text === 'string') clipboard.writeText(text); });
 
 // ---- app --------------------------------------------------------------------
 
