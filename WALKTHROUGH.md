@@ -455,24 +455,58 @@ Connecting:
 ```js
     catch (e) { throw new Error(`Could not read key ${conn.keyPath}: ${e.message}`); }
 ```
-* `hostVerifier` implements **trust on first use** (the same idea as `~/.ssh/known_hosts`):
+* `hostVerifier` implements **trust on first use** (the same idea as `~/.ssh/known_hosts`). The bookkeeping is shared with RDP certificates (see [Opening a session](#opening-a-session)):
+
+```js
+// An unreadable file must not count as "no hosts known": that would silently re-trust every server.
+function knownHosts() {
+  try { return JSON.parse(fs.readFileSync(HOSTS, 'utf8')); }
+  catch (e) {
+    if (e.code === 'ENOENT') return {};
+    throw new Error(`${HOSTS} is unreadable (${e.message}); fix or delete it to trust servers anew`);
+  }
+}
+const saveHosts = (hosts) => store.save(HOSTS, hosts); // atomic write, mode 600
+
+function trust(id, fp) {
+  const hosts = knownHosts();
+  const saved = hosts[id];
+  if (!saved) { hosts[id] = fp; saveHosts(hosts); }
+  return saved;
+}
+```
 
 ```js
     hostVerifier: (fp) => {
-      const hosts = knownHosts();
-      if (!hosts[hostId]) {
-        hosts[hostId] = fp;
-        fs.writeFileSync(HOSTS, JSON.stringify(hosts, null, 2), { mode: 0o600 });
-        out(`New host key for ${hostId} saved …`);
-        return true;
+      let saved;
+      try { saved = trust(hostId, fp); } catch (e) { out(`\x1b[31m${e.message}\x1b[0m\r\n`); return false; }
+      if (!saved) out(`\x1b[33mNew host key for ${hostId} saved (SHA256 ${fp}).\x1b[0m\r\n`);
+      else if (saved !== fp) {
+        out(`\x1b[31mHOST KEY CHANGED for ${hostId}! Refusing to connect.\r\nExpected ${saved}, got ${fp}.\r\nIf this is expected, right-click the connection and choose "Forget saved key".\x1b[0m\r\n`);
+        return false;
       }
-      if (hosts[hostId] === fp) return true;
-      out(`HOST KEY CHANGED for ${hostId}! Refusing to connect. …`);
-      return false;
+      return true;
     },
 ```
 
-Never seen the host: remember its key and continue. Same key as last time: fine. A different key: possibly an impostor, so refuse. `fp` is a SHA-256 fingerprint of the server's public key. If someone ever intercepts the connection, their key will differ and the connection is refused. Fingerprints live in `~/.config/banana-phone/known_hosts.json`; delete a line there if a server was legitimately reinstalled.
+If `known_hosts.json` exists but cannot be read (half-written, hand-edited into broken JSON), `knownHosts` refuses instead of pretending no server was ever seen, which would quietly trust impostors; saving reuses `store.save`, so the file is written to a temporary file and renamed, never half-written. `trust` returns what was saved *before* the call. `undefined` (falsy) means the host was never seen: its fingerprint is saved now and the connection continues. Equal to `fp`: same server as last time. Anything else: a different key, possibly an impostor, so refuse. `fp` is a SHA-256 fingerprint of the server's public key; if someone ever intercepts the connection, their key will differ.
+
+Fingerprints live in `~/.config/banana-phone/known_hosts.json`. When a server is legitimately reinstalled, right-click its connection and choose **Forget saved key**; the next connection saves the new one:
+
+```js
+ipcMain.handle('store:forgetHost', (_e, connId) => {
+  const c = data.connections.find((x) => x.id === connId);
+  if (!c) return false;
+  const hosts = knownHosts();
+  const id = c.protocol === 'rdp' ? rdpId(c) : sshId(c);
+  if (!(id in hosts)) return false;
+  delete hosts[id];
+  saveHosts(hosts);
+  return true;
+});
+```
+
+`id in hosts` is `true` if the object has that key (`!(…)` negates it, so nothing is rewritten when there was nothing to forget). `delete hosts[id]` removes it. SSH entries are stored as `host:port` and RDP ones as `rdp host:port`, so one server can have both.
 
 Finally `openSsh` returns the common session shape:
 
@@ -521,7 +555,19 @@ A plain child process (`child_process.spawn`) would not work for an interactive 
 ipcMain.handle('session:open', async (_e, connId, cols = 80, rows = 24) => {
   const conn = connId === 'local' ? { protocol: 'local' } : data.connections.find((c) => c.id === connId);
   if (!conn) throw new Error('Connection not found');
-  if (conn.protocol === 'rdp' || conn.protocol === 'vnc') {
+  if (conn.protocol === 'rdp') {
+    // Check the server's identity ourselves first (clear errors, trust on first use);
+    // guacd then accepts only that exact certificate on its own connection.
+    const cert = await guacd.rdpFingerprint(conn.host, conn.port || 3389);
+    const fp = cert.fingerprint;
+    const saved = trust(rdpId(conn), fp);
+    if (saved && saved !== fp) {
+      throw new Error(`The certificate of ${conn.host} has CHANGED, so banana-phone refused to connect: …`);
+    }
+    const notice = saved ? undefined : `Saved the certificate of ${conn.host}: SHA256 ${fp}`;
+    return { kind: 'remote', url: await guacd.openRemote(conn, dec(conn.password), cert), notice };
+  }
+  if (conn.protocol === 'vnc') {
     return { kind: 'remote', url: await guacd.openRemote(conn, dec(conn.password)) };
   }
   const id = crypto.randomUUID();
@@ -532,6 +578,8 @@ ipcMain.handle('session:open', async (_e, connId, cols = 80, rows = 24) => {
 
 * `async` makes the function return a **Promise** and lets it use `await`, which pauses this function (not the whole app) until another Promise settles. `guacd.openRemote` may need to start a Docker container, which takes a while.
 * `throw new Error(...)` inside a `handle` rejects the Promise on the page side, where `connect()` catches it and shows the message in the pane.
+* **RDP server identity** works like SSH host keys: the certificate's fingerprint is saved the first time and must match afterwards. A changed certificate stops the connection with an explanation in the pane; a new one is announced with a `notice` carrying the full fingerprint, which the page shows as a toast for 12 seconds so you can compare it with the one the server's administrator sees. See [`rdpFingerprint`](#checking-the-rdp-servers-identity) for how the certificate is fetched.
+* VNC has no certificate to check: guacd's VNC support has no TLS, so VNC is best kept on trusted networks or inside a VPN.
 * The page only ever sends a connection **id**. It cannot ask main to connect to an arbitrary host with stored credentials.
 
 ### Creating the window
@@ -604,6 +652,7 @@ The full list of channels:
 | `store:folder` | invoke | add an empty folder, or remove one that is empty |
 | `store:bulkPreview` | invoke | which connections a bulk edit would touch |
 | `store:bulkApply` | invoke | apply a bulk edit (writes a timestamped backup first) |
+| `store:forgetHost` | invoke | forget a connection's saved SSH host key or RDP certificate |
 | `session:open` | invoke | start a terminal (returns a session id) or a remote desktop (returns a websocket URL) |
 | `session:write` | send | keystrokes into a terminal |
 | `session:resize` | send | new terminal size in columns and rows |
@@ -629,7 +678,7 @@ Drawing a Windows desktop inside a web page is a hard problem that the **Apache 
 
 ```js
 const NAME = 'banana-phone-guacd';
-const IMAGE = 'guacamole/guacd:1.5.5';
+const IMAGE = 'guacamole/guacd:1.6.0'; // 1.6 adds cert-fingerprints; still serves guacamole-common-js 1.5 clients
 
 const docker = (args) => new Promise((resolve, reject) =>
   execFile('docker', args, { timeout: 300000 }, (err, stdout, stderr) =>
@@ -645,8 +694,9 @@ let starting;
 let startedHere = false; // only stop a guacd this launch created
 function ensureGuacd() {
   return (starting ||= (async () => {
-    const running = await docker(['inspect', '-f', '{{.State.Running}}', NAME]).catch(() => 'false');
-    if (running !== 'true') {
+    // Reuse a running container only if it is the image this version expects.
+    const running = await docker(['inspect', '-f', '{{.State.Running}} {{.Config.Image}}', NAME]).catch(() => '');
+    if (running !== `true ${IMAGE}`) {
       await docker(['rm', '-f', NAME]).catch(() => {});
       await docker(['run', '-d', '--rm', '--name', NAME, '-p', `127.0.0.1:${GUACD_PORT}:4822`, IMAGE]);
       startedHere = true;
@@ -662,6 +712,7 @@ function ensureGuacd() {
 
 * `starting ||= (…)` is **logical OR assignment**: only assign if `starting` is currently falsy. If you open four RDP panes at once, all four share the *same* start-up Promise instead of racing to start four containers.
 * `(async () => { … })()` defines an async arrow function and immediately calls it (an *IIFE*: immediately invoked function expression).
+* `docker inspect -f` prints fields of the container using a Go template: here whether it is running and which image it came from, e.g. `true guacamole/guacd:1.6.0`. A container left over from an older banana-phone (an older guacd that cannot pin certificates) is replaced instead of reused.
 * `-p 127.0.0.1:4822:4822` publishes guacd's port **only on localhost**, so other machines on your network cannot use your guacd.
 * `--rm` deletes the container when it stops; nothing is left behind.
 * The loop polls up to 10 s (50 × 200 ms) for the port to accept connections.
@@ -711,12 +762,66 @@ function encryptToken(obj) {
 ```
 
 * **AES-256-CBC** is a standard cipher. The 32-byte `key` is generated fresh on every launch, so tokens are useless after you quit. The `iv` (initialisation vector) is 16 random bytes that make every token different even for the same input.
-* guacamole-lite's own decryption reads the plaintext as ASCII, which would garble a password like `pässword`. JSON allows any character to be written as `\uXXXX`, so we escape everything outside plain ASCII first. `[\u007f-￿]` is a regex character range; `charCodeAt(0).toString(16)` gives the character's number in hexadecimal; `padStart(4, '0')` pads it to 4 digits. `guacd.test.js` checks that `pässwörd€` survives the round trip.
+* guacamole-lite's own decryption reads the plaintext as ASCII, which would garble a password like `pässword`. JSON allows any character to be written as `\uXXXX`, so we escape everything outside plain ASCII first. `[\u007f-\uffff]` is a regex character range; `charCodeAt(0).toString(16)` gives the character's number in hexadecimal; `padStart(4, '0')` pads it to 4 digits. `guacd.test.js` checks that `pässwörd€` survives the round trip.
+
+### Checking the RDP server's identity
+
+Every RDP connection starts the same way: the client sends a short binary *Connection Request* saying which security it supports, the server answers which one it picked, and if that is TLS (or NLA, which runs inside TLS) both sides switch to TLS. The server's TLS certificate is its identity. `rdpFingerprint` performs just that opening and reads the certificate, without logging in:
+
+```js
+function rdpFingerprint(host, port) {
+  return new Promise((resolve, reject) => {
+    const sock = net.connect(port, host);
+    const fail = (msg) => { sock.destroy(); reject(new Error(msg)); }; // no-op once resolved
+    sock.setTimeout(10000, () => fail(`${host}:${port} did not answer in time`)); // idle timer, covers the TLS handshake too
+    sock.once('error', (e) => fail(`${host}:${port}: ${e.message}`));
+    sock.once('close', () => fail(`${host}:${port} closed the connection`));
+    // TPKT header (4 bytes) + X.224 Connection Request (7) + RDP_NEG_REQ (8) asking for TLS (1) or NLA (2)
+    sock.write(Buffer.from([3, 0, 0, 19, 14, 0xe0, 0, 0, 0, 0, 0, 1, 0, 8, 0, 3, 0, 0, 0]));
+    let buf = Buffer.alloc(0);
+    sock.on('data', function onData(d) {
+      buf = Buffer.concat([buf, d]);
+      if (buf[0] !== 3) return fail(`${host}:${port} does not look like an RDP server`); // TPKT version is always 3
+      if (buf.length < 4 || buf.length < buf.readUInt16BE(2)) return; // TPKT length says more is coming
+      sock.off('data', onData);
+      // byte 11: 2 = RDP_NEG_RSP, 3 = RDP_NEG_FAILURE; bytes 15-18: the protocol picked (or failure code)
+      if (buf.length >= 19 && buf[11] === 3) return fail(`${host} refused TLS and NLA (failure code ${buf.readUInt32LE(15)})`);
+      const selected = buf.length >= 19 && buf[11] === 2 ? buf.readUInt32LE(15) : 0;
+      if ((selected & 3) === 0) return fail(`${host} only offers legacy RDP security, so its identity cannot be checked`);
+      const t = tls.connect({ socket: sock, rejectUnauthorized: false }, () => {
+        const fingerprint = t.getPeerCertificate().fingerprint256;
+        t.destroy();
+        fingerprint ? resolve({ fingerprint, nla: (selected & 2) !== 0 }) : reject(new Error(`${host} sent no certificate`));
+      });
+      t.once('error', (e) => fail(`${host}: TLS failed: ${e.message}`));
+    });
+  });
+}
+```
+
+* `Buffer.from([3, 0, 0, 19, …])` builds raw bytes. `3, 0` starts a **TPKT** packet and `0, 19` is its total length (19 bytes) as a 16-bit big-endian number. `14, 0xe0` is an X.224 *Connection Request*. `1, 0, 8, 0` starts an RDP negotiation request of 8 bytes, and `3, 0, 0, 0` is a 32-bit little-endian bit mask: `1` (TLS) + `2` (NLA) = `3`.
+* TCP delivers a stream, not messages, so the reply may arrive in pieces. `buf` collects them until it holds as many bytes as the TPKT header announced (`readUInt16BE(2)`: a big-endian 16-bit number starting at byte 2).
+* `fail` destroys the socket and rejects. A Promise can settle only once, so a `fail` after `resolve` (for example the `close` that follows `t.destroy()`) does nothing. Listening for `close` matters: a server that simply hangs up sends no error, and without it the pane would say "Connecting…" forever. The idle timeout stays on for the TLS handshake, so a server that stalls there is caught too.
+* `buf[0] !== 3` fails fast when something other than RDP answers on the port (an SSH server, say), instead of waiting for the timeout.
+* `& 3` is a **bitwise AND**: it keeps only the TLS and NLA bits of the protocol the server picked. Zero means the server will only talk legacy RDP encryption, which has no certificate, so there is no identity to check and the connection is refused.
+* `tls.connect({ socket: sock, … })` upgrades the existing TCP connection to TLS. `rejectUnauthorized: false` is deliberate here: Windows servers usually have self-signed certificates that no certificate authority vouches for. Trust comes from the fingerprint matching what was seen before, not from an authority.
+* `nla: (selected & 2) !== 0` records whether the server chose NLA (bit 2) or plain TLS (bit 1).
+* `fingerprint256` is the SHA-256 hash of the certificate, written as hex pairs separated by colons (`07:34:83:…`).
+
+The app then hands both results to guacd, so that FreeRDP (the RDP library inside guacd) accepts **exactly** that certificate, over exactly that kind of security, on its own connection:
+
+```js
+      security: cert.nla ? 'nla' : 'tls',
+      // Accept exactly this certificate, self-signed or not; anything else is refused by FreeRDP in guacd.
+      'cert-fingerprints': `sha256:${cert.fingerprint}`,
+```
+
+Both halves are needed. An impostor sitting between you and the server could let the app's check through to the real server, then answer guacd's connection a moment later with its own certificate (refused by `cert-fingerprints`) or with legacy RDP security, which has no certificate at all and would skip the fingerprint check. Telling guacd to use `tls` or `nla` rather than `any` closes that second door: the server must speak TLS, so it must show the pinned certificate. Both attacks were reproduced with a fake server; guacd logs `Certificate validation failed` and `Security negotiation failed` respectively.
 
 ### Building the connection
 
 ```js
-async function openRemote(conn, password) {
+async function openRemote(conn, password, cert) {
   if (starting && !(await portOpen())) starting = null; // container died or Docker restarted: start again
   await ensureGuacd();
   const port = await ensureBridge();
@@ -724,8 +829,11 @@ async function openRemote(conn, password) {
   if (conn.protocol === 'rdp') {
     Object.assign(settings, {
       username: conn.username || '', domain: conn.domain || '',
-      security: 'any',
-      'ignore-cert': 'true',
+      // Exactly the security the server picked when checked: never 'any', which would let an
+      // impostor fall back to legacy RDP (no certificate) and slip past the pinned fingerprint.
+      security: cert.nla ? 'nla' : 'tls',
+      // Accept exactly this certificate, self-signed or not; anything else is refused by FreeRDP in guacd.
+      'cert-fingerprints': `sha256:${cert.fingerprint}`,
       'resize-method': 'display-update',
     });
   } else if (conn.username) settings.username = conn.username;
@@ -734,8 +842,8 @@ async function openRemote(conn, password) {
 }
 ```
 
-* For **Active Directory**, RDP sends `username` + `domain` + `password` (the equivalent of typing `CORP\admin` at a Windows login). `security: 'any'` lets guacd negotiate NLA, TLS or plain RDP with the server.
-* `ignore-cert` accepts the server's TLS certificate without checking it. Domain-joined servers usually have self-signed or internal-CA certificates, so this is the practical default; it is marked as a `shortcut:` in the code.
+* For **Active Directory**, RDP sends `username` + `domain` + `password` (the equivalent of typing `CORP\admin` at a Windows login). `security` is NLA or TLS, whichever the server chose during the identity check (see above).
+* `cert-fingerprints` pins the certificate checked above, as explained in the previous section.
 * `resize-method: display-update` lets the remote desktop change resolution live when you resize a pane or switch from one pane to a 2×2 grid.
 * `Object.assign(target, source)` copies `source`'s properties onto `target`.
 * `encodeURIComponent` makes the token safe to put in a URL (escaping `+`, `/`, `=`).
@@ -1047,7 +1155,8 @@ The loop for a terminal is:
 ```js
 async function openRemote(p, c) {
   status(p, `Connecting to ${c.host}…`);
-  const url = (await window.bp.open(c.id)).url;
+  const { url, notice } = await window.bp.open(c.id);
+  if (notice) toast(notice, 12000); // long enough to compare the fingerprint
   if (p.closed) return; // pane closed while guacd was starting
   const [base, query] = url.split('?');
   const client = new Guacamole.Client(new Guacamole.WebSocketTunnel(base));
@@ -1225,13 +1334,14 @@ You hold **Shift** and double-click `dc01` (RDP, `admin` / `CORP`) while an SSH 
 | Page doing more than it should | `contextIsolation` + `sandbox`; only the functions in `preload.js` exist. The page asks for sessions by **id**, never by host + password. |
 | Passwords visible to the page | Never sent. Remote desktop credentials go into an AES token encrypted with a per-launch key. |
 | SSH man-in-the-middle | Trust-on-first-use host key fingerprints; a changed key refuses to connect. |
+| RDP server impersonation | The certificate fingerprint is saved on first use and pinned in guacd (`cert-fingerprints`); a changed certificate refuses to connect. guacd is told to use exactly the TLS or NLA security seen during the check, so an impostor cannot fall back to legacy RDP; servers offering only legacy RDP security are refused. |
 | Other machines using your guacd | guacd and the websocket bridge listen on `127.0.0.1` only. |
 | Shell injection | `docker` is called with `execFile` and an argument array, never a shell string. |
 | Clipboard leaking to remote hosts | Only text, and only to the remote pane you click into; the page can read the clipboard through `clipboard:read`, but the CSP leaves it nowhere to send it except localhost. |
 | A bad bulk edit | Preview with checkboxes, a confirmation, and `connections.json.bak` before every bulk edit or delete. |
 | Half-written file after a crash | Write to `.tmp`, then atomic rename. |
 
-Known trade-offs: RDP certificates are not verified (`ignore-cert`), and anyone who can run Docker commands as your user can also inspect the guacd container.
+Known trade-offs: the first connection to a server is trusted without proof (the nature of trust on first use: check the fingerprint shown in the toast if it matters); VNC connections cannot be verified at all; and anyone who can run Docker commands as your user can also inspect the guacd container.
 
 ---
 
@@ -1287,7 +1397,7 @@ const corpus = sources.map((f) => fs.readFileSync(path.join(root, f), 'utf8').sp
 
 `npm ci` installs exactly what `package-lock.json` lists. `--ignore-scripts` and `ELECTRON_SKIP_BINARY_DOWNLOAD` skip compiling `node-pty` and downloading Electron, which neither the tests nor the check need, so CI takes seconds.
 
-Covered: multi-word search, bulk update by username, by folder (including subfolders but not `Production` when asking for `Prod`), respecting unticked ids, backup and round-trip of the file, and (in `guacd.test.js`) that a token with a non-ASCII password decrypts correctly with guacamole-lite's own code.
+Covered: multi-word search, bulk update by username, by folder (including subfolders but not `Production` when asking for `Prod`), respecting unticked ids, backup and round-trip of the file, and (in `guacd.test.js`) that a token with a non-ASCII password decrypts correctly with guacamole-lite's own code, that `rdpFingerprint` returns the right fingerprint from a fake RDP server using a throwaway certificate made with `openssl`, and that it refuses a server offering only legacy RDP security, and that it fails quickly when the server hangs up or is not an RDP server at all.
 
 ---
 
@@ -1327,7 +1437,7 @@ APPIMAGE_EXTRACT_AND_RUN=1 ./dist/banana-phone-0.1.0.AppImage
 
 Requirements on the machine running it:
 
-* **Docker** (and your user in the `docker` group) for RDP and VNC. The first RDP connection pulls `guacamole/guacd:1.5.5` (about 100 MB). SSH and local terminals work without Docker.
+* **Docker** (and your user in the `docker` group) for RDP and VNC. The first RDP connection pulls `guacamole/guacd:1.6.0` (about 100 MB). SSH and local terminals work without Docker.
 * A keyring (GNOME Keyring or KWallet) for proper password encryption.
 
 Data lives in `~/.config/banana-phone/`: `connections.json`, `connections.json.bak`, `known_hosts.json`.
