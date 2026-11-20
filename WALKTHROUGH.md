@@ -78,6 +78,7 @@ banana-phone/
 │   └── check-walkthrough.js   CI check that this document matches the code
 ├── .github/workflows/ci.yml   runs the tests and that check on every push / PR
 ├── .github/workflows/release.yml  builds and publishes the AppImage for a version tag
+├── .npmrc              npm settings for this project (skip optional dependencies)
 ├── requirements.txt    what a machine needs to run the AppImage (shipped with each release)
 ├── build/icon.png      AppImage icon
 └── renderer/           everything the window shows
@@ -174,7 +175,15 @@ The `"build"` section configures **electron-builder**:
 * `files` lists what goes into the package. `**` means "this folder and everything below it". Dev-only packages (Electron itself, electron-builder) are left out automatically.
 * electron-builder packs the app into one archive file called `app.asar`. Native `.node` libraries cannot be loaded from inside an archive, so `asarUnpack` keeps `node-pty` as real files next to it.
 
-`allowScripts` is an npm 11 safety feature: packages may only run install scripts you have approved. Two are allowed: `node-pty` (it must compile) and `cpu-features`, a small native helper `ssh2` uses to pick the fastest cipher. `cpu-features`'s install script generates a build file (`buildcheck.gypi`) that `electron-builder install-app-deps` needs when it recompiles native modules for Electron; with the script denied, a fresh `npm ci` fails. `ssh2`'s own optional native crypto binding stays denied because `ssh2` works fine in pure JavaScript.
+`allowScripts` is an npm 11 safety feature: packages may only run install scripts you have approved. `node-pty` is allowed because it must compile; `ssh2`'s optional native crypto binding is denied because `ssh2` works fine in pure JavaScript.
+
+`.npmrc` holds npm settings for this project:
+
+```ini
+omit=optional
+```
+
+It tells npm to skip *optional* dependencies. The one that matters is `cpu-features`, a small native helper `ssh2` uses only to pick the fastest cipher; `ssh2` loads it inside `try { … } catch {}` and works the same without it. It has to be compiled against Electron's C++ headers, and those need a newer compiler than the Debian 12 system the release is built on (see [§14](#releases)), so leaving it out keeps every build working. The other optional packages are build-tool extras for Windows signing and proxies.
 
 ---
 
@@ -1451,21 +1460,19 @@ Data lives in `~/.config/banana-phone/`: `connections.json`, `connections.json.b
 A release is a GitHub Release page with the AppImage and `requirements.txt` attached, built by GitHub Actions rather than on anyone's machine. To make one, set `version` in `package.json`, merge to `main`, and push a tag for that version:
 
 ```bash
-git tag v0.1.0 && git push origin v0.1.0
+git tag v0.1.1 && git push origin v0.1.1
 ```
 
-`.github/workflows/release.yml` runs for any tag starting with `v`:
+`.github/workflows/release.yml` runs for any tag starting with `v`, in two jobs. The first builds the AppImage:
 
 ```yaml
-on:
-  push:
-    tags: ['v*']
-
-permissions:
-  contents: write # create the release and upload its files
-```
-
-```yaml
+  build:
+    runs-on: ubuntu-latest
+    # Build on Debian 12 (glibc 2.36). Native modules (node-pty) only load on systems with a glibc at least
+    # as new as the one they were compiled against, and GitHub's ubuntu-latest is newer than many desktops.
+    container: node:24-bookworm
+    steps:
+      - uses: actions/checkout@v4
       - name: Tag matches package.json version
         run: |
           version=$(node -p "require('./package.json').version")
@@ -1474,16 +1481,39 @@ permissions:
       - run: npm test
       - run: node scripts/check-walkthrough.js
       - run: npm run dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: appimage
+          path: dist/banana-phone-*.AppImage
+```
+
+* **Why a container.** Compiled code on Linux records the newest version of the C library (**glibc**) it was built against, and refuses to load on a system with an older one. The first release was built directly on GitHub's newest Ubuntu image, so `node-pty` demanded glibc 2.42 and the app crashed at start on Debian 13 (glibc 2.41). `container: node:24-bookworm` runs every step inside the official Node.js image for Debian 12 (glibc 2.36), so the result needs only glibc 2.34 and runs on Debian 12+, Ubuntu 22.04+ and similar. That minimum is listed in `requirements.txt`. You can check what a native module needs with `objdump -T pty.node | grep GLIBC`.
+* `$GITHUB_REF_NAME` is the tag that triggered the run, e.g. `v0.1.1`. `node -p` prints the result of a JavaScript expression, here the version from `package.json`. `[ a = b ] || { …; exit 1; }` fails the job when they differ, so a release can never be labelled with the wrong version.
+* Unlike the CI workflow, this one runs `npm ci` **with** install scripts, because it needs the real native modules for the AppImage. The tests and the walkthrough check run again, so nothing that fails them is ever published.
+* `upload-artifact` hands the built file to the next job; jobs run on separate machines and share nothing otherwise.
+
+The second job publishes it:
+
+```yaml
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the release and upload its files
+    steps:
+      - uses: actions/checkout@v4 # for requirements.txt
+      - uses: actions/download-artifact@v4
+        with:
+          name: appimage
+          path: dist
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release create "$GITHUB_REF_NAME" dist/banana-phone-*.AppImage requirements.txt --title "banana-phone $GITHUB_REF_NAME" --generate-notes
 ```
 
-* `permissions: contents: write` lets the workflow's built-in token create releases; by default it can only read.
-* `$GITHUB_REF_NAME` is the tag that triggered the run, e.g. `v0.1.0`. `node -p` prints the result of a JavaScript expression, here the version from `package.json`. `[ a = b ] || { …; exit 1; }` fails the job when they differ, so a release can never be labelled with the wrong version.
-* Unlike the CI workflow, this one runs `npm ci` **with** install scripts, because it needs the real native modules for the AppImage.
-* The tests and the walkthrough check run again, so nothing that fails them is ever published.
+* `needs: build` makes it wait for, and depend on, the build job.
+* `permissions: contents: write` lets the job's built-in token create releases; by default it can only read. Only this job gets that permission; the job that runs `npm ci` and third-party install scripts never holds a token that can write to the repository.
 * `gh release create` makes the release and uploads the files. `--generate-notes` writes the release notes from the merged pull requests since the previous tag.
 
 ## 15. JavaScript syntax cheat sheet

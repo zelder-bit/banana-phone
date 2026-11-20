@@ -17,7 +17,7 @@ Download `banana-phone-<version>.AppImage` from the [latest release](https://git
 Bump `version` in `package.json`, merge to `main`, then tag that commit:
 
 ```bash
-git tag v0.1.0 && git push origin v0.1.0
+git tag v0.1.1 && git push origin v0.1.1
 ```
 
 The Release workflow runs the tests and the walkthrough check, builds the AppImage, and publishes a GitHub release with the AppImage and `requirements.txt` attached. The tag must match the version in `package.json`.
