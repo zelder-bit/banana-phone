@@ -21,3 +21,17 @@ jobs:
       - run: npm test
       - name: Walkthrough matches the code
         run: node scripts/check-walkthrough.js
+
+  ui:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10 # a hung app must not hold the runner for hours
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      # The real app this time: download Electron and build node-pty for it (postinstall).
+      - run: npm ci
+      # xvfb-run gives Electron a virtual display; CI=true (set by GitHub) adds --no-sandbox.
+      - run: xvfb-run -a npm run test:ui

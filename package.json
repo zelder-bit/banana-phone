@@ -10,7 +10,8 @@
     "test": "node --test",
     "postinstall": "electron-builder install-app-deps",
     "dist": "electron-builder --linux AppImage --publish never",
-    "check:walkthrough": "node scripts/check-walkthrough.js"
+    "check:walkthrough": "node scripts/check-walkthrough.js",
+    "test:ui": "node --test scripts/ui.e2e.js"
   },
   "build": {
     "appId": "dev.fruit.banana-phone",
