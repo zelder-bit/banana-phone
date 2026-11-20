@@ -159,7 +159,7 @@ function openSsh(id, conn, cols, rows) {
   client.connect({
     host: conn.host, port: conn.port || 22, username: conn.username || os.userInfo().username,
     password: privateKey ? undefined : password || undefined, privateKey, passphrase: privateKey ? password || undefined : undefined,
-    agent: process.env.SSH_AUTH_SOCK, tryKeyboard: !privateKey, readyTimeout: 60000, // room to answer the changed-key dialog
+    agent: process.env.SSH_AUTH_SOCK, tryKeyboard: !privateKey, readyTimeout: 20000,
     hostHash: 'sha256',
     // Trust on first use; if a known host's key changes, ask. ssh2 waits until verify() is called.
     hostVerifier: (fp, verify) => {
@@ -168,11 +168,11 @@ function openSsh(id, conn, cols, rows) {
       if (!saved) out(`\x1b[33mNew host key for ${hostId} saved (SHA256 ${fp}).\x1b[0m\r\n`);
       if (!saved || saved === fp) return verify(true);
       out(`\x1b[31mThe host key of ${hostId} has CHANGED.\r\nSaved ${saved}\r\nNow   ${fp}\x1b[0m\r\n`
-        + 'Waiting for your answer in the dialog. After a minute the connection gives up; a key you trust is still saved for next time.\r\n');
-      confirmChanged(hostId, 'host key', conn.host, saved, fp).then((ok) => {
+        + 'Waiting for your answer in the dialog. After 20 seconds the connection gives up, but a key you trust is still saved: open it again.\r\n');
+      confirmChanged(hostId, 'host key', hostId, saved, fp).then((ok) => {
         out(ok ? '\x1b[33mTrusted the new host key.\x1b[0m\r\n' : '\x1b[31mNot trusted: connection refused.\x1b[0m\r\n');
-        verify(ok);
-      }, () => verify(false));
+        try { verify(ok); } catch {} // the connection may have timed out or been closed meanwhile
+      }, () => { try { verify(false); } catch {} });
     },
   });
   return {
@@ -209,7 +209,7 @@ ipcMain.handle('session:open', async (_e, connId, cols = 80, rows = 24) => {
     const cert = await guacd.rdpFingerprint(conn.host, conn.port || 3389);
     const fp = cert.fingerprint;
     const saved = trust(rdpId(conn), fp);
-    if (saved && saved !== fp && !(await confirmChanged(rdpId(conn), 'certificate', conn.host, saved, fp))) {
+    if (saved && saved !== fp && !(await confirmChanged(rdpId(conn), 'certificate', `${conn.host}:${conn.port || 3389}`, saved, fp))) {
       throw new Error(`The certificate of ${conn.host} has changed and was not trusted, so banana-phone did not connect. Expected SHA256 ${saved}, got ${fp}.`);
     }
     const notice = !saved ? `Saved the certificate of ${conn.host}: SHA256 ${fp}`
