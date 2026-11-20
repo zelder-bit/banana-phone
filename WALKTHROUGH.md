@@ -871,7 +871,7 @@ async function openRemote(conn, password, cert) {
 The page is a fixed skeleton; `app.js` fills it in.
 
 ```html example
-<header class="top"> brand · search pill · Terminal / + Connection / Bulk edit / theme </header>
+<header class="top"> falling fruit · brand · search pill · Terminal / + Connection / Bulk edit / theme </header>
 <div class="app">
   <aside class="side">  … <div id="tree"> (folder tree) </aside>
   <section class="work">
@@ -942,6 +942,73 @@ The whole sidebar can be collapsed with the ☰ button or **Ctrl+B**, which give
 ```
 
 A negative `margin-left` slides the sidebar out of view (with a `transition` for the animation) and the work area's flexbox grows into the space. `visibility: hidden` also takes its buttons out of the keyboard tab order while it is hidden. The open terminals notice their new size through their ResizeObserver and refit.
+
+### Falling fruit in the top bar
+
+The top bar has a light shower of fruit drifting down behind the buttons. It is the same effect as bunch-banana's header. It has three parts.
+
+An empty, decorative container is the first thing in the header:
+
+```html
+    <div class="fall" aria-hidden="true"></div>
+```
+
+`aria-hidden="true"` tells screen readers to skip it, since it is decoration only.
+
+CSS stacks the fruit **behind** everything else and lets clicks pass through:
+
+```css
+.top { position: relative; overflow: hidden; }
+.top > :not(.fall) { position: relative; z-index: 1; }
+.fall { position: absolute; inset: 0; pointer-events: none; z-index: 0; }
+```
+
+* `position: absolute; inset: 0` stretches `.fall` over the whole header. It is positioned against the header because the header is `position: relative`.
+* `z-index` decides what is drawn on top: the buttons (`1`) cover the fruit layer (`0`). `.top > :not(.fall)` means "every direct child of the header except the fruit layer".
+* `pointer-events: none` makes the layer invisible to the mouse: a click on a falling banana lands on the button underneath.
+* `overflow: hidden` clips fruit that has fallen below the header's bottom edge.
+
+Each fruit is an `<img>` that runs one **keyframe animation** forever:
+
+```css
+  animation: fruit-fall var(--dur, 9s) linear var(--delay, 0s) infinite;
+```
+
+```css example
+@keyframes fruit-fall {
+  0%   { transform: translateY(-30px) translateX(0) rotate(0deg); }
+  50%  { transform: translateY(21px) translateX(var(--sway, 10px)) rotate(18deg); }
+  100% { transform: translateY(72px) translateX(calc(var(--sway, 10px) * -0.5)) rotate(-28deg); }
+}
+```
+
+* `@keyframes` lists poses at points in time. The browser moves smoothly between them: from above the bar (-30px), drifting sideways by `--sway` and turning, to below it (72px), where it is clipped.
+* The fruit differ only in their **CSS variables**. `var(--dur, 9s)` reads `--dur` and falls back to `9s` if it is not set.
+* `@media (prefers-reduced-motion: reduce) { .fall { display: none; } }` hides it all for people who ask their system for less motion.
+* `body:has(dialog[open]) .fall img { animation-play-state: paused; }` freezes the fruit while a dialog is open. `:has()` matches an element that *contains* something, here "the body, when it contains an open dialog". Dialogs blur everything behind them, and a blur over moving fruit would have to be recalculated on every frame.
+
+`app.js` fills the layer with ten fruit at startup:
+
+```js
+function rain(fall, n = 10) {
+  for (let i = 0; i < n; i++) {
+    const img = el('img', { src: `svg/${FALL_FRUITS[Math.floor(Math.random() * FALL_FRUITS.length)]}.svg`, alt: '' });
+```
+
+```js
+      '--left': `${(i * (100 / n) + 2 + Math.random() * 6).toFixed(1)}%`, // spread evenly, then jitter
+      '--delay': `${(-Math.random() * 12).toFixed(2)}s`, // negative: start mid-fall, not all at the top
+```
+
+```js
+    for (const [k, v] of Object.entries(vars)) img.style.setProperty(k, v);
+```
+
+* `Math.random()` gives a number from 0 up to (not including) 1. `Math.floor(Math.random() * list.length)` turns that into a random index into the list.
+* `i * (100 / n)` spaces the ten fruit evenly across the bar (0%, 10%, 20% …). The small random extra stops them looking like a grid.
+* A **negative** `animation-delay` starts the animation as if it had already been running that long, so the fruit are spread through their fall from the first frame instead of all appearing at the top together.
+* `toFixed(1)` rounds to one decimal and returns a string.
+* `Object.entries(vars)` turns the object into `[key, value]` pairs, and `for (const [k, v] of …)` unpacks each pair. `style.setProperty` sets a CSS variable on that one image. Setting styles through the DOM API like this works under any Content-Security-Policy, unlike writing a `style="…"` attribute into HTML.
 
 The `<details>`/`<summary>` sidebar is the "dropdown view": every folder is a native disclosure widget, so clicking, keyboard toggling and accessibility come for free. The arrow is drawn with `summary::before` and rotated 90° when `details[open]`.
 
