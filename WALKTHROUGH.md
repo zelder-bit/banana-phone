@@ -1487,7 +1487,9 @@ keywords = ["/home/", "/users/"]
 
 The rules were tested by committing throwaway fakes (a random AWS-style key, a random GitHub-style token, a freshly generated private key, an email address and a `/home/<name>/` path) to a scratch copy: each was reported and the push was blocked, while the allowed addresses and paths passed. For a genuine false positive, `git push --no-verify` skips the hook, and the pattern belongs in an allowlist.
 
-Covered: multi-word search, that an empty password removes the saved one while a missing one keeps it, bulk update by username, by folder (including subfolders but not `Production` when asking for `Prod`), respecting unticked ids, backup and round-trip of the file, and (in `guacd.test.js`) that a token with a non-ASCII password decrypts correctly with guacamole-lite's own code, that `rdpFingerprint` returns the right fingerprint from a fake RDP server using a throwaway certificate made with `openssl`, and that it refuses a server offering only legacy RDP security, that it fails quickly when the server hangs up or is not an RDP server at all, and that the RDP settings pin the certificate and ask for the admin session only when ticked.
+Covered: multi-word search, that an empty password removes the saved one while a missing one keeps it, bulk update by username, by folder (including subfolders but not `Production` when asking for `Prod`), respecting unticked ids, backup and round-trip of the file, and (in `guacd.test.js`) that a token with a non-ASCII password decrypts correctly with guacamole-lite's own code, that `rdpFingerprint` returns the right fingerprint from a fake RDP server using a throwaway certificate made with `openssl`, and that it refuses a server offering only legacy RDP security, and that it fails quickly when the server hangs up or is not an RDP server at all.
+
+`guacd.test.js` also checks `remoteSettings`: the RDP settings pin the certificate, and ask for the admin session only when it is ticked.
 
 ---
 
