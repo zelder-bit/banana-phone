@@ -75,7 +75,8 @@ banana-phone/
 ├── store.test.js       tests for store.js
 ├── guacd.test.js       test for token encryption
 ├── scripts/
-│   └── check-walkthrough.js   CI check that this document matches the code
+│   ├── check-walkthrough.js   CI check that this document matches the code
+│   └── ui.e2e.js       end-to-end test: drives the real app's window (tabs, splits, dialogs)
 ├── .github/workflows/ci.yml   runs the tests and that check on every push / PR
 ├── .github/workflows/release.yml  builds and publishes the AppImage for a version tag
 ├── .npmrc              npm settings for this project (skip optional dependencies)
@@ -891,7 +892,19 @@ The page is a fixed skeleton; `app.js` fills it in.
 document.querySelectorAll('[data-cancel]').forEach((b) => (b.onclick = () => b.closest('dialog').close('cancel')));
 ```
 
-* `dialog.returnValue` survives between openings, and pressing Esc does not change it. So every dialog clears it right before opening (`d.returnValue = '';`), otherwise Esc after an earlier Save would count as Save.
+* The edit and prompt dialogs act on the form's **`submit`** event, not on the dialog's `close` event. `submit` fires at the moment you press Save or Enter (the Cancel button is not a submit button), while the form still holds what you typed. `close` fires for Save, Cancel and Esc alike, and Chromium may deliver it late, even after the dialog has been reopened with other values. See [§13](#13-tests-and-ci) for the bug this caused.
+
+```js
+  form.onsubmit = async () => {
+    const f = form.elements;
+```
+
+```js
+    d.querySelector('form').onsubmit = () => res($('#prompt-in').value.trim()); // OK or Enter
+    d.onclose = () => { if (!d.open) res(null); }; // Esc/Cancel; a late close arriving after a reopen is ignored
+```
+
+* `ask()` returns a Promise that settles exactly once. OK resolves it with the text. A later `res(null)` from the close that follows does nothing, because a Promise that has already settled ignores further calls. Assigning `onsubmit`/`onclose` (rather than `addEventListener`) **replaces** the previous opening's handler instead of stacking another one.
 * `<datalist>` gives an `<input>` a dropdown of suggestions (existing folders, existing usernames) while still allowing free text.
 * `type="module"` makes `app.js` an **ES module**, which allows `import` statements.
 
@@ -1369,6 +1382,10 @@ npm test
 npm run check:walkthrough
 ```
 
+```bash
+npm run test:ui
+```
+
 `store.test.js` uses Node's built-in `node:test` and `node:assert`:
 
 ```js
@@ -1382,6 +1399,57 @@ test('bulk update by folder includes subfolders but not lookalike names', () => 
 * `test(name, fn)` registers a test; it fails if `fn` throws.
 * `assert.strictEqual(a, b)` checks `a === b`; `assert.deepStrictEqual` compares arrays and objects by their contents.
 * `sample()` returns a fresh data set each time, so tests cannot affect each other.
+
+### The end-to-end UI test
+
+`npm test` checks the logic, but not the window: tabs, splits, the drag gutter and the dialogs. `scripts/ui.e2e.js` checks those by starting the real app with a throwaway profile and driving it the way you would, with real mouse clicks, drags and key presses. Its file name deliberately does not end in `.test.js`, so plain `npm test` (which finds every `*.test.js`) does not pick it up: it needs Electron and a screen.
+
+It talks to the app through the **Chrome DevTools Protocol** (CDP), the same channel Chrome's developer tools use. Electron is told to open it on a free port:
+
+```js
+  const args = ['.', '--remote-debugging-port=0', `--user-data-dir=${profile}`];
+```
+
+```js
+      const m = /DevTools listening on ws:\/\/[^:]+:(\d+)\//.exec(err);
+```
+
+* `--remote-debugging-port=0` means "any free port". Chromium then prints `DevTools listening on ws://127.0.0.1:<port>/…` on stderr, and the regex captures the digits after the colon. `(\d+)` is a **capture group**: `m[1]` is the text it matched.
+* `--user-data-dir` points at a new empty folder, so the test never touches your real connections, and a running copy of the app does not block it (the single-instance lock is per profile).
+
+Every CDP message is JSON with an `id`. The reply carries the same `id`, which is how `call()` matches a reply to its request:
+
+```js
+  const call = (method, params = {}) => new Promise((resolve, reject) => {
+    const id = ++n;
+```
+
+The test then uses three kinds of call:
+
+* `Runtime.evaluate` runs JavaScript in the page and returns the result (`app.eval`).
+* `Input.dispatchMouseEvent` and `Input.dispatchKeyEvent` send input as if it came from the real mouse and keyboard. A drag is a press, five moves and a release, so the gutter's `setPointerCapture` and `pointermove` code runs exactly as it does for you:
+
+```js
+      for (let i = 1; i <= 5; i++) await app.mouse('mouseMoved', { x: from.x + (dx * i) / 5, y: from.y + (dy * i) / 5 });
+```
+
+Page updates are not instant, so instead of sleeping for a guessed time the test waits for a condition, checking every 100 ms. On timeout it reports what the page actually looked like:
+
+```js
+      for (const end = Date.now() + ms; Date.now() < end; await sleep(100)) if (await app.eval(expr)) return;
+```
+
+`t.test(name, fn)` inside a test makes **subtests**, so the report shows each step (split, grid, gutter, Tab all, dialogs) as its own pass or fail, while all of them share one running app.
+
+The dialog step caught a real bug. The edit dialog used to save from its `close` event, with a new listener added each time it opened. Chromium can deliver a `close` event late. Under the test's fast input, the Esc that cancelled one opening only "arrived" together with the next opening's Save. Both listeners then read `returnValue` as `ok`, and the connection was saved twice. In the opposite order (Save, then reopen at once), a Save could be lost. The dialogs now save on `submit` instead (see [§9](#9-rendererindexhtml-and-fruitcss-the-look)), and the test covers both orders: Esc then Save, and Save then an immediate reopen.
+
+The connection to DevTools uses the `WebSocket` class that Node has built in since version 22, the same API as in a browser, so the test needs no extra package. A reply is matched to its request through a `Map` from id to that request's `resolve`/`reject` functions:
+
+```js
+    const p = pending.get(d.id);
+```
+
+If the app crashes, `ws.onclose` rejects every request still waiting, so the test fails at once with a clear message instead of hanging. `cleanup()` kills the app, **waits for it to exit**, and only then deletes the throwaway profile. Electron still writes to it while shutting down, so deleting first would leave files behind.
 
 ### Keeping this document honest
 
@@ -1409,7 +1477,15 @@ const corpus = sources.map((f) => fs.readFileSync(path.join(root, f), 'utf8').sp
         run: node scripts/check-walkthrough.js
 ```
 
-`npm ci` installs exactly what `package-lock.json` lists. `--ignore-scripts` and `ELECTRON_SKIP_BINARY_DOWNLOAD` skip compiling `node-pty` and downloading Electron, which neither the tests nor the check need, so CI takes seconds.
+`npm ci` installs exactly what `package-lock.json` lists. `--ignore-scripts` and `ELECTRON_SKIP_BINARY_DOWNLOAD` skip compiling `node-pty` and downloading Electron, which neither the tests nor the check need, so this job takes seconds.
+
+A second job, `ui`, runs the end-to-end test. It needs the real thing, so it runs a full `npm ci` (downloading Electron and building `node-pty` for it). CI machines have no screen, so it runs under a virtual one:
+
+```yaml
+      - run: xvfb-run -a npm run test:ui
+```
+
+**Xvfb** ("X virtual framebuffer") is an X display server that draws into memory instead of a monitor. `xvfb-run -a` starts one on a free display number, runs the command inside it, and stops it afterwards. GitHub sets `CI=true`, and the test then adds `--no-sandbox`, because Chromium's sandbox needs privileges a CI runner does not give it.
 
 ### Secrets and personal data
 

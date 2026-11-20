@@ -180,9 +180,11 @@ async function ask(title, value = '') {
   const d = $('#prompt-dlg');
   $('#prompt-title').textContent = title;
   $('#prompt-in').value = value;
-  d.returnValue = ''; // Esc keeps the old value, so clear it
   d.showModal();
-  return new Promise((res) => d.addEventListener('close', () => res(d.returnValue === 'ok' ? $('#prompt-in').value.trim() : null), { once: true }));
+  return new Promise((res) => {
+    d.querySelector('form').onsubmit = () => res($('#prompt-in').value.trim()); // OK or Enter
+    d.onclose = () => { if (!d.open) res(null); }; // Esc/Cancel; a late close arriving after a reopen is ignored
+  });
 }
 
 async function newFolder(prefix = '') {
@@ -212,10 +214,10 @@ function editConn(c = { protocol: 'ssh' }) {
   d.dataset.proto = c.protocol || 'ssh';
   form.elements.port.placeholder = DEFAULT_PORT[d.dataset.proto] || '';
   form.elements.protocol.onchange = () => { d.dataset.proto = form.elements.protocol.value; form.elements.port.placeholder = DEFAULT_PORT[d.dataset.proto] || ''; };
-  d.returnValue = ''; // Esc keeps the old value, so clear it
   d.showModal();
-  d.addEventListener('close', async () => {
-    if (d.returnValue !== 'ok') return;
+  // Save on submit (Save button or Enter; Cancel is not a submit button). Not on close: Chromium can
+  // deliver the close event late, after the dialog has already been reopened with other values.
+  form.onsubmit = async () => {
     const f = form.elements;
     const conn = {
       id: c.id, name: f.name.value.trim(), protocol: f.protocol.value, folder: f.folder.value.trim().replace(/^\/+|\/+$/g, ''),
@@ -227,7 +229,7 @@ function editConn(c = { protocol: 'ssh' }) {
     if (!conn.id) delete conn.id;
     if (conn.folder) { openFolders.add(conn.folder); saveOpen(); }
     refresh(await window.bp.save(conn));
-  }, { once: true });
+  };
 }
 $('#new-conn').onclick = () => editConn({ protocol: 'ssh', folder: selectedFolder() });
 const selectedFolder = () => view.connections.find((c) => c.id === selected)?.folder || '';
