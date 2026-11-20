@@ -66,7 +66,8 @@ ipcMain.handle('store:bulkApply', (_e, filter, patch) => {
   const p = {};
   if (patch.username) p.username = patch.username;
   if (patch.domain !== undefined && patch.domain !== null) p.domain = patch.domain;
-  if (patch.password) p.password = enc(patch.password);
+  if (patch.clearPassword) p.password = '';
+  else if (patch.password) p.password = enc(patch.password);
   const n = store.bulkUpdate(data, filter, p);
   persist(bulkBackup());
   return { count: n, view: publicView() };

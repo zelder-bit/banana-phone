@@ -398,12 +398,22 @@ ipcMain.handle('store:save', (_e, conn) => {
 
 When you edit a connection and leave the password field empty, the page does not send `password` at all, so `upsert`'s merge keeps the old encrypted one. The first parameter `_e` is the IPC event; the leading underscore is a common hint that "this argument is unused".
 
+Removing a saved password needs a third state besides "new password" and "keep it". The edit dialog shows a **Remove the saved password** checkbox when the connection has one, and the page then sends an empty string:
+
+```js
+    if (f.clearPassword.checked) conn.password = ''; // '' = remove the saved one
+    else if (f.password.value) conn.password = f.password.value; // empty = keep existing
+```
+
+`''` is not `undefined`, so main does write it, and `enc('')` returns `''` without touching the keyring. JavaScript treats `''` as **falsy**, so `hasPassword: !!password` becomes `false` and the SSH and RDP code see "no password". This matters when a server moves from password login to a key or ssh-agent: an old password would otherwise still be offered.
+
 ```js
 ipcMain.handle('store:bulkApply', (_e, filter, patch) => {
   const p = {};
   if (patch.username) p.username = patch.username;
   if (patch.domain !== undefined && patch.domain !== null) p.domain = patch.domain;
-  if (patch.password) p.password = enc(patch.password);
+  if (patch.clearPassword) p.password = '';
+  else if (patch.password) p.password = enc(patch.password);
   const n = store.bulkUpdate(data, filter, p);
   persist(bulkBackup());
   return { count: n, view: publicView() };
@@ -416,7 +426,7 @@ const bulkBackup = () => `${FILE}.${new Date().toISOString().replace(/[:.]/g, '-
 
 `toISOString()` gives a time like `2026-11-19T23:20:05.123Z`; replacing `:` and `.` with `-` makes it safe and readable as part of a file name.
 
-The page sends the new password in plain text over IPC (it lives in your own process memory), main encrypts it once and the same ciphertext is written to every matching connection.
+The page sends the new password in plain text over IPC (it lives in your own process memory), main encrypts it once and the same ciphertext is written to every matching connection. The bulk dialog's **Remove their saved passwords instead** checkbox sends `clearPassword: true`, which writes `''` to each match the same way; the page refuses to send both a new password and the checkbox.
 
 ### SSH sessions
 
@@ -1311,7 +1321,8 @@ $('#bulk-apply').onclick = async (e) => {
   if (!bulkFilter || !ids.length) return err('Nothing selected.');
   if (f.password.value !== f.password2.value) return err('Passwords do not match.');
   …
-  if (!confirm(`Update ${ids.length} connection${ids.length > 1 ? 's' : ''}? A backup of the old file is kept.`)) return;
+  const what = patch.clearPassword ? 'Remove the saved password of' : 'Update';
+  if (!confirm(`${what} ${ids.length} connection${ids.length > 1 ? 's' : ''}? A backup of the old file is kept.`)) return;
   const res = await window.bp.bulkApply({ ...bulkFilter, ids }, patch);
   …
 };
@@ -1468,7 +1479,7 @@ keywords = ["/home/", "/users/"]
 
 The rules were tested by committing throwaway fakes (a random AWS-style key, a random GitHub-style token, a freshly generated private key, an email address and a `/home/<name>/` path) to a scratch copy: each was reported and the push was blocked, while the allowed addresses and paths passed. For a genuine false positive, `git push --no-verify` skips the hook, and the pattern belongs in an allowlist.
 
-Covered: multi-word search, bulk update by username, by folder (including subfolders but not `Production` when asking for `Prod`), respecting unticked ids, backup and round-trip of the file, and (in `guacd.test.js`) that a token with a non-ASCII password decrypts correctly with guacamole-lite's own code, that `rdpFingerprint` returns the right fingerprint from a fake RDP server using a throwaway certificate made with `openssl`, and that it refuses a server offering only legacy RDP security, and that it fails quickly when the server hangs up or is not an RDP server at all.
+Covered: multi-word search, that an empty password removes the saved one while a missing one keeps it, bulk update by username, by folder (including subfolders but not `Production` when asking for `Prod`), respecting unticked ids, backup and round-trip of the file, and (in `guacd.test.js`) that a token with a non-ASCII password decrypts correctly with guacamole-lite's own code, that `rdpFingerprint` returns the right fingerprint from a fake RDP server using a throwaway certificate made with `openssl`, and that it refuses a server offering only legacy RDP security, and that it fails quickly when the server hangs up or is not an RDP server at all.
 
 ---
 
