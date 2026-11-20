@@ -68,3 +68,10 @@ test('RDP settings: pinned certificate, and the admin (console) session only whe
   assert.strictEqual(remoteSettings({ ...base, adminSession: true }, 'pw', cert).console, 'true');
   assert.ok(!('console' in remoteSettings({ protocol: 'vnc', host: 'k', adminSession: true }, 'pw')));
 });
+
+test('resolveHost looks names up with the system resolver (including /etc/hosts)', async () => {
+  const { resolveHost } = require('./guacd');
+  assert.strictEqual(await resolveHost('localhost'), '127.0.0.1'); // from /etc/hosts, which guacd's container never sees
+  assert.strictEqual(await resolveHost('10.1.2.3'), '10.1.2.3');
+  await assert.rejects(resolveHost('no-such-host.invalid'), /Could not look up no-such-host\.invalid/);
+});

@@ -910,8 +910,17 @@ async function openRemote(conn, password, cert) {
   if (starting && !(await portOpen())) starting = null; // container died or Docker restarted: start again
   await ensureGuacd();
   const port = await ensureBridge();
-  const token = encryptToken({ connection: { type: conn.protocol, settings: remoteSettings(conn, password, cert) } });
+  const host = await resolveHost(conn.host);
+  const token = encryptToken({ connection: { type: conn.protocol, settings: remoteSettings({ ...conn, host }, password, cert) } });
   return `ws://127.0.0.1:${port}/?token=${encodeURIComponent(token)}`;
+}
+
+async function resolveHost(host) {
+  try {
+    return (await dns.promises.lookup(host, { order: 'ipv4first' })).address;
+  } catch (e) {
+    throw new Error(`Could not look up ${host}: ${e.code || e.message}`);
+  }
 }
 
 function remoteSettings(conn, password, cert) {
@@ -931,6 +940,12 @@ function remoteSettings(conn, password, cert) {
   return settings;
 }
 ```
+
+**Why the app looks up the name, not guacd.** guacd runs inside a Docker container, and Docker gives the container only a copy of the host's `/etc/resolv.conf` (the list of DNS servers). Your own machine resolves names through more than that: `/etc/hosts`, mDNS for `.local` names, and DNS servers a VPN sets for particular domains (*split DNS*, e.g. "ask the office DNS server about `*.prod.example.com`"). The container sees none of those, so a private name that works in Remmina or `ping` could fail in guacd. `resolveHost` looks the name up in the app, through the same system resolver every other program uses (`dns.promises.lookup` calls the C library's `getaddrinfo`), and hands guacd the address instead.
+
+* `{ ...conn, host }` makes a copy of the connection with `host` replaced (the *spread* syntax), so the saved connection keeps its name.
+* `order: 'ipv4first'` prefers an IPv4 address, because Docker's default network has no IPv6.
+* Connecting by address is safe for the certificate check: guacd accepts only the pinned fingerprint, whatever name or address it dialled.
 
 The settings are built by their own function, `remoteSettings`, which only computes values and never touches Docker or the network. That lets `guacd.test.js` check them directly without starting guacd.
 
