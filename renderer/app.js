@@ -16,6 +16,24 @@ const MAX_PANES = 4;
 let view = { folders: [], connections: [] };
 let selected = null;
 
+// Falling fruit behind the top bar: each fruit gets its own position, size, speed and sway.
+const FALL_FRUITS = ['apple', 'banana', 'coconut', 'grapes', 'kiwi', 'lemon', 'orange-slice', 'orange', 'peach', 'strawberry', 'watermelon'];
+function rain(fall, n = 10) {
+  for (let i = 0; i < n; i++) {
+    const img = el('img', { src: `svg/${FALL_FRUITS[Math.floor(Math.random() * FALL_FRUITS.length)]}.svg`, alt: '' });
+    const vars = {
+      '--left': `${(i * (100 / n) + 2 + Math.random() * 6).toFixed(1)}%`, // spread evenly, then jitter
+      '--size': `${(16 + Math.random() * 6).toFixed(1)}px`,
+      '--dur': `${(6 + Math.random() * 6).toFixed(2)}s`,
+      '--delay': `${(-Math.random() * 12).toFixed(2)}s`, // negative: start mid-fall, not all at the top
+      '--sway': `${((Math.random() < 0.5 ? -1 : 1) * (6 + Math.random() * 10)).toFixed(1)}px`,
+    };
+    for (const [k, v] of Object.entries(vars)) img.style.setProperty(k, v);
+    fall.append(img);
+  }
+}
+rain($('.top .fall'));
+
 function toast(msg, ms = 2600) {
   const t = $('#toast');
   t.textContent = msg;
