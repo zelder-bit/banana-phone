@@ -1378,7 +1378,7 @@ sIn.onkeydown = (e) => {
 ### Tabs and panes: the data model
 
 ```js
-// tab  = { id, layout: 'h'|'v'|'grid', panes: [pane], active: pane, root: <div.split> }
+// tab  = { id, layout: 'h'|'v'|'grid', panes: [pane], active: pane, root: <div.split>, name? }
 // pane = { id, title, protocol, connId, root, body, term?, fit?, sid?, guac?, dispose() }
 const tabs = [];
 let current = null;
@@ -1441,9 +1441,23 @@ How the user's actions map onto it:
 | ⇱ on a pane / drag a pane header onto the tab bar | `movePane(p, null)` → its own tab |
 | Drag a pane header onto another tab | `movePane(p, thatTab)` → joins that tab's split |
 | Folder menu → Open all in split | opens up to 4 connections of that folder in one tab |
+| Right-click a tab | `tabMenu(e, t)`: see below |
 | Ctrl+Alt+Arrow | move focus between panes in the tab |
 | Ctrl+Tab / Ctrl+Shift+Tab | next / previous tab |
 | Ctrl+Shift+C / Ctrl+Shift+V in a terminal | copy selection / paste |
+
+**The tab menu.** The layout buttons, **Split all** and **Tab all** used to act on `current` directly. They are now small functions that take a tab, `setLayout(t, l)`, `mergeInto(t)` and `explode(t)`, and the buttons call them with `current`. That lets the right-click menu offer the same actions for the tab you clicked, even when it is not the one showing. The menu is built in sections and empty sections are dropped, so a single-session tab shows no layout rows and never two separators in a row:
+
+```js
+  menu(e, sections.filter((s) => s.length).flatMap((s, i) => (i ? ['-', ...s] : s)));
+```
+
+`flatMap` turns the list of sections into one flat list of rows, putting a `'-'` (separator) in front of every section but the first.
+
+* **Rename…** sets `t.name`; `tabTitle(t)` shows it instead of the automatic title. The box starts with the tab's own name, or empty, so pressing Enter on an unnamed tab doesn't freeze its automatic title; leaving it empty goes back to automatic. Names are not saved between launches.
+* **Duplicate** is `copyTab(t)`: a new tab with the same layout and name, calling `connect(p.connId, false, t2)` for each pane. `connect` takes an optional third argument, the tab to open into.
+* **Reconnect** makes the same copy, moves it into the old tab's place in `tabs`, then closes the old tab, which ends its sessions. A session whose saved connection was deleted can't be opened again, so it is moved into the new tab still running (with a toast saying so) instead of being closed.
+* **Close other tabs** / **Close tabs to the right** / **Close tab** call `closeTab` on each.
 
 Full screen has three parts that must always agree: the pane's `.full` class, the banana, and the real window. One function changes all three, so they cannot get out of step:
 
@@ -1497,11 +1511,12 @@ function gutter(t, i) {
 ### Opening a connection
 
 ```js
-async function connect(connId, split = false) {
+async function connect(connId, split = false, into = null) {
   const c = connId === 'local' ? { id: 'local', name: 'Terminal', protocol: 'local' } : view.connections.find((x) => x.id === connId);
   if (!c) return;
   const p = makePane(c.name, c.protocol);
-  let t = split && current && current.panes.length < MAX_PANES ? current : newTab();
+  p.connId = c.id;
+  let t = into || (split && current && current.panes.length < MAX_PANES ? current : newTab());
   if (split && t === current && t.layout === 'h' && t.panes.length >= 2) t.layout = 'grid';
   t.panes.push(p);
   t.active = p;

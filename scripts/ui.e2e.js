@@ -304,6 +304,38 @@ test('tabs, splits, gutter and dialogs', { timeout: 120000 }, async (t) => {
     await app.waitFor(`[...document.querySelectorAll('.tab-group')].map((c) => c.title).join() === 'Box/Late,Crate,Local terminals and connections outside any folder,Sessions from different folders'`);
   });
 
+  await t.test('tab right-click: rename, duplicate, reconnect, close others', async () => {
+    const tabMenu = (item) => app.eval(`(() => { document.querySelector('.tab.active').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 50, clientY: 50 }));
+      [...document.querySelectorAll('#menu button')].find((b) => b.textContent === '${item}').click(); })()`);
+    const active = `document.querySelector('.tab.active .t').textContent`;
+    await app.eval(`document.querySelector('#tabs > .tab:last-child').click()`); // the Mixed tab: two sessions (scrolled out of view, so no real click)
+    await app.waitFor(`${active} === '2 sessions'`);
+    await tabMenu('Rename…');
+    await app.waitFor('document.querySelector("#prompt-dlg").open && document.activeElement.id === "prompt-in"');
+    await app.eval('document.querySelector("#prompt-in").select()');
+    await app.type('mine');
+    await app.key('Enter', 'Enter', 13);
+    await app.waitFor(`${active} === 'mine'`);
+
+    const n = await app.eval(count('.tab'));
+    await tabMenu('Duplicate');
+    await app.waitFor(`${count('.tab')} === ${n + 1} && ${visiblePanes} === 2 && ${active} === 'mine'`); // same two sessions, same name
+
+    await tabMenu('Close other tabs');
+    await app.waitFor(`${count('.tab')} === 1 && ${count('.pane')} === 2`);
+
+    await tabMenu('Reconnect');
+    await app.waitFor(`${count('.tab')} === 1 && ${count('.pane')} === 2 && ${count('.xterm')} === 2 && ${active} === 'mine'`);
+
+    // Delete the saved connection of one session: Reconnect keeps that session running instead of closing it.
+    await app.eval(`(() => { window.confirm = () => true;
+      [...document.querySelectorAll('#tree .conn')].find((n) => n.textContent.startsWith('lt')).dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 50, clientY: 50 }));
+      [...document.querySelectorAll('#menu button')].find((b) => b.textContent === 'Delete').click(); })()`);
+    await app.waitFor(`![...document.querySelectorAll('#tree .conn')].some((n) => n.textContent.startsWith('lt'))`);
+    await tabMenu('Reconnect');
+    await app.waitFor(`${count('.tab')} === 1 && ${count('.pane')} === 2 && document.querySelector('#toast').textContent.startsWith('Kept 1 session')`);
+  });
+
   await t.test('the sidebar grip widens the list, collapse still hides it, and the width survives a reload', async () => {
     const sideW = 'document.querySelector("#side").getBoundingClientRect().width';
     const before = await app.eval(sideW);

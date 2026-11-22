@@ -416,7 +416,7 @@ sIn.onkeydown = (e) => {
 };
 
 // ---------------------------------------------------------------- tabs and panes
-// tab  = { id, layout: 'h'|'v'|'grid', panes: [pane], active: pane, root: <div.split> }
+// tab  = { id, layout: 'h'|'v'|'grid', panes: [pane], active: pane, root: <div.split>, name? }
 // pane = { id, title, protocol, connId, root, body, term?, fit?, sid?, guac?, dispose() }
 
 const tabs = [];
@@ -455,12 +455,13 @@ function render() {
   $('#tabs').replaceChildren(...tabs.flatMap((t) => {
     const g = groupOf(t), chip = g !== prev && (g || several) ? groupChip(g) : null;
     prev = g;
-    const title = t.panes.length === 1 ? t.panes[0].title : `${t.panes.length} sessions`;
+    const title = tabTitle(t);
     const tab = el('div', { className: 'tab' + (t === current ? ' active' : ''), title },
       icon(t.panes.length === 1 ? t.panes[0].protocol : 'mixed'), el('span', { className: 't', textContent: title }),
       el('button', { className: 'x', textContent: '×', title: 'Close tab', onclick: (e) => { e.stopPropagation(); closeTab(t); } }));
     tab.onclick = () => selectTab(t);
     tab.onauxclick = (e) => { if (e.button === 1) closeTab(t); };
+    tab.oncontextmenu = (e) => tabMenu(e, t);
     paneDrop(tab, () => t);
     return chip ? [chip, tab] : [tab];
   }));
@@ -517,12 +518,59 @@ function gutter(t, i) {
   return g;
 }
 
-document.querySelectorAll('[data-layout]').forEach((b) => (b.onclick = () => {
-  if (!current) return;
-  current.layout = b.dataset.layout;
-  current.panes.forEach((p) => (p.root.style.flexGrow = ''));
+const tabTitle = (t) => t.name || (t.panes.length === 1 ? t.panes[0].title : `${t.panes.length} sessions`);
+
+function setLayout(t, l) {
+  t.layout = l;
+  t.panes.forEach((p) => (p.root.style.flexGrow = ''));
   render();
-}));
+}
+document.querySelectorAll('[data-layout]').forEach((b) => (b.onclick = () => current && setLayout(current, b.dataset.layout)));
+
+// Right-click a tab. Sections that would be empty are left out, so no two separators touch.
+function tabMenu(e, t) {
+  const many = t.panes.length > 1, others = tabs.filter((x) => x !== t), right = tabs.slice(tabs.indexOf(t) + 1);
+  const closeAll = (list) => () => list.forEach(closeTab);
+  const sections = [
+    [
+      ['Rename…', async () => { const n = await ask('Rename tab (empty = automatic)', t.name || ''); if (n !== null && tabs.includes(t)) { t.name = n; render(); } }],
+      ['Reconnect', () => reconnect(t)],
+      ['Duplicate', () => copyTab(t)],
+    ],
+    [
+      ...(many ? [['Side by side', () => setLayout(t, 'h')], ['Stacked', () => setLayout(t, 'v')], ['Grid', () => setLayout(t, 'grid')]] : []),
+      ...(others.length && t.panes.length < MAX_PANES ? [['Split all into this tab', () => mergeInto(t)]] : []),
+      ...(many ? [['Give each session its own tab', () => explode(t)]] : []),
+    ],
+    [
+      ...(others.length ? [['Close other tabs', closeAll(others)]] : []),
+      ...(right.length ? [['Close tabs to the right', closeAll(right)]] : []),
+      ['Close tab', () => closeTab(t), 'danger'],
+    ],
+  ];
+  menu(e, sections.filter((s) => s.length).flatMap((s, i) => (i ? ['-', ...s] : s)));
+}
+
+// Open the same sessions again in a new tab with the same layout and name. A deleted connection is skipped.
+function copyTab(t) {
+  const t2 = newTab();
+  Object.assign(t2, { layout: t.layout, name: t.name });
+  for (const p of t.panes) connect(p.connId, false, t2);
+  if (!t2.panes.length) { dropTab(t2); selectTab(current); return null; }
+  return t2;
+}
+// Reconnect = a fresh copy in this tab's place, then close the old sessions. A session whose connection
+// was deleted cannot be opened again, so it moves over still running instead of being closed.
+function reconnect(t) {
+  const t2 = copyTab(t);
+  if (!t2) return toast('Nothing to reconnect: its connections were deleted');
+  tabs.splice(tabs.indexOf(t2), 1);
+  tabs.splice(tabs.indexOf(t), 0, t2);
+  const kept = t.panes.filter((p) => p.connId !== 'local' && !view.connections.some((c) => c.id === p.connId));
+  for (const p of kept) movePane(p, t2);
+  if (kept.length) toast(`Kept ${kept.length} session${kept.length > 1 ? 's' : ''} whose connection was deleted, without reconnecting`);
+  closeTab(t);
+}
 
 function focusPane(p) {
   const t = tabs.find((x) => x.panes.includes(p));
@@ -552,18 +600,17 @@ function paneDrop(node, target) {
 paneDrop($('#tabs'), () => null);
 const allPanes = () => tabs.flatMap((t) => t.panes);
 
-$('#merge').onclick = () => {
-  if (!current) return;
-  for (const p of allPanes()) if (!current.panes.includes(p) && current.panes.length < MAX_PANES) movePane(p, current);
-  if (current.layout === 'h' && current.panes.length > 2) current.layout = 'grid';
-  selectTab(current);
-};
-$('#explode').onclick = () => {
-  if (!current) return;
-  const keep = current;
-  for (const p of [...current.panes].slice(1)) movePane(p, null);
-  selectTab(keep);
-};
+function mergeInto(t) {
+  for (const p of allPanes()) if (!t.panes.includes(p) && t.panes.length < MAX_PANES) movePane(p, t);
+  if (t.layout === 'h' && t.panes.length > 2) t.layout = 'grid';
+  selectTab(t);
+}
+function explode(t) {
+  for (const p of t.panes.slice(1)) movePane(p, null);
+  selectTab(t);
+}
+$('#merge').onclick = () => current && mergeInto(current);
+$('#explode').onclick = () => current && explode(current);
 
 // Full screen current: pin the active pane over the window (no re-parenting, so the session
 // keeps running) and full-screen the real window. The pane's own ResizeObserver re-fits it.
@@ -622,13 +669,13 @@ function status(p, text, err = false) {
   p.body.append(el('div', { className: 'status' + (err ? ' err' : '') }, el('img', { src: `svg/${err ? 'coconut' : 'banana'}.svg`, alt: '' }), el('div', { textContent: text })));
 }
 
-// Open a connection: new tab, or (split) beside the current tab's sessions.
-async function connect(connId, split = false) {
+// Open a connection: new tab, or (split) beside the current tab's sessions, or into tab `into`.
+async function connect(connId, split = false, into = null) {
   const c = connId === 'local' ? { id: 'local', name: 'Terminal', protocol: 'local' } : view.connections.find((x) => x.id === connId);
   if (!c) return;
   const p = makePane(c.name, c.protocol);
   p.connId = c.id;
-  let t = split && current && current.panes.length < MAX_PANES ? current : newTab();
+  let t = into || (split && current && current.panes.length < MAX_PANES ? current : newTab());
   if (split && t === current && t.layout === 'h' && t.panes.length >= 2) t.layout = 'grid';
   t.panes.push(p);
   t.active = p;
