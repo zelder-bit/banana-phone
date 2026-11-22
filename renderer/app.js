@@ -91,12 +91,13 @@ let sideW = SIDE_W; // the width you chose; the window can only narrow what is s
 function setSideW(px, save = true) {
   const w = Math.round(Math.max(180, Math.min(700, innerWidth * 0.6, px)));
   document.documentElement.style.setProperty('--side-w', w + 'px');
-  $('#side-grip').ariaValueNow = String(w);
+  Object.assign($('#side-grip'), { ariaValueNow: String(w), ariaValueMax: String(Math.round(Math.min(700, innerWidth * 0.6))) });
   if (save) { sideW = w; try { localStorage.setItem('bp-side-w', String(w)); } catch {} }
 }
 addEventListener('resize', () => setSideW(sideW, false)); // a smaller window narrows it, a bigger one gives it back
 const grip = $('#side-grip');
 grip.onpointerdown = (e) => {
+  if (e.button !== 0) return; // left button only
   const start = e.clientX, w0 = $('#side').offsetWidth;
   grip.setPointerCapture(e.pointerId);
   grip.classList.add('dragging');
