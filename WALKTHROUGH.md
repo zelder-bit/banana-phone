@@ -231,7 +231,13 @@ function load(file) {
   try {
     const data = JSON.parse(fs.readFileSync(file, 'utf8'));
     if (!data || typeof data !== 'object') throw new Error('connections file is not a JSON object');
-    return { folders: data.folders || [], connections: data.connections || [] };
+    const d = { ordered: !!data.ordered, folders: data.folders || [], connections: data.connections || [] };
+    fillFolders(d);
+    if (!d.ordered) { // files from before drag-to-reorder: start from the alphabetical order the sidebar used to show
+      d.folders.sort((a, b) => a.localeCompare(b));
+      d.connections.sort((a, b) => a.name.localeCompare(b.name));
+    }
+    return d;
   } catch (e) {
     if (e.code === 'ENOENT') return empty();
     throw e; // a corrupt file must not be silently replaced with an empty one
@@ -244,6 +250,15 @@ function load(file) {
 * `data.folders || []`: the `||` operator returns its left side if that is "truthy", otherwise the right side. So a missing `folders` becomes an empty array.
 * The `typeof data !== 'object'` line rejects files that are valid JSON but not an object (for example a file containing just `null`).
 * `try { … } catch (e) { … }` catches errors. `ENOENT` ("Error NO ENTry") means the file does not exist yet: first launch, so start empty. Any other error (for example broken JSON) is re-thrown with `throw e`, so the app refuses to start rather than overwrite your connections with an empty list. `main.js` catches it and shows a dialog naming the file and its `.bak` copies.
+
+### Order and moving
+
+The order you see is the order of the two arrays in the file. There is no separate `order` field: the sidebar does not sort, it just draws `folders` and `connections` in array order (siblings only, so the order of a folder relative to a connection never matters).
+
+* `fillFolders(data)` makes every folder explicit, adding the parents of `"a/b/c"` and folders only a connection mentions, so each folder has a place in the order.
+* Old files had no order and the sidebar sorted by name. On load, a file without `"ordered": true` is sorted by name once, so it looks the same as before. The first move writes `"ordered": true`, and from then on the arrays are left alone.
+* `moveConn(data, id, to, before)` takes a connection out of the array and puts it back in front of connection `before` (or last), with `folder` set to `to` (`''` is the top level).
+* `moveFolder(data, from, to, before)` does the same for a folder. A folder's name is its last path segment, so moving `"Prod"` into `"Lab"` renames it `"Lab/Prod"`, and the same prefix swap is applied to every folder and connection under it (`inFolder` finds them). It throws if the target is the folder itself or inside it, or if the new path already exists.
 
 ### Saving safely
 
@@ -705,6 +720,7 @@ The full list of channels:
 | `store:save` | invoke | create or update one connection (encrypts a new password) |
 | `store:delete` | invoke | delete a connection (writes `.bak` first) |
 | `store:folder` | invoke | add an empty folder, or remove one that is empty |
+| `store:move` | invoke | move a connection or folder into a folder, in front of a sibling (saves the order) |
 | `store:bulkPreview` | invoke | which connections a bulk edit would touch |
 | `store:bulkApply` | invoke | apply a bulk edit (writes a timestamped backup first) |
 | `store:forgetHost` | invoke | forget a connection's saved SSH host key or RDP certificate |
@@ -1155,18 +1171,18 @@ function allFolders() {
     const parts = f.split('/');
     parts.forEach((_, i) => set.add(parts.slice(0, i + 1).join('/')));
   }
-  return [...set].sort((a, b) => a.localeCompare(b));
+  return [...set];
 }
 ```
 
-For `"Prod/Windows/DCs"` this adds `"Prod"`, `"Prod/Windows"` and `"Prod/Windows/DCs"`. A `Set` ignores duplicates. `[...set]` turns it back into an array to sort.
+For `"Prod/Windows/DCs"` this adds `"Prod"`, `"Prod/Windows"` and `"Prod/Windows/DCs"`. A `Set` ignores duplicates. `[...set]` turns it back into an array. It is not sorted: the saved order is the order.
 
 `renderTree` then builds nested `<details>` with a **recursive** function `build(parent)` that finds the folders exactly one level below `parent`, and for each one calls `build` again for its children:
 
 ```js
+const kidsOf = (parent) => allFolders().filter((f) => f.split('/').length === (parent ? parent.split('/').length + 1 : 1) && (!parent || f.startsWith(parent + '/')));
 const build = (parent) => {
-  const kids = folders.filter((f) => f.split('/').length === (parent ? parent.split('/').length + 1 : 1) && (!parent || f.startsWith(parent + '/')));
-  const nodes = kids.map((f) => {
+  const nodes = kidsOf(parent).map((f) => {
     const sum = el('summary', {}, el('span', { textContent: f.split('/').pop() }), el('span', { className: 'count', textContent: total }));
     const d = el('details', { open: openFolders.has(f) }, sum, ...build(f), ...connsIn(f).map(connRow));
     d.ontoggle = () => { d.open ? openFolders.add(f) : openFolders.delete(f); saveOpen(); };
@@ -1190,7 +1206,15 @@ function setSide(collapsed) {
 
 Which folders are open is remembered in `localStorage` (a small per-app key/value store in the browser), wrapped in `try`/`catch` because storage can be unavailable.
 
-Each connection row supports: click to select, double-click or Enter to connect, **Shift**+double-click to connect into a split, right-click for a menu, and drag onto a folder to move it there (HTML5 drag-and-drop with a custom data type `bp/conn`).
+Each connection row supports: click to select, double-click or Enter to connect, **Shift**+double-click to connect into a split, right-click for a menu, and drag to move it (HTML5 drag-and-drop with a custom data type `bp/conn`).
+
+Dragging works on folders too (`bp/folder`). `dropTarget` decides what a drop means:
+
+* a connection onto a connection row: in front of that row (a line shows above it);
+* a connection or folder onto a folder row: into that folder, at the end (dashed outline). For a folder being dragged, the top quarter of the row means "in front of this folder" instead (the line);
+* onto the empty part of the list: the top level.
+
+Each drop calls `window.bp.move`, which reaches `moveConn` or `moveFolder` in the store. A refused move (a folder into itself, a duplicate path) throws, and the error shows as a toast. After a folder move the renderer renames the matching entries in `openFolders`, so open folders stay open. The right-click menus have **Move up** and **Move down**, which send the same call, so the feature works without a mouse.
 
 ### Quick search (Ctrl+K)
 

@@ -224,4 +224,18 @@ test('tabs, splits, gutter and dialogs', { timeout: 120000 }, async (t) => {
     await app.waitFor(`(async () => (await ${folders}) === "Lab")()`);
     assert.ok(await app.eval('document.querySelector("#tree").textContent.includes("Lab")'));
   });
+
+  await t.test('dragging a connection onto a folder moves it and the order is saved', async () => {
+    const where = '(async () => (await window.bp.get()).connections.map((c) => c.name + ":" + (c.folder || "")).join())()';
+    assert.strictEqual(await app.eval(where), 'kept:,quick:');
+    // Real mouse drags do not start HTML5 drag-and-drop through CDP, so dispatch the drag events.
+    await app.eval(`(() => {
+      const dt = new DataTransfer();
+      const fire = (n, type) => n.dispatchEvent(new DragEvent(type, { bubbles: true, cancelable: true, dataTransfer: dt }));
+      const row = [...document.querySelectorAll('.conn')].find((n) => n.textContent.startsWith('quick'));
+      const lab = [...document.querySelectorAll('#tree summary')].find((n) => n.textContent.startsWith('Lab'));
+      fire(row, 'dragstart'); fire(lab, 'dragover'); fire(lab, 'drop');
+    })()`);
+    await app.waitFor(`(async () => (await ${where}) === "kept:,quick:Lab")()`);
+  });
 });

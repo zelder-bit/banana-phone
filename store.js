@@ -9,7 +9,13 @@ function load(file) {
   try {
     const data = JSON.parse(fs.readFileSync(file, 'utf8'));
     if (!data || typeof data !== 'object') throw new Error('connections file is not a JSON object');
-    return { folders: data.folders || [], connections: data.connections || [] };
+    const d = { ordered: !!data.ordered, folders: data.folders || [], connections: data.connections || [] };
+    fillFolders(d);
+    if (!d.ordered) { // files from before drag-to-reorder: start from the alphabetical order the sidebar used to show
+      d.folders.sort((a, b) => a.localeCompare(b));
+      d.connections.sort((a, b) => a.name.localeCompare(b.name));
+    }
+    return d;
   } catch (e) {
     if (e.code === 'ENOENT') return empty();
     throw e; // a corrupt file must not be silently replaced with an empty one
@@ -26,6 +32,48 @@ function save(file, data, { backup = false } = {}) {
 }
 
 const inFolder = (folder, f) => folder === f || (folder || '').startsWith(f + '/');
+
+// Make every folder explicit (parents of "a/b/c", folders only a connection mentions) so each has a place in the order.
+function fillFolders(data) {
+  const set = new Set(data.folders);
+  for (const f of [...data.folders, ...data.connections.map((c) => c.folder).filter(Boolean)]) {
+    const parts = f.split('/');
+    parts.forEach((_, i) => set.add(parts.slice(0, i + 1).join('/')));
+  }
+  data.folders = [...set];
+}
+
+// Array order is the saved order. Move a connection into folder `to` ('' = top level), before connection `before` (default: last).
+function moveConn(data, id, to, before) {
+  const i = data.connections.findIndex((c) => c.id === id);
+  if (i < 0 || before === id) return;
+  const [c] = data.connections.splice(i, 1);
+  if (to) c.folder = to; else delete c.folder;
+  const j = before ? data.connections.findIndex((x) => x.id === before) : -1;
+  data.connections.splice(j < 0 ? data.connections.length : j, 0, c);
+  data.ordered = true;
+  fillFolders(data);
+}
+
+// Move folder `from` (with everything under it) into folder `to` ('' = top level), before sibling folder path `before` (default: last).
+function moveFolder(data, from, to, before) {
+  fillFolders(data);
+  const name = from.split('/').pop();
+  const dest = to ? `${to}/${name}` : name;
+  if (!data.folders.includes(from)) throw new Error('No such folder');
+  if (to && !data.folders.includes(to)) throw new Error('No such folder');
+  if (to && inFolder(to, from)) throw new Error('A folder cannot go inside itself');
+  if (dest !== from && data.folders.includes(dest)) throw new Error(`"${dest}" already exists`);
+  if (before && inFolder(before, from)) return dest;
+  const rename = (f) => dest + f.slice(from.length);
+  const moved = data.folders.filter((f) => inFolder(f, from)).map(rename);
+  data.folders = data.folders.filter((f) => !inFolder(f, from));
+  const j = before ? data.folders.indexOf(before) : -1;
+  data.folders.splice(j < 0 ? data.folders.length : j, 0, ...moved);
+  for (const c of data.connections) if (inFolder(c.folder, from)) c.folder = rename(c.folder);
+  data.ordered = true;
+  return dest;
+}
 
 function matches(conn, q) {
   q = q.trim().toLowerCase();
@@ -72,4 +120,4 @@ function remove(data, id) {
   data.connections = data.connections.filter((c) => c.id !== id);
 }
 
-module.exports = { load, save, matches, select, bulkUpdate, upsert, remove, inFolder };
+module.exports = { load, save, matches, select, bulkUpdate, upsert, remove, inFolder, moveConn, moveFolder };

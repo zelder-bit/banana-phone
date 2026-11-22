@@ -99,24 +99,25 @@ function allFolders() {
     const parts = f.split('/');
     parts.forEach((_, i) => set.add(parts.slice(0, i + 1).join('/')));
   }
-  return [...set].sort((a, b) => a.localeCompare(b));
+  return [...set];
 }
 
 const openFolders = new Set(JSON.parse((() => { try { return localStorage.getItem('bp-open') || '[]'; } catch { return '[]'; } })()));
 const saveOpen = () => { try { localStorage.setItem('bp-open', JSON.stringify([...openFolders])); } catch {} };
 
-function renderTree() {
-  const folders = allFolders();
-  const byName = (a, b) => a.name.localeCompare(b.name);
-  const connsIn = (f) => view.connections.filter((c) => (c.folder || '') === f).sort(byName);
+// Saved order = array order, so these do not sort.
+const connsIn = (f) => view.connections.filter((c) => (c.folder || '') === f);
+const kidsOf = (parent) => allFolders().filter((f) => f.split('/').length === (parent ? parent.split('/').length + 1 : 1) && (!parent || f.startsWith(parent + '/')));
 
+function renderTree() {
   const build = (parent) => {
-    const kids = folders.filter((f) => f.split('/').length === (parent ? parent.split('/').length + 1 : 1) && (!parent || f.startsWith(parent + '/')));
-    const nodes = kids.map((f) => {
+    const nodes = kidsOf(parent).map((f) => {
       const total = view.connections.filter((c) => c.folder === f || (c.folder || '').startsWith(f + '/')).length;
       const sum = el('summary', {}, el('span', { textContent: f.split('/').pop() }), el('span', { className: 'count', textContent: total }));
       sum.oncontextmenu = (e) => folderMenu(e, f);
-      dropTarget(sum, f);
+      sum.draggable = true;
+      sum.ondragstart = (e) => { e.stopPropagation(); e.dataTransfer.setData('bp/folder', f); };
+      dropTarget(sum, f, true);
       const d = el('details', { open: openFolders.has(f) }, sum, ...build(f), ...connsIn(f).map(connRow));
       d.ontoggle = () => { d.open ? openFolders.add(f) : openFolders.delete(f); saveOpen(); };
       return d;
@@ -126,6 +127,10 @@ function renderTree() {
   $('#tree').replaceChildren(...build(''), ...connsIn('').map(connRow));
 }
 
+// Drop on the empty part of the list: back to the top level.
+$('#tree').ondragover = (e) => { if (e.target === e.currentTarget && dragKind(e)) e.preventDefault(); };
+$('#tree').ondrop = (e) => { if (e.target === e.currentTarget) dropMove(e, ''); };
+
 function connRow(c) {
   const row = el('div', { className: 'conn' + (selected === c.id ? ' sel' : ''), draggable: true, tabIndex: 0, title: `${c.username ? c.username + '@' : ''}${c.host || 'local'}` },
     icon(c.protocol), el('span', { className: 'label', textContent: c.name }), el('span', { className: 'host', textContent: c.host || '' }));
@@ -134,19 +139,55 @@ function connRow(c) {
   row.onkeydown = (e) => { if (e.key === 'Enter') connect(c.id, e.shiftKey); };
   row.oncontextmenu = (e) => connMenu(e, c);
   row.ondragstart = (e) => e.dataTransfer.setData('bp/conn', c.id);
+  dropTarget(row, c.folder || '', false, c.id);
   return row;
 }
 
-// Drop a connection on a folder to move it there.
-function dropTarget(node, folder) {
-  node.ondragover = (e) => { if (e.dataTransfer.types.includes('bp/conn')) { e.preventDefault(); node.classList.add('drop'); } };
-  node.ondragleave = () => node.classList.remove('drop');
-  node.ondrop = async (e) => {
-    node.classList.remove('drop');
-    const c = view.connections.find((x) => x.id === e.dataTransfer.getData('bp/conn'));
-    if (c) refresh(await window.bp.save({ id: c.id, folder }));
+const dragKind = (e) => ['bp/conn', 'bp/folder'].find((t) => e.dataTransfer.types.includes(t));
+
+// Move what is being dragged into folder `to` ('' = top level), in front of `before` (a connection id or folder path).
+async function moveTo(op) {
+  const { folder, to } = op;
+  const r = await window.bp.move(op);
+  if (folder) { // carry the open/closed state of the folder and its subfolders to their new paths
+    const dest = (to ? to + '/' : '') + folder.split('/').pop();
+    for (const f of [...openFolders]) if (f === folder || f.startsWith(folder + '/')) { openFolders.delete(f); openFolders.add(dest + f.slice(folder.length)); }
+    saveOpen();
+  }
+  refresh(r);
+}
+function dropMove(e, to, before) {
+  const conn = e.dataTransfer.getData('bp/conn');
+  const folder = e.dataTransfer.getData('bp/folder');
+  if (conn || folder) moveTo({ ...(conn ? { conn } : { folder }), to, before });
+}
+
+// A folder row: drop into it (a folder's top edge instead lands the dragged folder in front of it).
+// A connection row (isFolder false): drop a connection in front of it.
+function dropTarget(node, folder, isFolder, connId) {
+  const edge = (e) => isFolder && dragKind(e) === 'bp/folder' && e.offsetY < node.offsetHeight / 4;
+  const clear = () => node.classList.remove('drop', 'drop-before');
+  node.ondragover = (e) => {
+    const k = dragKind(e);
+    if (!k || (!isFolder && k !== 'bp/conn')) return;
+    e.preventDefault(); e.stopPropagation();
+    clear();
+    node.classList.add(isFolder && !edge(e) ? 'drop' : 'drop-before');
+  };
+  node.ondragleave = clear;
+  node.ondrop = (e) => {
+    e.stopPropagation(); // the tree's own drop means "top level"
+    const before = edge(e);
+    clear();
+    if (!isFolder) dropMove(e, folder, connId);
+    else if (before) dropMove(e, folder.includes('/') ? folder.slice(0, folder.lastIndexOf('/')) : '', folder);
+    else dropMove(e, folder);
   };
 }
+
+// Keyboard path: Move up / Move down among siblings.
+const upDown = (ids, i, key) => [['Move up', i > 0, ids[i - 1]], ['Move down', i < ids.length - 1, ids[i + 2]]]
+  .filter((m) => m[1]).map((m) => [m[0], () => moveTo({ ...key, before: m[2] })]);
 
 // Cancel buttons are type=button so Enter submits the form's real action instead.
 document.querySelectorAll('[data-cancel]').forEach((b) => (b.onclick = () => b.closest('dialog').close('cancel')));
@@ -171,6 +212,7 @@ function connMenu(e, c) {
   menu(e, [
     ['Connect in new tab', () => connect(c.id)],
     ['Connect in split', () => connect(c.id, true)],
+    ...(() => { const sib = connsIn(c.folder || '').map((x) => x.id), m = upDown(sib, sib.indexOf(c.id), { conn: c.id, to: c.folder || '' }); return m.length ? ['-', ...m] : []; })(),
     '-',
     ['Edit…', () => editConn(c)],
     ['Duplicate', () => { const { id, ...rest } = c; editConn({ ...rest, name: c.name + ' copy', copyPasswordFrom: c.hasPassword ? id : undefined }); }],
@@ -187,6 +229,7 @@ function folderMenu(e, f) {
     ['New subfolder…', () => newFolder(f + '/')],
     ['Open all in split', () => openFolder(f)],
     ['Bulk edit this folder…', () => openBulk('folder', f)],
+    ...(() => { const parent = f.includes('/') ? f.slice(0, f.lastIndexOf('/')) : '', sib = kidsOf(parent), m = upDown(sib, sib.indexOf(f), { folder: f, to: parent }); return m.length ? ['-', ...m] : []; })(),
     '-',
     ['Delete folder', async () => {
       try { refresh(await window.bp.folder({ remove: f })); } catch { toast('Only empty folders can be deleted'); }
