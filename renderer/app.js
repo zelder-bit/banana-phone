@@ -368,6 +368,7 @@ function newTab() {
 }
 
 function selectTab(t) {
+  if (fsPane && !t?.panes.includes(fsPane)) leaveFull();
   current = t;
   for (const x of tabs) x.root.hidden = x !== t;
   if (t?.active) focusPane(t.active);
@@ -376,6 +377,7 @@ function selectTab(t) {
 
 function render() {
   $('#empty').hidden = tabs.length > 0;
+  $('#fullscreen').disabled = !current?.active;
   $('#tabs').replaceChildren(...tabs.map((t) => {
     const title = t.panes.length === 1 ? t.panes[0].title : `${t.panes.length} sessions`;
     const tab = el('div', { className: 'tab' + (t === current ? ' active' : ''), title },
@@ -481,8 +483,35 @@ $('#explode').onclick = () => {
   selectTab(keep);
 };
 
+// Full screen current: pin the active pane over the window (no re-parenting, so the session
+// keeps running) and full-screen the real window. The pane's own ResizeObserver re-fits it.
+let fsPane = null;
+function enterFull() {
+  const p = current?.active;
+  if (!p || fsPane) return;
+  fsPane = p;
+  p.root.classList.add('full');
+  $('#fs-banana').hidden = false;
+  window.bp.fullScreen(true);
+  p.body.focus();
+}
+function leaveFull() {
+  if (!fsPane) return;
+  const p = fsPane;
+  fsPane = null;
+  p.root.classList.remove('full');
+  $('#fs-banana').hidden = true;
+  window.bp.fullScreen(false);
+  (p.term || p.body).focus();
+}
+const toggleFull = () => (fsPane ? leaveFull() : enterFull());
+$('#fullscreen').onclick = enterFull;
+$('#fs-back').onclick = leaveFull;
+$('#fs-min').onclick = () => window.bp.minimize();
+
 function closePane(p) {
   p.closed = true;
+  if (p === fsPane) leaveFull();
   p.dispose();
   const t = tabs.find((x) => x.panes.includes(p));
   if (!t) return;
@@ -575,6 +604,7 @@ window.bp.onExit((id) => {
   const p = terms.get(id);
   if (!p) return;
   terms.delete(id);
+  if (p === fsPane) leaveFull();
   p.term.write('\r\n\x1b[2m[session ended — press any key to close]\x1b[0m');
   p.term.onKey(() => closePane(p));
 });
@@ -612,12 +642,13 @@ async function openRemote(p, c) {
   const clip = shareClipboard(client, p.body, window.bp);
   client.onstatechange = (s) => {
     if (s === 3) { status(p, null); clip.onConnected(); } // CONNECTED
-    if (s === 5 && !p.closed && !p.failed) status(p, 'Disconnected', true);
+    if (s === 5 && !p.closed && !p.failed) { status(p, 'Disconnected', true); if (p === fsPane) leaveFull(); }
   };
   client.onerror = (e) => {
     // Status 0 (SUCCESS) is guacd's normal end, e.g. "Manually logged off." when you sign out: just close.
     if (e.code === 0) return void (p.closed || closePane(p));
-    p.failed = true; status(p, `${c.host}: ${e.message || 'connection error'}`, true);
+    p.failed = true; if (p === fsPane) leaveFull();
+    status(p, `${c.host}: ${e.message || 'connection error'}`, true);
   };
 
   const mouse = new Guacamole.Mouse(display.getElement());
@@ -645,6 +676,7 @@ addEventListener('keydown', (e) => {
     e.preventDefault();
     selectTab(tabs[(tabs.indexOf(current) + (e.shiftKey ? tabs.length - 1 : 1)) % tabs.length]);
   }
+  if (e.ctrlKey && e.altKey && e.key.toLowerCase() === 'f' && (fsPane || current?.active)) { e.preventDefault(); e.stopPropagation(); toggleFull(); }
   // Ctrl+Alt+Arrow: move focus between panes in this tab
   if (e.ctrlKey && e.altKey && e.key.startsWith('Arrow') && current?.panes.length > 1) {
     e.preventDefault();

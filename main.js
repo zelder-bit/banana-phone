@@ -230,6 +230,8 @@ ipcMain.on('session:close', (_e, id) => sessions.get(id)?.close());
 
 // ---- clipboard (text only, shared with remote desktops) ----------------------
 
+ipcMain.on('win:fullscreen', (_e, on) => win?.setFullScreen(!!on));
+ipcMain.on('win:minimize', () => win?.minimize());
 ipcMain.handle('clipboard:read', () => clipboard.readText());
 ipcMain.on('clipboard:write', (_e, text) => { if (typeof text === 'string') clipboard.writeText(text); });
 

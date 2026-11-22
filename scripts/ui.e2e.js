@@ -158,6 +158,19 @@ test('tabs, splits, gutter and dialogs', { timeout: 120000 }, async (t) => {
     await app.waitFor(`${count('.tab')} === 1 && ${visiblePanes} === 4`);
   });
 
+  await t.test('Full screen current fills the window, Back to tab restores the split', async () => {
+    const rect = 'JSON.stringify(document.querySelector(".pane.full")?.getBoundingClientRect().toJSON())';
+    await app.click('.split:not([hidden]) > .pane ~ .pane');
+    await app.click('#fullscreen');
+    await app.waitFor('!!document.querySelector(".pane.full") && !document.querySelector("#fs-banana").hidden');
+    await app.waitFor(`(() => { const r = JSON.parse(${rect}); return r.width === innerWidth && r.height === innerHeight; })()`);
+    assert.strictEqual(await app.eval(count('.pane.full')), 1);
+    await app.mouse('mouseMoved', await app.center('#fs-banana img')); // hovering the banana reveals the buttons
+    await app.click('#fs-back');
+    await app.waitFor(`!document.querySelector(".pane.full") && ${visiblePanes} === 4 && document.querySelector("#fs-banana").hidden`);
+    assert.strictEqual(await app.eval(count('.xterm')), 4);
+  });
+
   await t.test('the pane button pops a session into its own tab', async () => {
     await app.click('.split:not([hidden]) > .pane ~ .pane button[title="Own tab"]');
     await app.waitFor(`${count('.tab')} === 2 && ${visiblePanes} === 1`);

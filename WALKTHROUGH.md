@@ -715,6 +715,8 @@ The full list of channels:
 | `session:data` | main → page | terminal output |
 | `session:exit` | main → page | the shell or SSH connection ended |
 | `clipboard:read` | invoke | the system clipboard's text |
+| `win:fullscreen` | send | `setFullScreen(on)` on the window |
+| `win:minimize` | send | minimize the window |
 | `clipboard:write` | send | put text on the system clipboard |
 
 Note `onData` strips the IPC event object (`_e`) before calling the page's function, so no Electron internals leak into the page either.
@@ -1241,6 +1243,7 @@ How the user's actions map onto it:
 | ◫ ⬒ ⊞ buttons | set `current.layout` to `h`, `v` or `grid`, then `render()` |
 | **Split all** | `movePane` every open pane into the current tab (up to 4) |
 | **Tab all** | `movePane(p, null)` for every pane but the first: each gets a new tab |
+| **Full screen current** (Ctrl+Alt+F) | `enterFull()`: adds `.full` to the active pane (`position: fixed; inset: 0`, header hidden) and calls `window.bp.fullScreen(true)`; the pane stays in the DOM. A faint banana at top centre reveals **Minimize** (`window.bp.minimize()`) and **Back to tab** (`leaveFull()`). It also leaves when the pane closes or its session ends |
 | ⇱ on a pane / drag a pane header onto the tab bar | `movePane(p, null)` → its own tab |
 | Drag a pane header onto another tab | `movePane(p, thatTab)` → joins that tab's split |
 | Folder menu → Open all in split | opens up to 4 connections of that folder in one tab |
@@ -1374,7 +1377,8 @@ async function openRemote(p, c) {
 ```js
 client.onerror = (e) => {
   if (e.code === 0) return void (p.closed || closePane(p));
-  p.failed = true; status(p, `${c.host}: ${e.message || 'connection error'}`, true);
+  p.failed = true; if (p === fsPane) leaveFull();
+  status(p, `${c.host}: ${e.message || 'connection error'}`, true);
 };
 ```
 

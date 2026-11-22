@@ -41,8 +41,16 @@
           <span class="sep"></span>
           <button class="btn small ghost" id="merge" title="Put every open session in this tab (up to 4)">Split all</button>
           <button class="btn small ghost" id="explode" title="Give every session in this tab its own tab">Tab all</button>
+          <button class="btn small ghost" id="fullscreen" title="Full screen current session (Ctrl+Alt+F)" disabled>Full screen current</button>
         </div>
       </nav>
+      <div id="fs-banana" class="fs-banana" hidden>
+        <img src="svg/banana.svg" alt="">
+        <div class="fs-actions">
+          <button class="btn small" id="fs-min" aria-label="Minimize the window">Minimize</button>
+          <button class="btn small" id="fs-back" aria-label="Back to tab">Back to tab</button>
+        </div>
+      </div>
       <div id="stage" class="stage">
         <div id="empty" class="empty">
           <img src="svg/empty.svg" alt="">
