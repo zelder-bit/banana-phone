@@ -282,16 +282,33 @@ test('tabs, splits, gutter and dialogs', { timeout: 120000 }, async (t) => {
     await app.eval(`${lt}.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))`);
     await app.waitFor(`${count('.tab')} === ${tabsBefore + 1}`);
     // The folder's group comes first (local terminals have no folder and no chip), its chip in front of the tab.
-    await app.waitFor(`${count('.tab-group')} === 1 && document.querySelector('#tabs').firstElementChild.title === 'Box/Lab'`);
+    await app.waitFor(`${count('.tab-group')} === 2 && document.querySelector('#tabs').firstElementChild.title === 'Box/Lab'`); // and "No folder" before the terminals
     assert.ok(await app.eval(`document.querySelector('#tabs').children[1].classList.contains('active')`));
     await app.click('#new-term', SHIFT); // a local terminal split into the Box/Lab tab
-    await app.waitFor(`${count('.tab-group')} === 1 && document.querySelector('#tabs').lastElementChild.previousElementSibling.textContent === 'Mixed'`);
+    await app.waitFor(`${count('.tab-group')} === 2 && document.querySelector('#tabs').lastElementChild.previousElementSibling.textContent === 'Mixed'`);
+  });
+
+  await t.test('tab groups follow the sidebar order, even for a subfolder made later', async () => {
+    const save = async (name, folder) => {
+      await app.click('#new-conn');
+      await app.waitFor('document.querySelector("#edit-dlg").open');
+      await app.eval(`(() => { const f = document.querySelector('#edit-form').elements; f.name.value = '${name}'; f.protocol.value = 'local'; f.folder.value = '${folder}'; })()`);
+      await app.click('#edit-dlg .btn.primary');
+      await app.waitFor(`[...document.querySelectorAll('#tree .conn')].some((n) => n.textContent.startsWith('${name}'))`);
+    };
+    await save('in-crate', 'Crate');
+    await save('in-late', 'Box/Late'); // made after Crate, but drawn inside Box, above Crate
+    for (const n of ['in-crate', 'in-late']) await app.eval(`[...document.querySelectorAll('#tree .conn')].find((n) => n.textContent.startsWith('${n}')).dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))`);
+    // (the Box/Lab tab became Mixed in the step before)
+    await app.waitFor(`[...document.querySelectorAll('.tab-group')].map((c) => c.title).join() === 'Box/Late,Crate,Local terminals and connections outside any folder,Sessions from different folders'`);
   });
 
   await t.test('tab right-click: rename, duplicate, reconnect, close others', async () => {
     const tabMenu = (item) => app.eval(`(() => { document.querySelector('.tab.active').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 50, clientY: 50 }));
       [...document.querySelectorAll('#menu button')].find((b) => b.textContent === '${item}').click(); })()`);
     const active = `document.querySelector('.tab.active .t').textContent`;
+    await app.eval(`document.querySelector('#tabs > .tab:last-child').click()`); // the Mixed tab: two sessions (scrolled out of view, so no real click)
+    await app.waitFor(`${active} === '2 sessions'`);
     await tabMenu('Rename…');
     await app.waitFor('document.querySelector("#prompt-dlg").open && document.activeElement.id === "prompt-in"');
     await app.eval('document.querySelector("#prompt-in").select()');
@@ -308,6 +325,14 @@ test('tabs, splits, gutter and dialogs', { timeout: 120000 }, async (t) => {
 
     await tabMenu('Reconnect');
     await app.waitFor(`${count('.tab')} === 1 && ${count('.pane')} === 2 && ${count('.xterm')} === 2 && ${active} === 'mine'`);
+
+    // Delete the saved connection of one session: Reconnect keeps that session running instead of closing it.
+    await app.eval(`(() => { window.confirm = () => true;
+      [...document.querySelectorAll('#tree .conn')].find((n) => n.textContent.startsWith('lt')).dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 50, clientY: 50 }));
+      [...document.querySelectorAll('#menu button')].find((b) => b.textContent === 'Delete').click(); })()`);
+    await app.waitFor(`![...document.querySelectorAll('#tree .conn')].some((n) => n.textContent.startsWith('lt'))`);
+    await tabMenu('Reconnect');
+    await app.waitFor(`${count('.tab')} === 1 && ${count('.pane')} === 2 && document.querySelector('#toast').textContent.startsWith('Kept 1 session')`);
   });
 
   await t.test('saved commands: edited in the dialog, run on start, run again from the pane menu', async () => {
