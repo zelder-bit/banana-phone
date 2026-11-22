@@ -10,7 +10,7 @@ A small, fruity connection manager for Linux: SSH and local terminals, plus RDP 
 
 - **Tabs and splits.** Open sessions in tabs, side by side, stacked, or in a 2×2 grid. Drag the gutter between panes to resize them, drag a pane onto another tab, and pop any session out into its own tab.
 - **Full screen current.** Ctrl+Alt+F makes the active session fill the whole screen. A faint banana at the top brings back Minimize and Back to tab.
-- **Folders.** Group connections in nested folders in a collapsible sidebar (Ctrl+B hides it). Right-click a folder to open everything in it as a split, add a subfolder, or bulk edit it.
+- **Folders.** Group connections in nested folders in a collapsible sidebar (Ctrl+B hides it); drag its right edge to make it wider or narrower. Right-click a folder to open everything in it as a split, add a subfolder, or bulk edit it.
 - **Drag to reorganize.** Drag connections and folders to reorder them or nest one folder in another; the order is saved. Move up / Move down in the right-click menu do the same from the keyboard.
 - **Folder fruit icons.** Right-click a folder → Change icon… and pick a fruit. Folders without one show a crate.
 - **Quick search.** Ctrl+K finds connections by name, host, user, folder or tag. Enter opens a result, Shift+Enter opens it in a split.

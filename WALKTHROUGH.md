@@ -1056,7 +1056,7 @@ The page is a fixed skeleton; `app.js` fills it in.
 ```html example
 <header class="top"> falling fruit · brand · search pill · Terminal / + Connection / Bulk edit / theme </header>
 <div class="app">
-  <aside class="side">  … <div id="tree"> (folder tree) </aside>
+  <aside class="side">  … <div id="tree"> (folder tree) </aside>  <div id="side-grip"> (drag to resize)
   <section class="work">
     <nav class="tabbar"> <div id="tabs"> · layout buttons </nav>
     <div id="stage"> (one .split per tab lives here) </div>
@@ -1133,10 +1133,10 @@ The split layouts are pure CSS, driven by one class on each tab's container:
 The whole sidebar can be collapsed with the ☰ button or **Ctrl+B**, which gives the sessions the full width:
 
 ```css
-.side-collapsed .side { margin-left: -272px; visibility: hidden; }
+.side-collapsed .side { margin-left: calc(-2px - var(--side-w, 270px)); visibility: hidden; }
 ```
 
-A negative `margin-left` slides the sidebar out of view (with a `transition` for the animation) and the work area's flexbox grows into the space. `visibility: hidden` also takes its buttons out of the keyboard tab order while it is hidden. The open terminals notice their new size through their ResizeObserver and refit.
+A negative `margin-left` (the sidebar's width plus its 2px border, worked out by `calc()` from the same `--side-w` the resize grip sets) slides the sidebar out of view (with a `transition` for the animation) and the work area's flexbox grows into the space. `visibility: hidden` also takes its buttons out of the keyboard tab order while it is hidden. The open terminals notice their new size through their ResizeObserver and refit.
 
 ### Falling fruit in the top bar
 
@@ -1298,6 +1298,16 @@ function setSide(collapsed) {
 ```
 
 `classList.toggle(name, force)` adds the class when `force` is true and removes it when false. `aria-expanded` tells screen readers whether the list is showing.
+
+The sidebar's width is a CSS variable, `--side-w`, so the width and the collapse rule always agree. The thin `#side-grip` strip on its right edge resizes it:
+
+```js
+function setSideW(px) {
+  const w = Math.round(Math.max(180, Math.min(700, innerWidth * 0.6, px)));
+  document.documentElement.style.setProperty('--side-w', w + 'px');
+```
+
+`Math.max(180, Math.min(700, innerWidth * 0.6, px))` clamps the width: never under 180px, never over 700px or 60% of the window, so the sessions always keep room. Dragging works like the pane gutter below (`setPointerCapture` keeps the moves coming even when the pointer leaves the strip), and while you drag the `side-resizing` class on `<body>` turns off the slide animation so the edge follows the mouse. The grip is a `role="separator"` you can also focus with Tab and move with ← and →; double-click puts it back to 270px. The width is saved in `localStorage` under `bp-side-w`.
 
 Each folder shows its fruit icon (`crate` by default). Right-click → **Change icon…** opens `#icon-dlg`, a grid of `button.pic`; each has an `aria-label` with the fruit name and `aria-pressed` on the current one, and they are real buttons so Tab and Enter work.
 

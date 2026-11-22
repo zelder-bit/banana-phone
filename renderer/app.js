@@ -85,6 +85,30 @@ function setSide(collapsed) {
 $('#toggle-side').onclick = () => setSide(!document.body.classList.contains('side-collapsed'));
 try { setSide(localStorage.getItem('bp-side') === '1'); } catch {}
 
+// Drag the grip on its right edge to widen the sidebar (arrows also work, double-click resets); remembered too.
+const SIDE_W = 270;
+function setSideW(px) {
+  const w = Math.round(Math.max(180, Math.min(700, innerWidth * 0.6, px)));
+  document.documentElement.style.setProperty('--side-w', w + 'px');
+  $('#side-grip').ariaValueNow = String(w);
+  try { localStorage.setItem('bp-side-w', String(w)); } catch {}
+}
+const grip = $('#side-grip');
+grip.onpointerdown = (e) => {
+  const start = e.clientX, w0 = $('#side').offsetWidth;
+  grip.setPointerCapture(e.pointerId);
+  grip.classList.add('dragging');
+  document.body.classList.add('side-resizing'); // no slide animation while following the mouse
+  grip.onpointermove = (m) => setSideW(w0 + m.clientX - start);
+  grip.onpointerup = () => { grip.onpointermove = null; grip.classList.remove('dragging'); document.body.classList.remove('side-resizing'); };
+};
+grip.ondblclick = () => setSideW(SIDE_W);
+grip.onkeydown = (e) => {
+  const step = { ArrowLeft: -16, ArrowRight: 16 }[e.key];
+  if (step) { e.preventDefault(); setSideW($('#side').offsetWidth + step); }
+};
+try { const w = Number(localStorage.getItem('bp-side-w')); if (w) setSideW(w); } catch {}
+
 async function refresh(v) {
   view = v || (await window.bp.get());
   $('#keyring-warn').hidden = view.keyring !== 'basic_text';
