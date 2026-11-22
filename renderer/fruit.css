@@ -180,7 +180,11 @@ dialog::backdrop { background: rgb(30 20 10 / 45%); backdrop-filter: blur(3px); 
 .dialog { padding: 22px; display: grid; gap: 10px; }
 .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 6px; }
 #edit-dlg[data-proto="rdp"] .ssh-only, #edit-dlg[data-proto="vnc"] .ssh-only, #edit-dlg[data-proto="local"] .ssh-only,
-#edit-dlg:not([data-proto="rdp"]) .rdp-only, #edit-dlg[data-proto="local"] .net { display: none; }
+#edit-dlg:not([data-proto="rdp"]) .rdp-only, #edit-dlg[data-proto="local"] .net,
+#edit-dlg[data-proto="rdp"] .term-only, #edit-dlg[data-proto="vnc"] .term-only { display: none; }
+.cmds { border: 2px solid var(--line); border-radius: 12px; padding: 6px 12px 10px; margin: 0; display: grid; gap: 8px; }
+.cmds legend { font-weight: 700; font-size: .85rem; padding: 0 4px; }
+.cmds .row { align-items: flex-end; }
 
 .search-dlg { width: min(560px, calc(100vw - 32px)); margin-top: 12vh; }
 .search-dlg .dialog { gap: 8px; }

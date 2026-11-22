@@ -11,7 +11,7 @@ contextBridge.exposeInMainWorld('bp', {
   move: (kind, id, to, before) => ipcRenderer.invoke('store:move', kind, id, to, before),
   bulkPreview: (filter) => ipcRenderer.invoke('store:bulkPreview', filter),
   bulkApply: (filter, patch) => ipcRenderer.invoke('store:bulkApply', filter, patch),
-  open: (connId, cols, rows) => ipcRenderer.invoke('session:open', connId, cols, rows),
+  open: (connId, cols, rows, run) => ipcRenderer.invoke('session:open', connId, cols, rows, run),
   write: (id, d) => ipcRenderer.send('session:write', id, d),
   resize: (id, c, r) => ipcRenderer.send('session:resize', id, c, r),
   close: (id) => ipcRenderer.send('session:close', id),

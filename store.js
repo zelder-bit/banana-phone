@@ -120,6 +120,12 @@ function bulkUpdate(data, filter, patch) {
 
 function upsert(data, input) {
   const { copyPasswordFrom, ...conn } = input;
+  // Saved commands come from the page: keep only well-formed ones.
+  if (conn.commands !== undefined) {
+    conn.commands = (Array.isArray(conn.commands) ? conn.commands : [])
+      .filter((x) => typeof x?.name === 'string' && typeof x.cmd === 'string' && x.name.trim() && x.cmd.trim())
+      .map((x) => ({ name: x.name.trim(), cmd: x.cmd.trim(), onStart: x.onStart === true }));
+  }
   if (copyPasswordFrom && !conn.id && conn.password === undefined) { // new connections only
     const src = data.connections.find((c) => c.id === copyPasswordFrom);
     if (src?.password) conn.password = src.password; // copied still encrypted: never decrypted on the way

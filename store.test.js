@@ -186,3 +186,22 @@ test('a folder moved by drag keeps its icon, and so do its subfolders', () => {
   store.moveFolder(d, 'a', 'c');
   assert.deepStrictEqual(d.folderIcons, { 'c/a': 'kiwi', 'c/a/b': 'lemon' });
 });
+
+test('upsert keeps only well-formed saved commands', () => {
+  const d = { ordered: true, folders: [], folderIcons: {}, connections: [] };
+  const c = store.upsert(d, { name: 'box', protocol: 'ssh', commands: [
+    { name: ' Attach ', cmd: ' tmux attach ', onStart: 'yes' },
+    { name: 'empty', cmd: '   ' },
+    { name: 5, cmd: 'ls' },
+    null,
+    { name: 'logs', cmd: 'journalctl -f', onStart: true },
+  ] });
+  assert.deepStrictEqual(d.connections[0].commands, [
+    { name: 'Attach', cmd: 'tmux attach', onStart: false },
+    { name: 'logs', cmd: 'journalctl -f', onStart: true },
+  ]);
+  store.upsert(d, { id: c.id, commands: 'rm -rf /' }); // not a list: no commands
+  assert.deepStrictEqual(d.connections[0].commands, []);
+  store.upsert(d, { id: c.id, name: 'box2' }); // not sent: left alone
+  assert.deepStrictEqual(d.connections[0].commands, []);
+});

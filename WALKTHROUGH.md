@@ -366,6 +366,12 @@ export const parentOf = (f) => f.slice(0, Math.max(0, f.lastIndexOf('/')));
 ```js
 function upsert(data, input) {
   const { copyPasswordFrom, ...conn } = input;
+  // Saved commands come from the page: keep only well-formed ones.
+  if (conn.commands !== undefined) {
+    conn.commands = (Array.isArray(conn.commands) ? conn.commands : [])
+      .filter((x) => typeof x?.name === 'string' && typeof x.cmd === 'string' && x.name.trim() && x.cmd.trim())
+      .map((x) => ({ name: x.name.trim(), cmd: x.cmd.trim(), onStart: x.onStart === true }));
+  }
   if (copyPasswordFrom && !conn.id && conn.password === undefined) { // new connections only
     const src = data.connections.find((c) => c.id === copyPasswordFrom);
     if (src?.password) conn.password = src.password; // copied still encrypted: never decrypted on the way
@@ -381,7 +387,9 @@ function upsert(data, input) {
 
 `{ ...old, ...conn }` builds a new object with all of `old`'s properties, then `conn`'s on top. That is how a partial update such as `{ id, folder }` changes only the folder. `fillFolders` then makes sure a folder typed into the edit dialog for the first time (and its parents) is listed in `folders`.
 
-The first lines handle **Duplicate**. The page never sees passwords, so it cannot copy one into the duplicate. It sends `copyPasswordFrom: <id of the original>` instead, and `upsert` copies the original's stored value, which is still encrypted. The same keyring key encrypted it, so the copy decrypts just like the original. The rest pattern `{ copyPasswordFrom, ...conn }` keeps the helper field out of the saved file. `src?.password` is **optional chaining**: if no connection has that id, `src` is `undefined` and the expression gives `undefined` instead of throwing. A password typed in the dialog (or `''` from "Remove the saved password") always wins, because the copy only happens while `conn.password` is still `undefined`, and only for a new connection (no `id` yet), so an existing connection can never have its password swapped this way.
+The `commands` block cleans up a terminal connection's **saved commands** (a list of `{ name, cmd, onStart }`). The page is our own code, but it is still the other side of the IPC bridge, so the store does not take its word: anything that is not a list becomes an empty list, entries without a text name and command are dropped, and `onStart` is only true when it is exactly `true`. If the page does not send `commands` at all (an RDP edit, a drag into another folder), the merge below leaves the saved ones alone.
+
+The `copyPasswordFrom` lines handle **Duplicate**. The page never sees passwords, so it cannot copy one into the duplicate. It sends `copyPasswordFrom: <id of the original>` instead, and `upsert` copies the original's stored value, which is still encrypted. The same keyring key encrypted it, so the copy decrypts just like the original. The rest pattern `{ copyPasswordFrom, ...conn }` keeps the helper field out of the saved file. `src?.password` is **optional chaining**: if no connection has that id, `src` is `undefined` and the expression gives `undefined` instead of throwing. A password typed in the dialog (or `''` from "Remove the saved password") always wins, because the copy only happens while `conn.password` is still `undefined`, and only for a new connection (no `id` yet), so an existing connection can never have its password swapped this way.
 
 ---
 
@@ -517,7 +525,7 @@ The page sends the new password in plain text over IPC (it lives in your own pro
 ### SSH sessions
 
 ```js
-function openSsh(id, conn, cols, rows) {
+function openSsh(id, conn, cols, rows, start) {
   const client = new Client();
   let stream;
   const out = (s) => send('session:data', id, s);
@@ -649,14 +657,15 @@ Finally `openSsh` returns the common session shape:
   };
 ```
 
-`stream?.write(d)` does nothing if the shell is not open yet (`stream` is still `undefined`), instead of crashing.
+The page gets the session id back as soon as connecting *starts*, but the shell (`stream`) only exists once the login is done. `stream?.write(d)` uses optional chaining: keys typed in between are dropped on purpose, because you can't see what you are typing into yet (it might be a password meant for a dialog, which would otherwise run as a command and land in the shell's history). Saved commands are different: they come in as `start`, already ending in `'\r'`, and the shell callback types them with `for (const d of start) s.write(d);` once the shell exists. `stream?.setWindow` works the same way: a resize before the shell exists does nothing, and the shell opens at the latest size anyway.
 
 ### Local terminals
 
 ```js
-function openLocal(id, cols, rows) {
+function openLocal(id, cols, rows, start) {
   const shell = process.env.SHELL || '/bin/bash';
   const p = pty.spawn(shell, [], { name: 'xterm-256color', cols, rows, cwd: os.homedir(), env: shellEnv() });
+  for (const d of start) p.write(d); // the pty holds them until the shell reads its input
   p.onData((d) => send('session:data', id, d));
   p.onExit(() => { sessions.delete(id); send('session:exit', id); });
   return { write: (d) => p.write(d), resize: (c, r) => p.resize(c, r), close: () => p.kill() };
@@ -683,7 +692,7 @@ A plain child process (`child_process.spawn`) would not work for an interactive 
 ### Opening a session
 
 ```js
-ipcMain.handle('session:open', async (_e, connId, cols = 80, rows = 24) => {
+ipcMain.handle('session:open', async (_e, connId, cols = 80, rows = 24, run) => {
   const conn = connId === 'local' ? { protocol: 'local' } : data.connections.find((c) => c.id === connId);
   if (!conn) throw new Error('Connection not found');
   if (conn.protocol === 'rdp') {
@@ -703,10 +712,14 @@ ipcMain.handle('session:open', async (_e, connId, cols = 80, rows = 24) => {
     return { kind: 'remote', url: await guacd.openRemote(conn, dec(conn.password)) };
   }
   const id = crypto.randomUUID();
-  sessions.set(id, conn.protocol === 'ssh' ? openSsh(id, conn, cols, rows) : openLocal(id, cols, rows));
+  // Typed in as soon as the shell is ready: the saved "Run on start" commands, then `run` (a saved command picked from the menu).
+  const start = [...(conn.commands || []).filter((x) => x.onStart).map((x) => x.cmd), ...(typeof run === 'string' && run ? [run] : [])].map((c) => c + '\r');
+  sessions.set(id, conn.protocol === 'ssh' ? openSsh(id, conn, cols, rows, start) : openLocal(id, cols, rows, start));
   return { kind: 'term', id };
 });
 ```
+
+For a terminal, main works out `start`, the lines to type in once the shell is ready: the connection's saved commands marked "Run on start" (read from its own copy of the data, not from the page), then `run`, an optional fifth argument the page sends when you pick a saved command for a connection that has no open session yet. `typeof run === 'string' && run` ignores anything that is not a non-empty string. This adds nothing the page could not already do: it can type into any session it opened with `session:write`.
 
 * `async` makes the function return a **Promise** and lets it use `await`, which pauses this function (not the whole app) until another Promise settles. `guacd.openRemote` may need to start a Docker container, which takes a while.
 * `throw new Error(...)` inside a `handle` rejects the Promise on the page side, where `connect()` catches it and shows the message in the pane.
@@ -769,7 +782,7 @@ contextBridge.exposeInMainWorld('bp', {
   get: () => ipcRenderer.invoke('store:get'),
   save: (conn) => ipcRenderer.invoke('store:save', conn),
   ...
-  open: (connId, cols, rows) => ipcRenderer.invoke('session:open', connId, cols, rows),
+  open: (connId, cols, rows, run) => ipcRenderer.invoke('session:open', connId, cols, rows, run),
   write: (id, d) => ipcRenderer.send('session:write', id, d),
   onData: (fn) => ipcRenderer.on('session:data', (_e, id, d) => fn(id, d)),
   onExit: (fn) => ipcRenderer.on('session:exit', (_e, id) => fn(id)),
@@ -1511,7 +1524,7 @@ function gutter(t, i) {
 ### Opening a connection
 
 ```js
-async function connect(connId, split = false, into = null) {
+async function connect(connId, split = false, into = null, run) {
   const c = connId === 'local' ? { id: 'local', name: 'Terminal', protocol: 'local' } : view.connections.find((x) => x.id === connId);
   if (!c) return;
   const p = makePane(c.name, c.protocol);
@@ -1523,7 +1536,7 @@ async function connect(connId, split = false, into = null) {
   selectTab(t);
   try {
     if (c.protocol === 'rdp' || c.protocol === 'vnc') await openRemote(p, c);
-    else await openTerm(p, c);
+    else await openTerm(p, c, run);
   } catch (e) {
     status(p, errText(e), true);
   }
@@ -1535,7 +1548,7 @@ The pane is shown **first** and filled afterwards, so you see "Connecting to …
 ### Terminal panes (xterm.js)
 
 ```js
-async function openTerm(p, c) {
+async function openTerm(p, c, run) {
   const term = new Terminal({ fontFamily: 'ui-monospace, "DejaVu Sans Mono", monospace', fontSize: 14, cursorBlink: true, theme: termTheme() });
   const fit = new FitAddon();
   term.loadAddon(fit);
@@ -1543,7 +1556,7 @@ async function openTerm(p, c) {
   p.body.append(box);
   term.open(box);
   fit.fit();
-  const res = await window.bp.open(c.id, term.cols, term.rows);
+  const res = await window.bp.open(c.id, term.cols, term.rows, run); // main also types the "Run on start" commands
   if (p.closed) { window.bp.close(res.id); term.dispose(); return; } // pane closed while connecting
   p.sid = res.id;
   terms.set(p.sid, p);
@@ -1569,6 +1582,20 @@ The loop for a terminal is:
 * `FitAddon.fit()` measures the box and works out how many columns and rows of characters fit. A **ResizeObserver** calls it whenever the pane changes size (window resize, gutter drag, switching to grid). xterm then fires `onResize`, which tells main, which tells the pty or the SSH server, so programs like `htop` redraw at the new size.
 * `termTheme()` reads the CSS variables with `getComputedStyle` so the terminal matches the fruit theme, and is re-applied when the theme changes.
 * When a session ends, the pane shows "[session ended — press any key to close]".
+
+**Saved commands.** An SSH or local-terminal connection can carry named commands (`conn.commands`). Running one is just typing it for you:
+
+```js
+const runCmd = (p, cmd) => p.sid && window.bp.write(p.sid, cmd + '\r');
+```
+
+It goes down the same `bp.write` path as your key presses, followed by `'\r'`, which is what the Enter key sends to a terminal. `p.sid &&` skips a pane whose session never started. There are three ways in:
+
+* **Run on start** is done by main, not the page: when it opens the session it types every command marked "Run on start", in order, as soon as the shell is ready (see [§6](#opening-a-session)). Doing it there matters for SSH, where the page cannot tell when the shell is up.
+* **Pane header right-click** lists `Run: <name>` for the pane's connection (`cmdsOf(p.connId)`).
+* **Sidebar right-click** lists them too. `runOn(connId, cmd)` uses an open session of that connection (one in the current tab first), or opens one with `connect(connId, false, null, cmd)`, which hands `cmd` to main to type in once the shell is ready.
+
+In the edit dialog, the **Saved commands** box (class `term-only`, hidden for RDP and VNC the same way `.rdp-only` fields are) is run by `editCmds(c.commands)`. It works on a copy of the list: the dropdown picks which command the Name / Runs / Run on start fields edit, its last entry "＋ New command" starts a new one as soon as you type, and **Delete** removes the selected one. Cancel throws the copy away; Save sends it as `conn.commands`, using the command itself as the name if you left the name empty. A command with a name but nothing to run can't be saved; a toast says so instead of it vanishing quietly.
 
 ### Remote desktop panes (Guacamole)
 

@@ -336,6 +336,40 @@ test('tabs, splits, gutter and dialogs', { timeout: 120000 }, async (t) => {
     await app.waitFor(`${count('.tab')} === 1 && ${count('.pane')} === 2 && document.querySelector('#toast').textContent.startsWith('Kept 1 session')`);
   });
 
+  await t.test('saved commands: edited in the dialog, run on start, run again from the pane menu', async () => {
+    await app.click('#new-conn');
+    await app.waitFor('document.querySelector("#edit-dlg").open');
+    await app.eval(`(() => { const f = document.querySelector('#edit-form').elements; f.name.value = 'cmdbox'; f.protocol.value = 'local'; f.protocol.dispatchEvent(new Event('change')); })()`);
+    assert.ok(await app.eval('document.querySelector("#edit-dlg .cmds").offsetParent !== null'), 'command block shown for a local terminal');
+    await app.click('#cmd-name');
+    await app.type('answer');
+    await app.click('#cmd-text');
+    await app.type('echo bp-$((6*7))');
+    await app.click('#cmd-start');
+    assert.strictEqual(await app.eval('[...document.querySelector("#cmd-pick").options].map((o) => o.text).join()'), 'answer,＋ New command');
+    await app.eval(`(() => { const f = document.querySelector('#edit-form').elements; f.protocol.value = 'rdp'; f.protocol.dispatchEvent(new Event('change')); })()`);
+    assert.ok(await app.eval('document.querySelector("#edit-dlg .cmds").offsetParent === null'), 'command block hidden for RDP');
+    await app.eval(`(() => { const f = document.querySelector('#edit-form').elements; f.protocol.value = 'local'; f.protocol.dispatchEvent(new Event('change')); })()`);
+    await app.click('#edit-dlg .btn.primary');
+    const saved = '(async () => JSON.stringify((await window.bp.get()).connections.find((c) => c.name === "cmdbox")?.commands))()';
+    await app.waitFor(`(async () => (await ${saved}) === ${JSON.stringify(JSON.stringify([{ name: 'answer', cmd: 'echo bp-$((6*7))', onStart: true }]))})()`);
+
+    const row = `[...document.querySelectorAll('#tree .conn')].find((n) => n.textContent.startsWith('cmdbox'))`;
+    await app.eval(`${row}.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))`);
+    const answers = `(document.querySelector('.split:not([hidden]) .xterm-rows')?.textContent.match(/bp-42/g) || []).length`;
+    await app.waitFor(`${answers} === 1`); // ran on start
+    await app.eval(`(() => { document.querySelector('.split:not([hidden]) .pane-head').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 50, clientY: 50 }));
+      [...document.querySelectorAll('#menu button')].find((b) => b.textContent === 'Run: answer').click(); })()`);
+    await app.waitFor(`${answers} === 2`);
+
+    // From the sidebar with no session open: a new one runs "Run on start", then the picked command.
+    await app.click('.tab.active .x');
+    await app.waitFor(`![...document.querySelectorAll('.pane-head')].some((h) => h.textContent.includes('cmdbox'))`);
+    await app.eval(`(() => { ${row}.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 50, clientY: 50 }));
+      [...document.querySelectorAll('#menu button')].find((b) => b.textContent === 'Run: answer').click(); })()`);
+    await app.waitFor(`${answers} === 2 && document.querySelector('.tab.active .t').textContent === 'cmdbox'`);
+  });
+
   await t.test('the sidebar grip widens the list, collapse still hides it, and the width survives a reload', async () => {
     const sideW = 'document.querySelector("#side").getBoundingClientRect().width';
     const before = await app.eval(sideW);
