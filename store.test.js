@@ -73,5 +73,24 @@ test('save writes a backup and load round-trips', () => {
   store.save(file, d, { backup: true });
   assert.strictEqual(store.load(file + '.bak').connections[0].name, 'dc01');
   assert.strictEqual(store.load(file).connections[0].name, 'changed');
-  assert.deepStrictEqual(store.load(path.join(dir, 'missing.json')), { folders: [], connections: [] });
+  assert.deepStrictEqual(store.load(path.join(dir, 'missing.json')), { folders: [], folderIcons: {}, connections: [] });
+});
+
+test('folder icons: unknown name rejected, follows a rename, removed with the folder', () => {
+  const d = { ...sample(), folderIcons: {} };
+  assert.throws(() => store.setFolderIcon(d, 'Prod', '../etc/passwd'));
+  assert.deepStrictEqual(d.folderIcons, {});
+  store.setFolderIcon(d, 'Prod', 'kiwi');
+  store.setFolderIcon(d, 'Prod/Windows', 'peach');
+  store.setFolderIcon(d, 'Production', 'lemon');
+  store.moveFolderIcons(d, 'Prod', 'Live');
+  assert.deepStrictEqual(d.folderIcons, { Live: 'kiwi', 'Live/Windows': 'peach', Production: 'lemon' });
+  store.moveFolderIcons(d, 'Live', null);
+  assert.deepStrictEqual(d.folderIcons, { Production: 'lemon' });
+});
+
+test('a file saved before folder icons existed still loads', () => {
+  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'bp-')), 'c.json');
+  fs.writeFileSync(file, JSON.stringify({ folders: ['A'], connections: [] }));
+  assert.deepStrictEqual(store.load(file).folderIcons, {});
 });

@@ -3,13 +3,15 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-const empty = () => ({ folders: [], connections: [] });
+const empty = () => ({ folders: [], folderIcons: {}, connections: [] });
+
+const FOLDER_ICONS = ['apple', 'banana', 'coconut', 'grapes', 'kiwi', 'lemon', 'orange', 'orange-slice', 'peach', 'strawberry', 'watermelon'];
 
 function load(file) {
   try {
     const data = JSON.parse(fs.readFileSync(file, 'utf8'));
     if (!data || typeof data !== 'object') throw new Error('connections file is not a JSON object');
-    return { folders: data.folders || [], connections: data.connections || [] };
+    return { folders: data.folders || [], folderIcons: data.folderIcons || {}, connections: data.connections || [] };
   } catch (e) {
     if (e.code === 'ENOENT') return empty();
     throw e; // a corrupt file must not be silently replaced with an empty one
@@ -26,6 +28,21 @@ function save(file, data, { backup = false } = {}) {
 }
 
 const inFolder = (folder, f) => folder === f || (folder || '').startsWith(f + '/');
+
+function setFolderIcon(data, folder, name) {
+  if (!FOLDER_ICONS.includes(name)) throw new Error(`Unknown folder icon: ${name}`);
+  data.folderIcons[folder] = name;
+}
+
+// Call when a folder path changes ("a" -> "b"); subfolders follow. Drop with to = null.
+function moveFolderIcons(data, from, to) {
+  for (const k of Object.keys(data.folderIcons)) {
+    if (!inFolder(k, from)) continue;
+    const icon = data.folderIcons[k];
+    delete data.folderIcons[k];
+    if (to != null) data.folderIcons[to + k.slice(from.length)] = icon;
+  }
+}
 
 function matches(conn, q) {
   q = q.trim().toLowerCase();
@@ -72,4 +89,4 @@ function remove(data, id) {
   data.connections = data.connections.filter((c) => c.id !== id);
 }
 
-module.exports = { load, save, matches, select, bulkUpdate, upsert, remove, inFolder };
+module.exports = { load, save, matches, select, bulkUpdate, upsert, remove, inFolder, FOLDER_ICONS, setFolderIcon, moveFolderIcons };

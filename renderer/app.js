@@ -13,7 +13,7 @@ const ICON = { ssh: 'banana', rdp: 'orange-slice', vnc: 'grapes', local: 'kiwi' 
 const icon = (p) => el('img', { src: `svg/${ICON[p] || 'lemon'}.svg`, alt: '' });
 const MAX_PANES = 4;
 
-let view = { folders: [], connections: [] };
+let view = { folders: [], folderIcons: {}, connections: [] };
 let selected = null;
 
 // Falling fruit behind the top bar: each fruit gets its own position, size, speed and sway.
@@ -114,7 +114,7 @@ function renderTree() {
     const kids = folders.filter((f) => f.split('/').length === (parent ? parent.split('/').length + 1 : 1) && (!parent || f.startsWith(parent + '/')));
     const nodes = kids.map((f) => {
       const total = view.connections.filter((c) => c.folder === f || (c.folder || '').startsWith(f + '/')).length;
-      const sum = el('summary', {}, el('span', { textContent: f.split('/').pop() }), el('span', { className: 'count', textContent: total }));
+      const sum = el('summary', {}, el('img', { className: 'folder-icon', src: `svg/${view.folderIcons[f] || 'crate'}.svg`, alt: '' }), el('span', { textContent: f.split('/').pop() }), el('span', { className: 'count', textContent: total }));
       sum.oncontextmenu = (e) => folderMenu(e, f);
       dropTarget(sum, f);
       const d = el('details', { open: openFolders.has(f) }, sum, ...build(f), ...connsIn(f).map(connRow));
@@ -186,12 +186,23 @@ function folderMenu(e, f) {
     ['New connection here…', () => editConn({ folder: f, protocol: 'ssh' })],
     ['New subfolder…', () => newFolder(f + '/')],
     ['Open all in split', () => openFolder(f)],
+    ['Change icon…', () => pickIcon(f)],
     ['Bulk edit this folder…', () => openBulk('folder', f)],
     '-',
     ['Delete folder', async () => {
       try { refresh(await window.bp.folder({ remove: f })); } catch { toast('Only empty folders can be deleted'); }
     }, 'danger'],
   ]);
+}
+
+const FRUITS = ['apple', 'banana', 'coconut', 'grapes', 'kiwi', 'lemon', 'orange', 'orange-slice', 'peach', 'strawberry', 'watermelon'];
+function pickIcon(f) {
+  const d = $('#icon-dlg'), cur = view.folderIcons[f];
+  $('#icon-grid').replaceChildren(...FRUITS.map((n) => el('button', {
+    type: 'button', className: 'pic', title: n, ariaLabel: n, ariaPressed: String(n === cur),
+    onclick: async () => { d.close(); refresh(await window.bp.folder({ icon: { folder: f, name: n } })); },
+  }, el('img', { src: `svg/${n}.svg`, alt: '' }))));
+  d.showModal();
 }
 
 async function ask(title, value = '') {

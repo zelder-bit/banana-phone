@@ -203,6 +203,7 @@ This file has **no Electron code at all**. That is deliberate: it can be tested 
 ```json example
 {
   "folders": ["Prod/Windows", "Lab"],
+  "folderIcons": { "Lab": "kiwi" },
   "connections": [
     {
       "id": "8c1e…",
@@ -220,7 +221,7 @@ This file has **no Electron code at all**. That is deliberate: it can be tested 
 }
 ```
 
-A folder is just a string like `"Prod/Windows"`. There is no separate tree structure, so there is nothing to keep in sync: the sidebar builds the tree from these strings every time it draws. `folders` only exists so you can have an *empty* folder.
+A folder is just a string like `"Prod/Windows"`. There is no separate tree structure, so there is nothing to keep in sync: the sidebar builds the tree from these strings every time it draws. `folders` only exists so you can have an *empty* folder. `folderIcons` maps a folder path to the fruit shown next to it; a folder with no entry gets the `crate` picture. `setFolderIcon` in `store.js` checks the name against a fixed fruit list (`FOLDER_ICONS`) before saving, so the renderer can never make the app read an arbitrary file name. `moveFolderIcons(data, from, to)` carries the entries of a folder and its subfolders to a new path, or drops them when `to` is `null`; deleting a folder calls it that way.
 
 `password` is encrypted (see [§6](#encrypting-passwords)).
 
@@ -231,7 +232,7 @@ function load(file) {
   try {
     const data = JSON.parse(fs.readFileSync(file, 'utf8'));
     if (!data || typeof data !== 'object') throw new Error('connections file is not a JSON object');
-    return { folders: data.folders || [], connections: data.connections || [] };
+    return { folders: data.folders || [], folderIcons: data.folderIcons || {}, connections: data.connections || [] };
   } catch (e) {
     if (e.code === 'ENOENT') return empty();
     throw e; // a corrupt file must not be silently replaced with an empty one
@@ -384,6 +385,7 @@ const dec = (s) => {
 ```js
 const publicView = () => ({
   folders: data.folders,
+  folderIcons: data.folderIcons,
   connections: data.connections.map(({ password, ...c }) => ({ ...c, hasPassword: !!password })),
   keyring: safeStorage.getSelectedStorageBackend?.() || 'unknown',
 });
@@ -704,7 +706,7 @@ The full list of channels:
 | `store:get` | invoke | the connection list without passwords |
 | `store:save` | invoke | create or update one connection (encrypts a new password) |
 | `store:delete` | invoke | delete a connection (writes `.bak` first) |
-| `store:folder` | invoke | add an empty folder, or remove one that is empty |
+| `store:folder` | invoke | add an empty folder, remove one that is empty, or set a folder's fruit icon (`{ icon: { folder, name } }`) |
 | `store:bulkPreview` | invoke | which connections a bulk edit would touch |
 | `store:bulkApply` | invoke | apply a bulk edit (writes a timestamped backup first) |
 | `store:forgetHost` | invoke | forget a connection's saved SSH host key or RDP certificate |
@@ -1165,7 +1167,7 @@ For `"Prod/Windows/DCs"` this adds `"Prod"`, `"Prod/Windows"` and `"Prod/Windows
 const build = (parent) => {
   const kids = folders.filter((f) => f.split('/').length === (parent ? parent.split('/').length + 1 : 1) && (!parent || f.startsWith(parent + '/')));
   const nodes = kids.map((f) => {
-    const sum = el('summary', {}, el('span', { textContent: f.split('/').pop() }), el('span', { className: 'count', textContent: total }));
+    const sum = el('summary', {}, el('img', { className: 'folder-icon', src: `svg/${view.folderIcons[f] || 'crate'}.svg`, alt: '' }), el('span', { textContent: f.split('/').pop() }), el('span', { className: 'count', textContent: total }));
     const d = el('details', { open: openFolders.has(f) }, sum, ...build(f), ...connsIn(f).map(connRow));
     d.ontoggle = () => { d.open ? openFolders.add(f) : openFolders.delete(f); saveOpen(); };
     return d;
@@ -1185,6 +1187,8 @@ function setSide(collapsed) {
 ```
 
 `classList.toggle(name, force)` adds the class when `force` is true and removes it when false. `aria-expanded` tells screen readers whether the list is showing.
+
+Each folder shows its fruit icon (`crate` by default). Right-click → **Change icon…** opens `#icon-dlg`, a grid of `button.pic`; each has an `aria-label` with the fruit name and `aria-pressed` on the current one, and they are real buttons so Tab and Enter work.
 
 Which folders are open is remembered in `localStorage` (a small per-app key/value store in the browser), wrapped in `try`/`catch` because storage can be unavailable.
 
