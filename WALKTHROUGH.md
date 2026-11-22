@@ -76,7 +76,8 @@ banana-phone/
 ├── guacd.test.js       test for token encryption
 ├── scripts/
 │   ├── check-walkthrough.js   CI check that this document matches the code
-│   └── ui.e2e.js       end-to-end test: drives the real app's window (tabs, splits, dialogs)
+│   ├── ui.e2e.js       end-to-end test: drives the real app's window (tabs, splits, dialogs)
+│   └── make-banana-gif.py     rebuilds the typing-banana GIF from its source video (not part of the app)
 ├── .github/workflows/ci.yml   runs the tests and that check on every push / PR
 ├── .github/workflows/release.yml  builds and publishes the AppImage for a version tag
 ├── .npmrc              npm settings for this project (skip optional dependencies)
@@ -1218,7 +1219,7 @@ The left of the top bar holds two pictures instead of the app's name:
     <div class="brand"><img id="juice" src="juice-empty.png" alt="No active connections"><img class="brand-anim" src="banana-typing.gif" alt="banana-phone"></div>
 ```
 
-* `banana-typing.gif` is an animated picture of a banana at a terminal. A GIF plays and loops by itself, so no code drives it. Its `alt` text is the app's name, which is what a screen reader says in place of the picture.
+* `banana-typing.gif` is an animated picture of a banana at a terminal. A GIF plays and loops by itself, so no code drives it. It was built once from a video by `scripts/make-banana-gif.py`, which cuts out one strip, makes the pink background transparent and re-times the banana so it types for most of the loop; the app never runs that script. Its `alt` text is the app's name, which is what a screen reader says in place of the picture.
 * The cup starts empty. `render()` in `app.js`, which runs every time a tab opens or closes, sets it:
 
 ```js
