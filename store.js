@@ -85,7 +85,7 @@ function setFolderIcon(data, folder, name) {
 
 // Call when a folder path changes ("a" -> "b"); subfolders follow. Drop with to = null.
 function moveFolderIcons(data, from, to) {
-  for (const k of Object.keys(data.folderIcons)) {
+  for (const k of Object.keys(data.folderIcons || {})) {
     if (!inFolder(k, from)) continue;
     const icon = data.folderIcons[k];
     delete data.folderIcons[k];
