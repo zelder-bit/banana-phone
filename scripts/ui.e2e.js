@@ -271,4 +271,18 @@ test('tabs, splits, gutter and dialogs', { timeout: 120000 }, async (t) => {
     await app.waitFor('!document.querySelector("#toast").hidden && document.querySelector("#toast").textContent === "Only empty folders can be deleted"');
     assert.strictEqual(await app.eval(state), moved);
   });
+
+  await t.test('the sidebar grip widens the list, collapse still hides it, and the width survives a reload', async () => {
+    const sideW = 'document.querySelector("#side").getBoundingClientRect().width';
+    const before = await app.eval(sideW);
+    await app.drag('#side-grip', 150, 0);
+    const after = await app.eval(sideW);
+    assert.ok(Math.abs(after - before - 150) < 10, `width ${before} -> ${after}, expected about +150`);
+    await app.click('#toggle-side');
+    await app.waitFor('document.querySelector("#side").getBoundingClientRect().right <= 0'); // slid fully out at the new width
+    await app.click('#toggle-side');
+    await app.waitFor(`Math.abs(document.querySelector("#side").getBoundingClientRect().left) < 1`);
+    await app.eval('location.reload()'); // last test: the reload drops every open session
+    await app.waitFor(`document.readyState === "complete" && Math.abs(${sideW} - ${after}) < 2`);
+  });
 });
