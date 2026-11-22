@@ -3,7 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-const { FRUITS, inFolder, parentOf, matches } = require('./renderer/shared.mjs');
+const { ICONS, inFolder, parentOf, matches } = require('./renderer/shared.mjs');
 
 // `ordered`: array order is the order the user chose. Only files from before drag-to-reorder lack it.
 const empty = () => ({ ordered: true, folders: [], folderIcons: {}, connections: [] });
@@ -94,7 +94,7 @@ function moveFolder(data, from, to, before) {
 }
 
 function setFolderIcon(data, folder, name) {
-  if (!FRUITS.includes(name)) throw new Error(`Unknown folder icon: ${name}`);
+  if (!ICONS.includes(name)) throw new Error(`Unknown folder icon: ${name}`);
   if (!data.folders.includes(folder)) throw new Error('No such folder');
   data.folderIcons[folder] = name;
 }
