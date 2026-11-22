@@ -506,13 +506,13 @@ function tabMenu(e, t) {
   const closeAll = (list) => () => list.forEach(closeTab);
   const sections = [
     [
-      ['Rename…', async () => { const n = await ask('Rename tab (empty = automatic)', tabTitle(t)); if (n !== null && tabs.includes(t)) { t.name = n; render(); } }],
+      ['Rename…', async () => { const n = await ask('Rename tab (empty = automatic)', t.name || ''); if (n !== null && tabs.includes(t)) { t.name = n; render(); } }],
       ['Reconnect', () => reconnect(t)],
       ['Duplicate', () => copyTab(t)],
     ],
     [
       ...(many ? [['Side by side', () => setLayout(t, 'h')], ['Stacked', () => setLayout(t, 'v')], ['Grid', () => setLayout(t, 'grid')]] : []),
-      ...(others.length ? [['Split all into this tab', () => mergeInto(t)]] : []),
+      ...(others.length && t.panes.length < MAX_PANES ? [['Split all into this tab', () => mergeInto(t)]] : []),
       ...(many ? [['Give each session its own tab', () => explode(t)]] : []),
     ],
     [
@@ -532,12 +532,16 @@ function copyTab(t) {
   if (!t2.panes.length) { dropTab(t2); selectTab(current); return null; }
   return t2;
 }
-// Reconnect = a fresh copy in this tab's place, then close the old sessions.
+// Reconnect = a fresh copy in this tab's place, then close the old sessions. A session whose connection
+// was deleted cannot be opened again, so it moves over still running instead of being closed.
 function reconnect(t) {
   const t2 = copyTab(t);
   if (!t2) return toast('Nothing to reconnect: its connections were deleted');
   tabs.splice(tabs.indexOf(t2), 1);
   tabs.splice(tabs.indexOf(t), 0, t2);
+  const kept = t.panes.filter((p) => p.connId !== 'local' && !view.connections.some((c) => c.id === p.connId));
+  for (const p of kept) movePane(p, t2);
+  if (kept.length) toast(`Kept ${kept.length} session${kept.length > 1 ? 's' : ''} whose connection was deleted, without reconnecting`);
   closeTab(t);
 }
 

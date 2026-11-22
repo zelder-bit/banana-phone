@@ -1444,9 +1444,9 @@ How the user's actions map onto it:
 
 `flatMap` turns the list of sections into one flat list of rows, putting a `'-'` (separator) in front of every section but the first.
 
-* **Rename…** sets `t.name`; `tabTitle(t)` shows it instead of the automatic title. Leaving it empty goes back to automatic. Names are not saved between launches.
+* **Rename…** sets `t.name`; `tabTitle(t)` shows it instead of the automatic title. The box starts with the tab's own name, or empty, so pressing Enter on an unnamed tab doesn't freeze its automatic title; leaving it empty goes back to automatic. Names are not saved between launches.
 * **Duplicate** is `copyTab(t)`: a new tab with the same layout and name, calling `connect(p.connId, false, t2)` for each pane. `connect` takes an optional third argument, the tab to open into.
-* **Reconnect** makes the same copy, moves it into the old tab's place in `tabs`, then closes the old tab, which ends its sessions.
+* **Reconnect** makes the same copy, moves it into the old tab's place in `tabs`, then closes the old tab, which ends its sessions. A session whose saved connection was deleted can't be opened again, so it is moved into the new tab still running (with a toast saying so) instead of being closed.
 * **Close other tabs** / **Close tabs to the right** / **Close tab** call `closeTab` on each.
 
 Full screen has three parts that must always agree: the pane's `.full` class, the banana, and the real window. One function changes all three, so they cannot get out of step:
