@@ -525,7 +525,7 @@ The page sends the new password in plain text over IPC (it lives in your own pro
 ### SSH sessions
 
 ```js
-function openSsh(id, conn, cols, rows) {
+function openSsh(id, conn, cols, rows, start) {
   const client = new Client();
   let stream;
   const out = (s) => send('session:data', id, s);
@@ -651,20 +651,21 @@ Finally `openSsh` returns the common session shape:
 
 ```js
   return {
-    write: (d) => (stream ? stream.write(d) : early.push(d)),
+    write: (d) => stream?.write(d),
     resize: (c, r) => stream?.setWindow(r, c, 0, 0),
     close: () => client.end(),
   };
 ```
 
-The page gets the session id back as soon as connecting *starts*, but the shell (`stream`) only exists once the login is done. Anything written in between, such as a saved "Run on start" command or keys typed while it connects, goes into the `early` list, and the shell callback sends it on with `for (const d of early.splice(0)) s.write(d);` (`splice(0)` empties the list and returns what was in it). `stream?.setWindow` uses optional chaining: a resize before the shell exists does nothing, and the shell opens at the latest size anyway.
+The page gets the session id back as soon as connecting *starts*, but the shell (`stream`) only exists once the login is done. `stream?.write(d)` uses optional chaining: keys typed in between are dropped on purpose, because you can't see what you are typing into yet (it might be a password meant for a dialog, which would otherwise run as a command and land in the shell's history). Saved commands are different: they come in as `start`, already ending in `'\r'`, and the shell callback types them with `for (const d of start) s.write(d);` once the shell exists. `stream?.setWindow` works the same way: a resize before the shell exists does nothing, and the shell opens at the latest size anyway.
 
 ### Local terminals
 
 ```js
-function openLocal(id, cols, rows) {
+function openLocal(id, cols, rows, start) {
   const shell = process.env.SHELL || '/bin/bash';
   const p = pty.spawn(shell, [], { name: 'xterm-256color', cols, rows, cwd: os.homedir(), env: shellEnv() });
+  for (const d of start) p.write(d); // the pty holds them until the shell reads its input
   p.onData((d) => send('session:data', id, d));
   p.onExit(() => { sessions.delete(id); send('session:exit', id); });
   return { write: (d) => p.write(d), resize: (c, r) => p.resize(c, r), close: () => p.kill() };
@@ -691,7 +692,7 @@ A plain child process (`child_process.spawn`) would not work for an interactive 
 ### Opening a session
 
 ```js
-ipcMain.handle('session:open', async (_e, connId, cols = 80, rows = 24) => {
+ipcMain.handle('session:open', async (_e, connId, cols = 80, rows = 24, run) => {
   const conn = connId === 'local' ? { protocol: 'local' } : data.connections.find((c) => c.id === connId);
   if (!conn) throw new Error('Connection not found');
   if (conn.protocol === 'rdp') {
@@ -711,10 +712,14 @@ ipcMain.handle('session:open', async (_e, connId, cols = 80, rows = 24) => {
     return { kind: 'remote', url: await guacd.openRemote(conn, dec(conn.password)) };
   }
   const id = crypto.randomUUID();
-  sessions.set(id, conn.protocol === 'ssh' ? openSsh(id, conn, cols, rows) : openLocal(id, cols, rows));
+  // Typed in as soon as the shell is ready: the saved "Run on start" commands, then `run` (a saved command picked from the menu).
+  const start = [...(conn.commands || []).filter((x) => x.onStart).map((x) => x.cmd), ...(typeof run === 'string' && run ? [run] : [])].map((c) => c + '\r');
+  sessions.set(id, conn.protocol === 'ssh' ? openSsh(id, conn, cols, rows, start) : openLocal(id, cols, rows, start));
   return { kind: 'term', id };
 });
 ```
+
+For a terminal, main works out `start`, the lines to type in once the shell is ready: the connection's saved commands marked "Run on start" (read from its own copy of the data, not from the page), then `run`, an optional fifth argument the page sends when you pick a saved command for a connection that has no open session yet. `typeof run === 'string' && run` ignores anything that is not a non-empty string. This adds nothing the page could not already do: it can type into any session it opened with `session:write`.
 
 * `async` makes the function return a **Promise** and lets it use `await`, which pauses this function (not the whole app) until another Promise settles. `guacd.openRemote` may need to start a Docker container, which takes a while.
 * `throw new Error(...)` inside a `handle` rejects the Promise on the page side, where `connect()` catches it and shows the message in the pane.
@@ -777,7 +782,7 @@ contextBridge.exposeInMainWorld('bp', {
   get: () => ipcRenderer.invoke('store:get'),
   save: (conn) => ipcRenderer.invoke('store:save', conn),
   ...
-  open: (connId, cols, rows) => ipcRenderer.invoke('session:open', connId, cols, rows),
+  open: (connId, cols, rows, run) => ipcRenderer.invoke('session:open', connId, cols, rows, run),
   write: (id, d) => ipcRenderer.send('session:write', id, d),
   onData: (fn) => ipcRenderer.on('session:data', (_e, id, d) => fn(id, d)),
   onExit: (fn) => ipcRenderer.on('session:exit', (_e, id) => fn(id)),
@@ -1509,7 +1514,7 @@ function gutter(t, i) {
 ### Opening a connection
 
 ```js
-async function connect(connId, split = false, into = null) {
+async function connect(connId, split = false, into = null, run) {
   const c = connId === 'local' ? { id: 'local', name: 'Terminal', protocol: 'local' } : view.connections.find((x) => x.id === connId);
   if (!c) return;
   const p = makePane(c.name, c.protocol);
@@ -1521,7 +1526,7 @@ async function connect(connId, split = false, into = null) {
   selectTab(t);
   try {
     if (c.protocol === 'rdp' || c.protocol === 'vnc') await openRemote(p, c);
-    else await openTerm(p, c);
+    else await openTerm(p, c, run);
   } catch (e) {
     status(p, errText(e), true);
   }
@@ -1533,7 +1538,7 @@ The pane is shown **first** and filled afterwards, so you see "Connecting to …
 ### Terminal panes (xterm.js)
 
 ```js
-async function openTerm(p, c) {
+async function openTerm(p, c, run) {
   const term = new Terminal({ fontFamily: 'ui-monospace, "DejaVu Sans Mono", monospace', fontSize: 14, cursorBlink: true, theme: termTheme() });
   const fit = new FitAddon();
   term.loadAddon(fit);
@@ -1541,7 +1546,7 @@ async function openTerm(p, c) {
   p.body.append(box);
   term.open(box);
   fit.fit();
-  const res = await window.bp.open(c.id, term.cols, term.rows);
+  const res = await window.bp.open(c.id, term.cols, term.rows, run); // main also types the "Run on start" commands
   if (p.closed) { window.bp.close(res.id); term.dispose(); return; } // pane closed while connecting
   p.sid = res.id;
   terms.set(p.sid, p);
@@ -1576,11 +1581,11 @@ const runCmd = (p, cmd) => p.sid && window.bp.write(p.sid, cmd + '\r');
 
 It goes down the same `bp.write` path as your key presses, followed by `'\r'`, which is what the Enter key sends to a terminal. `p.sid &&` skips a pane whose session never started. There are three ways in:
 
-* **Run on start**: right after `openTerm` registers the session, `for (const x of c.commands || []) if (x.onStart) runCmd(p, x.cmd);` types every command marked "Run on start", in order.
+* **Run on start** is done by main, not the page: when it opens the session it types every command marked "Run on start", in order, as soon as the shell is ready (see [§6](#opening-a-session)). Doing it there matters for SSH, where the page cannot tell when the shell is up.
 * **Pane header right-click** lists `Run: <name>` for the pane's connection (`cmdsOf(p.connId)`).
-* **Sidebar right-click** lists them too. `runOn(connId, cmd)` uses an open session of that connection (one in the current tab first), or opens one: `connect()` now returns its pane once the session is up, so `runOn` can `await` it and then type the command.
+* **Sidebar right-click** lists them too. `runOn(connId, cmd)` uses an open session of that connection (one in the current tab first), or opens one with `connect(connId, false, null, cmd)`, which hands `cmd` to main to type in once the shell is ready.
 
-In the edit dialog, the **Saved commands** box (class `term-only`, hidden for RDP and VNC the same way `.rdp-only` fields are) is run by `editCmds(c.commands)`. It works on a copy of the list: the dropdown picks which command the Name / Runs / Run on start fields edit, its last entry "＋ New command" starts a new one as soon as you type, and **Delete** removes the selected one. Cancel throws the copy away; Save sends it as `conn.commands`, using the command itself as the name if you left the name empty.
+In the edit dialog, the **Saved commands** box (class `term-only`, hidden for RDP and VNC the same way `.rdp-only` fields are) is run by `editCmds(c.commands)`. It works on a copy of the list: the dropdown picks which command the Name / Runs / Run on start fields edit, its last entry "＋ New command" starts a new one as soon as you type, and **Delete** removes the selected one. Cancel throws the copy away; Save sends it as `conn.commands`, using the command itself as the name if you left the name empty. A command with a name but nothing to run can't be saved; a toast says so instead of it vanishing quietly.
 
 ### Remote desktop panes (Guacamole)
 

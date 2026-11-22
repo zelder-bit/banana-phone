@@ -360,5 +360,12 @@ test('tabs, splits, gutter and dialogs', { timeout: 120000 }, async (t) => {
     await app.eval(`(() => { document.querySelector('.split:not([hidden]) .pane-head').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 50, clientY: 50 }));
       [...document.querySelectorAll('#menu button')].find((b) => b.textContent === 'Run: answer').click(); })()`);
     await app.waitFor(`${answers} === 2`);
+
+    // From the sidebar with no session open: a new one runs "Run on start", then the picked command.
+    await app.click('.tab.active .x');
+    await app.waitFor(`![...document.querySelectorAll('.pane-head')].some((h) => h.textContent.includes('cmdbox'))`);
+    await app.eval(`(() => { ${row}.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 50, clientY: 50 }));
+      [...document.querySelectorAll('#menu button')].find((b) => b.textContent === 'Run: answer').click(); })()`);
+    await app.waitFor(`${answers} === 2 && document.querySelector('.tab.active .t').textContent === 'cmdbox'`);
   });
 });

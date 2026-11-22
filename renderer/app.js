@@ -296,7 +296,11 @@ function editConn(c = { protocol: 'ssh' }) {
     if (!conn.id) delete conn.id;
     if (conn.folder) { openFolders.add(conn.folder); saveOpen(); }
     conn.adminSession = conn.protocol === 'rdp' && f.adminSession.checked;
-    if (conn.protocol === 'ssh' || conn.protocol === 'local') conn.commands = cmds.map((x) => ({ ...x, name: x.name.trim() || x.cmd.trim() })); // the store drops empty ones
+    if (conn.protocol === 'ssh' || conn.protocol === 'local') {
+      conn.commands = cmds.map((x) => ({ ...x, name: x.name.trim() || x.cmd.trim() })); // the store drops empty ones
+      const empty = cmds.filter((x) => x.name.trim() && !x.cmd.trim()).length;
+      if (empty) toast(`Not saved: ${empty} command${empty > 1 ? 's' : ''} with a name but nothing to run`);
+    }
     refresh(await window.bp.save(conn));
   };
 }
@@ -677,7 +681,8 @@ function status(p, text, err = false) {
 }
 
 // Open a connection: new tab, or (split) beside the current tab's sessions, or into tab `into`.
-async function connect(connId, split = false, into = null) {
+// `run`: a saved command to type in once the session is up.
+async function connect(connId, split = false, into = null, run) {
   const c = connId === 'local' ? { id: 'local', name: 'Terminal', protocol: 'local' } : view.connections.find((x) => x.id === connId);
   if (!c) return;
   const p = makePane(c.name, c.protocol);
@@ -689,30 +694,30 @@ async function connect(connId, split = false, into = null) {
   selectTab(t);
   try {
     if (c.protocol === 'rdp' || c.protocol === 'vnc') await openRemote(p, c);
-    else await openTerm(p, c);
+    else await openTerm(p, c, run);
   } catch (e) {
     status(p, errText(e), true);
   }
-  return p;
 }
 
 // Saved commands: typed into the session followed by Enter ('\r' is what the Enter key sends to a terminal).
 const cmdsOf = (connId) => view.connections.find((c) => c.id === connId)?.commands || [];
 const runCmd = (p, cmd) => p.sid && window.bp.write(p.sid, cmd + '\r');
-// From the sidebar: in an open session of that connection (this tab's first), else in a new one once it is up.
-async function runOn(connId, cmd) {
+// From the sidebar: in an open session of that connection (this tab's first), else in a new one.
+function runOn(connId, cmd) {
   const live = (x) => x.connId === connId && x.sid && !x.closed && !x.ended;
-  let p = current?.panes.find(live) || allPanes().find(live);
-  if (p) selectTab(tabs.find((t) => t.panes.includes(p)));
-  else p = await connect(connId);
-  if (p?.sid) { runCmd(p, cmd); focusPane(p); }
+  const p = current?.panes.find(live) || allPanes().find(live);
+  if (!p) return connect(connId, false, null, cmd); // main types it in once the shell is ready
+  selectTab(tabs.find((t) => t.panes.includes(p)));
+  runCmd(p, cmd);
+  focusPane(p);
 }
 
 // ---------------------------------------------------------------- terminals
 
 const terms = new Map(); // session id -> pane
 
-async function openTerm(p, c) {
+async function openTerm(p, c, run) {
   const term = new Terminal({ fontFamily: 'ui-monospace, "DejaVu Sans Mono", monospace', fontSize: 14, cursorBlink: true, theme: termTheme() });
   const fit = new FitAddon();
   term.loadAddon(fit);
@@ -722,11 +727,10 @@ async function openTerm(p, c) {
   fit.fit();
   p.term = term;
   p.fit = fit;
-  const res = await window.bp.open(c.id, term.cols, term.rows);
+  const res = await window.bp.open(c.id, term.cols, term.rows, run); // main also types the "Run on start" commands
   if (p.closed) { window.bp.close(res.id); term.dispose(); return; } // pane closed while connecting
   p.sid = res.id;
   terms.set(p.sid, p);
-  for (const x of c.commands || []) if (x.onStart) runCmd(p, x.cmd);
   term.onData((d) => window.bp.write(p.sid, d));
   // Ctrl+Shift+C / Ctrl+Shift+V, as in most Linux terminals (plain Ctrl+C must stay "interrupt").
   term.attachCustomKeyEventHandler((e) => {

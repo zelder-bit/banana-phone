@@ -130,10 +130,9 @@ ipcMain.handle('store:forgetHost', (_e, connId) => {
   return true;
 });
 
-function openSsh(id, conn, cols, rows) {
+function openSsh(id, conn, cols, rows, start) {
   const client = new Client();
   let stream;
-  const early = []; // input sent before the shell is up (e.g. a saved "Run on start" command), passed on once it is
   const out = (s) => send('session:data', id, s);
   const hostId = sshId(conn);
   const password = dec(conn.password);
@@ -142,7 +141,7 @@ function openSsh(id, conn, cols, rows) {
     client.shell({ term: 'xterm-256color', cols, rows }, (err, s) => {
       if (err) { out(`\r\n${err.message}\r\n`); return client.end(); }
       stream = s;
-      for (const d of early.splice(0)) s.write(d);
+      for (const d of start) s.write(d); // saved commands wait for the shell; keys typed before it are dropped (below)
       s.on('data', (d) => out(d.toString('utf8')));
       s.stderr.on('data', (d) => out(d.toString('utf8')));
       s.on('close', () => { client.end(); });
@@ -178,7 +177,7 @@ function openSsh(id, conn, cols, rows) {
     },
   });
   return {
-    write: (d) => (stream ? stream.write(d) : early.push(d)),
+    write: (d) => stream?.write(d),
     resize: (c, r) => stream?.setWindow(r, c, 0, 0),
     close: () => client.end(),
   };
@@ -194,15 +193,16 @@ function shellEnv() {
   return env;
 }
 
-function openLocal(id, cols, rows) {
+function openLocal(id, cols, rows, start) {
   const shell = process.env.SHELL || '/bin/bash';
   const p = pty.spawn(shell, [], { name: 'xterm-256color', cols, rows, cwd: os.homedir(), env: shellEnv() });
+  for (const d of start) p.write(d); // the pty holds them until the shell reads its input
   p.onData((d) => send('session:data', id, d));
   p.onExit(() => { sessions.delete(id); send('session:exit', id); });
   return { write: (d) => p.write(d), resize: (c, r) => p.resize(c, r), close: () => p.kill() };
 }
 
-ipcMain.handle('session:open', async (_e, connId, cols = 80, rows = 24) => {
+ipcMain.handle('session:open', async (_e, connId, cols = 80, rows = 24, run) => {
   const conn = connId === 'local' ? { protocol: 'local' } : data.connections.find((c) => c.id === connId);
   if (!conn) throw new Error('Connection not found');
   if (conn.protocol === 'rdp') {
@@ -222,7 +222,9 @@ ipcMain.handle('session:open', async (_e, connId, cols = 80, rows = 24) => {
     return { kind: 'remote', url: await guacd.openRemote(conn, dec(conn.password)) };
   }
   const id = crypto.randomUUID();
-  sessions.set(id, conn.protocol === 'ssh' ? openSsh(id, conn, cols, rows) : openLocal(id, cols, rows));
+  // Typed in as soon as the shell is ready: the saved "Run on start" commands, then `run` (a saved command picked from the menu).
+  const start = [...(conn.commands || []).filter((x) => x.onStart).map((x) => x.cmd), ...(typeof run === 'string' && run ? [run] : [])].map((c) => c + '\r');
+  sessions.set(id, conn.protocol === 'ssh' ? openSsh(id, conn, cols, rows, start) : openLocal(id, cols, rows, start));
   return { kind: 'term', id };
 });
 
