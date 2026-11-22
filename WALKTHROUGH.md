@@ -727,7 +727,8 @@ app.whenReady().then(() => {
     width: 1280, height: 820,
     webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, sandbox: true },
   });
-  // The window can leave full screen without the app asking (a window manager shortcut): tell the page.
+  // The window can leave full screen without the page asking (a window manager shortcut): tell the page.
+  // Not when the page asked for it itself, and not when the window was only minimized.
   win.on('leave-full-screen', () => { if (wantFull && !win.isMinimized()) send('win:left-fullscreen'); });
   win.webContents.on('did-start-loading', () => { for (const s of sessions.values()) s.close(); });
   win.loadFile(path.join(__dirname, 'renderer/index.html'));
