@@ -85,8 +85,13 @@ input:focus, select:focus { outline: none; border-color: var(--orange); }
 
 /* layout */
 .app { flex: 1; display: flex; min-height: 0; }
-.side { width: 270px; flex: none; border-right: 2px solid var(--line); display: flex; flex-direction: column; min-height: 0; transition: margin-left .18s ease; }
-.side-collapsed .side { margin-left: -272px; visibility: hidden; }
+.side { width: var(--side-w, 270px); flex: none; border-right: 2px solid var(--line); display: flex; flex-direction: column; min-height: 0; transition: margin-left .18s ease; }
+.side-collapsed .side { margin-left: calc(-2px - var(--side-w, 270px)); visibility: hidden; }
+.side-grip { flex: none; width: 6px; margin-left: -6px; cursor: col-resize; position: relative; z-index: 1; }
+.side-grip:hover, .side-grip:focus-visible, .side-grip.dragging { background: var(--peel); outline: none; }
+.side-collapsed .side-grip { display: none; }
+.side-resizing .side { transition: none; }
+.side-resizing { cursor: col-resize; user-select: none; }
 .top { gap: 10px; }
 .side-head { display: flex; align-items: center; justify-content: space-between; padding: 10px 12px 4px; font-family: 'Fredoka', sans-serif; font-weight: 600; color: var(--muted); }
 .tree { overflow: auto; padding: 4px 8px 16px; flex: 1; }

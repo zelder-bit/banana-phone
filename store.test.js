@@ -85,6 +85,8 @@ test('folder icons: unknown name rejected, follow a folder move, removed with th
   assert.deepStrictEqual(d.folderIcons, {});
   store.setFolderIcon(d, 'Prod', 'kiwi');
   store.setFolderIcon(d, 'Prod/Windows', 'peach');
+  store.setFolderIcon(d, 'Production', 'crate'); // the default picture is a valid choice too
+  assert.strictEqual(d.folderIcons.Production, 'crate');
   store.setFolderIcon(d, 'Production', 'lemon');
   store.moveFolder(d, 'Prod', 'Lab');
   assert.deepStrictEqual(d.folderIcons, { 'Lab/Prod': 'kiwi', 'Lab/Prod/Windows': 'peach', Production: 'lemon' });
