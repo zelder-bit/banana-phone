@@ -1407,10 +1407,16 @@ function groupOf(t) {
 A `Set` keeps each value once, so if every pane is in the same folder the set has one entry and that folder is the group; `''` means "no folder" (local terminals and top-level connections); more than one folder means `MIXED`. Before drawing, `render()` sorts `tabs` by group, in the order the folders have in the sidebar, then the no-folder tabs, then the mixed ones:
 
 ```js
+const treeOrder = (parent = '') => kidsOf(parent).flatMap((f) => [f, ...treeOrder(f)]);
+```
+
+```js
   tabs.sort((a, b) => rank(groupOf(a)) - rank(groupOf(b))); // sort is stable, so each group keeps its opening order
 ```
 
-Sorting the real `tabs` array (not just the picture) keeps Ctrl+Tab going left to right through what you see. Where a new group starts, a small `.tab-group` chip with the folder's icon and name goes in front of its first tab. Because the folder is looked up each time, moving a connection to another folder moves its open tab too, and `refresh()` calls `render()` so that happens straight away. You can still split sessions from different folders into one tab; it just moves to the **Mixed** group.
+`view.folders` is a flat list in the order folders were made, so a subfolder made later sits at the end of it. `treeOrder` lists the folders the way the sidebar draws them instead: each folder followed by everything inside it. It calls itself for each folder's children, which is called **recursion**, and `flatMap` joins the small lists into one. A group's rank is its folder's position in that list.
+
+Sorting the real `tabs` array (not just the picture) keeps Ctrl+Tab going left to right through what you see. Where a new group starts, a small `.tab-group` chip with the folder's icon and name goes in front of its first tab. Tabs with no folder get a **No folder** chip, but only when other groups are open too, so a few plain terminals don't get a label they don't need. Because the folder is looked up each time, moving a connection to another folder moves its open tab too, and `refresh()` calls `render()` so that happens straight away. You can still split sessions from different folders into one tab; it just moves to the **Mixed** group.
 
 How the user's actions map onto it:
 

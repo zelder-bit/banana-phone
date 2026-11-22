@@ -282,9 +282,24 @@ test('tabs, splits, gutter and dialogs', { timeout: 120000 }, async (t) => {
     await app.eval(`${lt}.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))`);
     await app.waitFor(`${count('.tab')} === ${tabsBefore + 1}`);
     // The folder's group comes first (local terminals have no folder and no chip), its chip in front of the tab.
-    await app.waitFor(`${count('.tab-group')} === 1 && document.querySelector('#tabs').firstElementChild.title === 'Box/Lab'`);
+    await app.waitFor(`${count('.tab-group')} === 2 && document.querySelector('#tabs').firstElementChild.title === 'Box/Lab'`); // and "No folder" before the terminals
     assert.ok(await app.eval(`document.querySelector('#tabs').children[1].classList.contains('active')`));
     await app.click('#new-term', SHIFT); // a local terminal split into the Box/Lab tab
-    await app.waitFor(`${count('.tab-group')} === 1 && document.querySelector('#tabs').lastElementChild.previousElementSibling.textContent === 'Mixed'`);
+    await app.waitFor(`${count('.tab-group')} === 2 && document.querySelector('#tabs').lastElementChild.previousElementSibling.textContent === 'Mixed'`);
+  });
+
+  await t.test('tab groups follow the sidebar order, even for a subfolder made later', async () => {
+    const save = async (name, folder) => {
+      await app.click('#new-conn');
+      await app.waitFor('document.querySelector("#edit-dlg").open');
+      await app.eval(`(() => { const f = document.querySelector('#edit-form').elements; f.name.value = '${name}'; f.protocol.value = 'local'; f.folder.value = '${folder}'; })()`);
+      await app.click('#edit-dlg .btn.primary');
+      await app.waitFor(`[...document.querySelectorAll('#tree .conn')].some((n) => n.textContent.startsWith('${name}'))`);
+    };
+    await save('in-crate', 'Crate');
+    await save('in-late', 'Box/Late'); // made after Crate, but drawn inside Box, above Crate
+    for (const n of ['in-crate', 'in-late']) await app.eval(`[...document.querySelectorAll('#tree .conn')].find((n) => n.textContent.startsWith('${n}')).dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))`);
+    // (the Box/Lab tab became Mixed in the step before)
+    await app.waitFor(`[...document.querySelectorAll('.tab-group')].map((c) => c.title).join() === 'Box/Late,Crate,Local terminals and connections outside any folder,Sessions from different folders'`);
   });
 });

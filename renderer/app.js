@@ -419,12 +419,14 @@ function render() {
   juice.src = tabs.length ? 'juice-full.png' : 'juice-empty.png';
   juice.alt = tabs.length ? 'Connections active' : 'No active connections';
   $('#fullscreen').disabled = !current?.active;
-  // Tabs of one folder sit together, in tree order; then tabs with no folder; then tabs that mix folders.
-  const rank = (g) => (g === MIXED ? Infinity : g ? view.folders.indexOf(g) : view.folders.length);
+  // Tabs of one folder sit together, in the sidebar's order; then tabs with no folder; then tabs that mix folders.
+  const tree = treeOrder();
+  const rank = (g) => (g === MIXED ? Infinity : g ? tree.indexOf(g) : tree.length);
   tabs.sort((a, b) => rank(groupOf(a)) - rank(groupOf(b))); // sort is stable, so each group keeps its opening order
+  const several = new Set(tabs.map(groupOf)).size > 1; // a "No folder" chip only matters next to other groups
   let prev = null;
   $('#tabs').replaceChildren(...tabs.flatMap((t) => {
-    const g = groupOf(t), chip = g !== prev && g ? groupChip(g) : null;
+    const g = groupOf(t), chip = g !== prev && (g || several) ? groupChip(g) : null;
     prev = g;
     const title = t.panes.length === 1 ? t.panes[0].title : `${t.panes.length} sessions`;
     const tab = el('div', { className: 'tab' + (t === current ? ' active' : ''), title },
@@ -446,8 +448,10 @@ function groupOf(t) {
   const fs = new Set(t.panes.map((p) => view.connections.find((c) => c.id === p.connId)?.folder || ''));
   return fs.size === 1 ? [...fs][0] : MIXED;
 }
-const groupChip = (g) => g === MIXED
-  ? el('span', { className: 'tab-group', textContent: 'Mixed', title: 'Sessions from different folders' })
+// Every folder in the order the sidebar draws them: each folder, then everything inside it.
+const treeOrder = (parent = '') => kidsOf(parent).flatMap((f) => [f, ...treeOrder(f)]);
+const groupChip = (g) => g === MIXED ? el('span', { className: 'tab-group', textContent: 'Mixed', title: 'Sessions from different folders' })
+  : !g ? el('span', { className: 'tab-group', textContent: 'No folder', title: 'Local terminals and connections outside any folder' })
   : el('span', { className: 'tab-group', title: g }, el('img', { src: `svg/${view.folderIcons[g] || 'crate'}.svg`, alt: '' }), el('span', { textContent: g.split('/').pop() }));
 
 // Rebuild a tab's split: panes in order with a gutter between each pair.
