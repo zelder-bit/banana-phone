@@ -3,13 +3,15 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-const empty = () => ({ folders: [], connections: [] });
+const empty = () => ({ folders: [], folderIcons: {}, connections: [] });
+
+const FOLDER_ICONS = ['apple', 'banana', 'coconut', 'grapes', 'kiwi', 'lemon', 'orange', 'orange-slice', 'peach', 'strawberry', 'watermelon'];
 
 function load(file) {
   try {
     const data = JSON.parse(fs.readFileSync(file, 'utf8'));
     if (!data || typeof data !== 'object') throw new Error('connections file is not a JSON object');
-    const d = { ordered: !!data.ordered, folders: data.folders || [], connections: data.connections || [] };
+    const d = { ordered: !!data.ordered, folders: data.folders || [], folderIcons: data.folderIcons || {}, connections: data.connections || [] };
     fillFolders(d);
     if (!d.ordered) { // files from before drag-to-reorder: start from the alphabetical order the sidebar used to show
       d.folders.sort((a, b) => a.localeCompare(b));
@@ -71,8 +73,24 @@ function moveFolder(data, from, to, before) {
   const j = before ? data.folders.indexOf(before) : -1;
   data.folders.splice(j < 0 ? data.folders.length : j, 0, ...moved);
   for (const c of data.connections) if (inFolder(c.folder, from)) c.folder = rename(c.folder);
+  if (dest !== from) moveFolderIcons(data, from, dest);
   data.ordered = true;
   return dest;
+}
+
+function setFolderIcon(data, folder, name) {
+  if (!FOLDER_ICONS.includes(name)) throw new Error(`Unknown folder icon: ${name}`);
+  data.folderIcons[folder] = name;
+}
+
+// Call when a folder path changes ("a" -> "b"); subfolders follow. Drop with to = null.
+function moveFolderIcons(data, from, to) {
+  for (const k of Object.keys(data.folderIcons)) {
+    if (!inFolder(k, from)) continue;
+    const icon = data.folderIcons[k];
+    delete data.folderIcons[k];
+    if (to != null) data.folderIcons[to + k.slice(from.length)] = icon;
+  }
 }
 
 function matches(conn, q) {
@@ -120,4 +138,4 @@ function remove(data, id) {
   data.connections = data.connections.filter((c) => c.id !== id);
 }
 
-module.exports = { load, save, matches, select, bulkUpdate, upsert, remove, inFolder, moveConn, moveFolder };
+module.exports = { load, save, matches, select, bulkUpdate, upsert, remove, inFolder, moveConn, moveFolder, FOLDER_ICONS, setFolderIcon, moveFolderIcons };

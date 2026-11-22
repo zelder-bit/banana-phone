@@ -30,6 +30,7 @@ const dec = (s) => {
 // Renderer never sees passwords, only whether one is stored.
 const publicView = () => ({
   folders: data.folders,
+  folderIcons: data.folderIcons,
   connections: data.connections.map(({ password, ...c }) => ({ ...c, hasPassword: !!password })),
   keyring: safeStorage.getSelectedStorageBackend?.() || 'unknown',
 });
@@ -50,11 +51,13 @@ ipcMain.handle('store:save', (_e, conn) => {
 
 ipcMain.handle('store:delete', (_e, id) => { store.remove(data, id); persist(true); return publicView(); });
 
-ipcMain.handle('store:folder', (_e, { add, remove }) => {
+ipcMain.handle('store:folder', (_e, { add, remove, icon }) => {
+  if (icon) store.setFolderIcon(data, icon.folder, icon.name);
   if (add && !data.folders.includes(add)) data.folders.push(add);
   if (remove) {
     if (data.connections.some((c) => store.inFolder(c.folder, remove))) throw new Error('Folder is not empty');
     data.folders = data.folders.filter((f) => !store.inFolder(f, remove));
+    store.moveFolderIcons(data, remove, null);
   }
   persist(false);
   return publicView();
