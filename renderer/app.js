@@ -412,6 +412,11 @@ function selectTab(t) {
 
 function render() {
   $('#empty').hidden = tabs.length > 0;
+  // shortcut: an open tab counts as an active connection, even if its session has dropped; track per-pane state if that matters
+  const juice = $('#juice');
+  juice.classList.toggle('on', tabs.length > 0);
+  juice.src = tabs.length ? 'juice-full.png' : 'juice-empty.png';
+  juice.alt = tabs.length ? 'Connections active' : 'No active connections';
   $('#fullscreen').disabled = !current?.active;
   $('#tabs').replaceChildren(...tabs.map((t) => {
     const title = t.panes.length === 1 ? t.panes[0].title : `${t.panes.length} sessions`;

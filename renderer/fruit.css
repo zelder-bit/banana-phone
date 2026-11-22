@@ -74,6 +74,8 @@ input:focus, select:focus { outline: none; border-color: var(--orange); }
 .top { display: flex; align-items: center; gap: 14px; padding: 8px 14px; border-bottom: 2px solid var(--line); flex: none; }
 .brand { display: flex; align-items: center; gap: 8px; font-size: 1.25rem; font-weight: 600; }
 .brand img { width: 32px; height: 32px; }
+.brand .brand-anim { width: auto; }
+#juice.on { filter: drop-shadow(0 0 5px var(--orange)); }
 .search-pill {
   flex: 0 1 380px; display: flex; align-items: center; justify-content: space-between; gap: 8px;
   border: 2px solid var(--line); background: var(--surface); color: var(--muted); border-radius: 999px; padding: 5px 8px 5px 14px; font: inherit; cursor: pointer;

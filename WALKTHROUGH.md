@@ -1210,6 +1210,34 @@ The `<details>`/`<summary>` sidebar is the "dropdown view": every folder is a na
 
 ---
 
+### The juice cup and the typing banana
+
+The left of the top bar holds two pictures instead of the app's name:
+
+```html
+    <div class="brand"><img id="juice" src="juice-empty.png" alt="No active connections"><img class="brand-anim" src="banana-typing.gif" alt="banana-phone"></div>
+```
+
+* `banana-typing.gif` is an animated picture of a banana at a terminal. A GIF plays and loops by itself, so no code drives it. Its `alt` text is the app's name, which is what a screen reader says in place of the picture.
+* The cup starts empty. `render()` in `app.js`, which runs every time a tab opens or closes, sets it:
+
+```js
+  const juice = $('#juice');
+  juice.classList.toggle('on', tabs.length > 0);
+  juice.src = tabs.length ? 'juice-full.png' : 'juice-empty.png';
+  juice.alt = tabs.length ? 'Connections active' : 'No active connections';
+```
+
+* `tabs.length ? a : b` picks `a` when at least one tab is open (any number but 0 counts as true) and `b` when none is.
+* `classList.toggle('on', condition)` adds the class `on` when the condition is true and removes it when false. The class only adds the glow:
+
+```css
+#juice.on { filter: drop-shadow(0 0 5px var(--orange)); }
+```
+
+* `drop-shadow` follows the shape of the picture, not its square box, so the orange light hugs the cup. The three numbers are: no sideways offset, no downward offset, 5px of blur.
+* "Active" here means "a tab is open". A tab whose session has dropped still counts until you close it.
+
 ## 10. `renderer/app.js`: the front end
 
 ### Imports and helpers
