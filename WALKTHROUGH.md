@@ -1369,7 +1369,7 @@ sIn.onkeydown = (e) => {
 
 ```js
 // tab  = { id, layout: 'h'|'v'|'grid', panes: [pane], active: pane, root: <div.split> }
-// pane = { id, title, protocol, root, body, term?, fit?, sid?, guac?, dispose() }
+// pane = { id, title, protocol, connId, root, body, term?, fit?, sid?, guac?, dispose() }
 const tabs = [];
 let current = null;
 ```
@@ -1394,6 +1394,23 @@ function layout(t) {
 ```
 
 That is the entire layout engine: set a class (`h`, `v`, `grid` or `single`) and put the panes in order with a gutter between neighbours. CSS does the rest.
+
+**Tab groups.** Each pane remembers which saved connection it came from (`p.connId`). `groupOf(t)` turns a tab into its group by looking those up in the current `view`:
+
+```js
+function groupOf(t) {
+  const fs = new Set(t.panes.map((p) => view.connections.find((c) => c.id === p.connId)?.folder || ''));
+  return fs.size === 1 ? [...fs][0] : MIXED;
+}
+```
+
+A `Set` keeps each value once, so if every pane is in the same folder the set has one entry and that folder is the group; `''` means "no folder" (local terminals and top-level connections); more than one folder means `MIXED`. Before drawing, `render()` sorts `tabs` by group, in the order the folders have in the sidebar, then the no-folder tabs, then the mixed ones:
+
+```js
+  tabs.sort((a, b) => rank(groupOf(a)) - rank(groupOf(b))); // sort is stable, so each group keeps its opening order
+```
+
+Sorting the real `tabs` array (not just the picture) keeps Ctrl+Tab going left to right through what you see. Where a new group starts, a small `.tab-group` chip with the folder's icon and name goes in front of its first tab. Because the folder is looked up each time, moving a connection to another folder moves its open tab too, and `refresh()` calls `render()` so that happens straight away. You can still split sessions from different folders into one tab; it just moves to the **Mixed** group.
 
 How the user's actions map onto it:
 
