@@ -133,6 +133,7 @@ ipcMain.handle('store:forgetHost', (_e, connId) => {
 function openSsh(id, conn, cols, rows) {
   const client = new Client();
   let stream;
+  const early = []; // input sent before the shell is up (e.g. a saved "Run on start" command), passed on once it is
   const out = (s) => send('session:data', id, s);
   const hostId = sshId(conn);
   const password = dec(conn.password);
@@ -141,6 +142,7 @@ function openSsh(id, conn, cols, rows) {
     client.shell({ term: 'xterm-256color', cols, rows }, (err, s) => {
       if (err) { out(`\r\n${err.message}\r\n`); return client.end(); }
       stream = s;
+      for (const d of early.splice(0)) s.write(d);
       s.on('data', (d) => out(d.toString('utf8')));
       s.stderr.on('data', (d) => out(d.toString('utf8')));
       s.on('close', () => { client.end(); });
@@ -176,7 +178,7 @@ function openSsh(id, conn, cols, rows) {
     },
   });
   return {
-    write: (d) => stream?.write(d),
+    write: (d) => (stream ? stream.write(d) : early.push(d)),
     resize: (c, r) => stream?.setWindow(r, c, 0, 0),
     close: () => client.end(),
   };

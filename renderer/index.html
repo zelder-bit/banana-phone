@@ -98,6 +98,18 @@
       <label class="field net">Password <input name="password" type="password" autocomplete="new-password"></label>
       <label class="check net" id="clear-pw"><input name="clearPassword" type="checkbox"> Remove the saved password</label>
       <label class="field ssh-only">Private key file <input name="keyPath" type="text" placeholder="~/.ssh/id_ed25519"></label>
+      <fieldset class="cmds term-only">
+        <legend>Saved commands</legend>
+        <div class="row">
+          <label class="field grow">Command <select id="cmd-pick"></select></label>
+          <button class="btn small" type="button" id="cmd-del">Delete</button>
+        </div>
+        <div class="row">
+          <label class="field">Name <input id="cmd-name" type="text" autocomplete="off" placeholder="Attach tmux"></label>
+          <label class="field grow">Runs <input id="cmd-text" type="text" autocomplete="off" spellcheck="false" placeholder="tmux attach || tmux"></label>
+        </div>
+        <label class="check"><input id="cmd-start" type="checkbox"> Run on start</label>
+      </fieldset>
       <label class="field">Tags <input name="tags" type="text" placeholder="comma, separated"></label>
       <div class="actions">
         <button class="btn" type="button" data-cancel>Cancel</button>

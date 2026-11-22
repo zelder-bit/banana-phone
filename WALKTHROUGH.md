@@ -366,6 +366,12 @@ export const parentOf = (f) => f.slice(0, Math.max(0, f.lastIndexOf('/')));
 ```js
 function upsert(data, input) {
   const { copyPasswordFrom, ...conn } = input;
+  // Saved commands come from the page: keep only well-formed ones.
+  if (conn.commands !== undefined) {
+    conn.commands = (Array.isArray(conn.commands) ? conn.commands : [])
+      .filter((x) => typeof x?.name === 'string' && typeof x.cmd === 'string' && x.name.trim() && x.cmd.trim())
+      .map((x) => ({ name: x.name.trim(), cmd: x.cmd.trim(), onStart: x.onStart === true }));
+  }
   if (copyPasswordFrom && !conn.id && conn.password === undefined) { // new connections only
     const src = data.connections.find((c) => c.id === copyPasswordFrom);
     if (src?.password) conn.password = src.password; // copied still encrypted: never decrypted on the way
@@ -381,7 +387,9 @@ function upsert(data, input) {
 
 `{ ...old, ...conn }` builds a new object with all of `old`'s properties, then `conn`'s on top. That is how a partial update such as `{ id, folder }` changes only the folder. `fillFolders` then makes sure a folder typed into the edit dialog for the first time (and its parents) is listed in `folders`.
 
-The first lines handle **Duplicate**. The page never sees passwords, so it cannot copy one into the duplicate. It sends `copyPasswordFrom: <id of the original>` instead, and `upsert` copies the original's stored value, which is still encrypted. The same keyring key encrypted it, so the copy decrypts just like the original. The rest pattern `{ copyPasswordFrom, ...conn }` keeps the helper field out of the saved file. `src?.password` is **optional chaining**: if no connection has that id, `src` is `undefined` and the expression gives `undefined` instead of throwing. A password typed in the dialog (or `''` from "Remove the saved password") always wins, because the copy only happens while `conn.password` is still `undefined`, and only for a new connection (no `id` yet), so an existing connection can never have its password swapped this way.
+The `commands` block cleans up a terminal connection's **saved commands** (a list of `{ name, cmd, onStart }`). The page is our own code, but it is still the other side of the IPC bridge, so the store does not take its word: anything that is not a list becomes an empty list, entries without a text name and command are dropped, and `onStart` is only true when it is exactly `true`. If the page does not send `commands` at all (an RDP edit, a drag into another folder), the merge below leaves the saved ones alone.
+
+The `copyPasswordFrom` lines handle **Duplicate**. The page never sees passwords, so it cannot copy one into the duplicate. It sends `copyPasswordFrom: <id of the original>` instead, and `upsert` copies the original's stored value, which is still encrypted. The same keyring key encrypted it, so the copy decrypts just like the original. The rest pattern `{ copyPasswordFrom, ...conn }` keeps the helper field out of the saved file. `src?.password` is **optional chaining**: if no connection has that id, `src` is `undefined` and the expression gives `undefined` instead of throwing. A password typed in the dialog (or `''` from "Remove the saved password") always wins, because the copy only happens while `conn.password` is still `undefined`, and only for a new connection (no `id` yet), so an existing connection can never have its password swapped this way.
 
 ---
 
@@ -643,13 +651,13 @@ Finally `openSsh` returns the common session shape:
 
 ```js
   return {
-    write: (d) => stream?.write(d),
+    write: (d) => (stream ? stream.write(d) : early.push(d)),
     resize: (c, r) => stream?.setWindow(r, c, 0, 0),
     close: () => client.end(),
   };
 ```
 
-`stream?.write(d)` does nothing if the shell is not open yet (`stream` is still `undefined`), instead of crashing.
+The page gets the session id back as soon as connecting *starts*, but the shell (`stream`) only exists once the login is done. Anything written in between, such as a saved "Run on start" command or keys typed while it connects, goes into the `early` list, and the shell callback sends it on with `for (const d of early.splice(0)) s.write(d);` (`splice(0)` empties the list and returns what was in it). `stream?.setWindow` uses optional chaining: a resize before the shell exists does nothing, and the shell opens at the latest size anyway.
 
 ### Local terminals
 
@@ -1553,6 +1561,20 @@ The loop for a terminal is:
 * `FitAddon.fit()` measures the box and works out how many columns and rows of characters fit. A **ResizeObserver** calls it whenever the pane changes size (window resize, gutter drag, switching to grid). xterm then fires `onResize`, which tells main, which tells the pty or the SSH server, so programs like `htop` redraw at the new size.
 * `termTheme()` reads the CSS variables with `getComputedStyle` so the terminal matches the fruit theme, and is re-applied when the theme changes.
 * When a session ends, the pane shows "[session ended — press any key to close]".
+
+**Saved commands.** An SSH or local-terminal connection can carry named commands (`conn.commands`). Running one is just typing it for you:
+
+```js
+const runCmd = (p, cmd) => p.sid && window.bp.write(p.sid, cmd + '\r');
+```
+
+It goes down the same `bp.write` path as your key presses, followed by `'\r'`, which is what the Enter key sends to a terminal. `p.sid &&` skips a pane whose session never started. There are three ways in:
+
+* **Run on start**: right after `openTerm` registers the session, `for (const x of c.commands || []) if (x.onStart) runCmd(p, x.cmd);` types every command marked "Run on start", in order.
+* **Pane header right-click** lists `Run: <name>` for the pane's connection (`cmdsOf(p.connId)`).
+* **Sidebar right-click** lists them too. `runOn(connId, cmd)` uses an open session of that connection (one in the current tab first), or opens one: `connect()` now returns its pane once the session is up, so `runOn` can `await` it and then type the command.
+
+In the edit dialog, the **Saved commands** box (class `term-only`, hidden for RDP and VNC the same way `.rdp-only` fields are) is run by `editCmds(c.commands)`. It works on a copy of the list: the dropdown picks which command the Name / Runs / Run on start fields edit, its last entry "＋ New command" starts a new one as soon as you type, and **Delete** removes the selected one. Cancel throws the copy away; Save sends it as `conn.commands`, using the command itself as the name if you left the name empty.
 
 ### Remote desktop panes (Guacamole)
 

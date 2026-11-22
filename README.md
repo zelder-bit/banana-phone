@@ -16,6 +16,7 @@ A small, fruity connection manager for Linux: SSH and local terminals, plus RDP 
 - **Folder fruit icons.** Right-click a folder → Change icon… and pick a fruit. Folders without one show a crate.
 - **Quick search.** Ctrl+K finds connections by name, host, user, folder or tag. Enter opens a result, Shift+Enter opens it in a split.
 - **Bulk credential edit.** Change the username, domain or password of every connection with a given username, or in a folder, after previewing exactly which ones will change. A backup is kept.
+- **Saved commands.** SSH and local terminal connections can keep named commands (edit the connection → Saved commands). Run one from the right-click menu of the connection or of its open pane, or tick Run on start to have it typed in as soon as the session opens.
 - **SSH, RDP, VNC and local terminals.** RDP supports Active Directory logins (domain, user, password) and admin sessions, and its pane closes when you sign out of Windows.
 - **Identity checks.** SSH host keys and RDP certificates are remembered on first connect. If one changes, you're shown both fingerprints and asked whether to trust it, with Cancel as the default.
 - **Clipboard sharing** with RDP and VNC desktops.
