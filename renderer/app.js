@@ -116,6 +116,7 @@ async function refresh(v) {
   view = v || (await window.bp.get());
   $('#keyring-warn').hidden = view.keyring !== 'basic_text';
   renderTree();
+  render(); // tab group chips follow folder moves and icon changes
   $('#folder-list').replaceChildren(...view.folders.map((f) => el('option', { value: f })));
 }
 
@@ -416,7 +417,7 @@ sIn.onkeydown = (e) => {
 
 // ---------------------------------------------------------------- tabs and panes
 // tab  = { id, layout: 'h'|'v'|'grid', panes: [pane], active: pane, root: <div.split> }
-// pane = { id, title, protocol, root, body, term?, fit?, sid?, guac?, dispose() }
+// pane = { id, title, protocol, connId, root, body, term?, fit?, sid?, guac?, dispose() }
 
 const tabs = [];
 let current = null;
@@ -445,7 +446,15 @@ function render() {
   juice.src = tabs.length ? 'juice-full.png' : 'juice-empty.png';
   juice.alt = tabs.length ? 'Connections active' : 'No active connections';
   $('#fullscreen').disabled = !current?.active;
-  $('#tabs').replaceChildren(...tabs.map((t) => {
+  // Tabs of one folder sit together, in the sidebar's order; then tabs with no folder; then tabs that mix folders.
+  const tree = treeOrder();
+  const rank = (g) => (g === MIXED ? Infinity : g ? tree.indexOf(g) : tree.length);
+  tabs.sort((a, b) => rank(groupOf(a)) - rank(groupOf(b))); // sort is stable, so each group keeps its opening order
+  const several = new Set(tabs.map(groupOf)).size > 1; // a "No folder" chip only matters next to other groups
+  let prev = null;
+  $('#tabs').replaceChildren(...tabs.flatMap((t) => {
+    const g = groupOf(t), chip = g !== prev && (g || several) ? groupChip(g) : null;
+    prev = g;
     const title = t.panes.length === 1 ? t.panes[0].title : `${t.panes.length} sessions`;
     const tab = el('div', { className: 'tab' + (t === current ? ' active' : ''), title },
       icon(t.panes.length === 1 ? t.panes[0].protocol : 'mixed'), el('span', { className: 't', textContent: title }),
@@ -453,11 +462,24 @@ function render() {
     tab.onclick = () => selectTab(t);
     tab.onauxclick = (e) => { if (e.button === 1) closeTab(t); };
     paneDrop(tab, () => t);
-    return tab;
+    return chip ? [chip, tab] : [tab];
   }));
   for (const t of tabs) layout(t);
   document.querySelectorAll('[data-layout]').forEach((b) => b.classList.toggle('on', current?.layout === b.dataset.layout && current.panes.length > 1));
 }
+
+// A tab's group: the folder of its sessions ('' = none, e.g. local terminals), or MIXED when they differ.
+// Looked up live, so moving a connection in the tree regroups its tab.
+const MIXED = '*mixed';
+function groupOf(t) {
+  const fs = new Set(t.panes.map((p) => view.connections.find((c) => c.id === p.connId)?.folder || ''));
+  return fs.size === 1 ? [...fs][0] : MIXED;
+}
+// Every folder in the order the sidebar draws them: each folder, then everything inside it.
+const treeOrder = (parent = '') => kidsOf(parent).flatMap((f) => [f, ...treeOrder(f)]);
+const groupChip = (g) => g === MIXED ? el('span', { className: 'tab-group', textContent: 'Mixed', title: 'Sessions from different folders' })
+  : !g ? el('span', { className: 'tab-group', textContent: 'No folder', title: 'Local terminals and connections outside any folder' })
+  : el('span', { className: 'tab-group', title: g }, el('img', { src: `svg/${view.folderIcons[g] || 'crate'}.svg`, alt: '' }), el('span', { textContent: g.split('/').pop() }));
 
 // Rebuild a tab's split: panes in order with a gutter between each pair.
 function layout(t) {
@@ -605,6 +627,7 @@ async function connect(connId, split = false) {
   const c = connId === 'local' ? { id: 'local', name: 'Terminal', protocol: 'local' } : view.connections.find((x) => x.id === connId);
   if (!c) return;
   const p = makePane(c.name, c.protocol);
+  p.connId = c.id;
   let t = split && current && current.panes.length < MAX_PANES ? current : newTab();
   if (split && t === current && t.layout === 'h' && t.panes.length >= 2) t.layout = 'grid';
   t.panes.push(p);

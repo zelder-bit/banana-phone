@@ -272,6 +272,38 @@ test('tabs, splits, gutter and dialogs', { timeout: 120000 }, async (t) => {
     assert.strictEqual(await app.eval(state), moved);
   });
 
+  await t.test('tabs are grouped by folder with a chip; mixing folders in one tab makes it Mixed', async () => {
+    await app.click('#new-conn');
+    await app.waitFor('document.querySelector("#edit-dlg").open');
+    await app.eval(`(() => { const f = document.querySelector('#edit-form').elements; f.name.value = 'lt'; f.protocol.value = 'local'; f.folder.value = 'Box/Lab'; })()`);
+    await app.click('#edit-dlg .btn.primary');
+    const lt = `[...document.querySelectorAll('#tree .conn')].find((n) => n.textContent.startsWith('lt'))`;
+    await app.waitFor(`!!${lt}`);
+    const tabsBefore = await app.eval(count('.tab'));
+    await app.eval(`${lt}.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))`);
+    await app.waitFor(`${count('.tab')} === ${tabsBefore + 1}`);
+    // The folder's group comes first (local terminals have no folder and no chip), its chip in front of the tab.
+    await app.waitFor(`${count('.tab-group')} === 2 && document.querySelector('#tabs').firstElementChild.title === 'Box/Lab'`); // and "No folder" before the terminals
+    assert.ok(await app.eval(`document.querySelector('#tabs').children[1].classList.contains('active')`));
+    await app.click('#new-term', SHIFT); // a local terminal split into the Box/Lab tab
+    await app.waitFor(`${count('.tab-group')} === 2 && document.querySelector('#tabs').lastElementChild.previousElementSibling.textContent === 'Mixed'`);
+  });
+
+  await t.test('tab groups follow the sidebar order, even for a subfolder made later', async () => {
+    const save = async (name, folder) => {
+      await app.click('#new-conn');
+      await app.waitFor('document.querySelector("#edit-dlg").open');
+      await app.eval(`(() => { const f = document.querySelector('#edit-form').elements; f.name.value = '${name}'; f.protocol.value = 'local'; f.folder.value = '${folder}'; })()`);
+      await app.click('#edit-dlg .btn.primary');
+      await app.waitFor(`[...document.querySelectorAll('#tree .conn')].some((n) => n.textContent.startsWith('${name}'))`);
+    };
+    await save('in-crate', 'Crate');
+    await save('in-late', 'Box/Late'); // made after Crate, but drawn inside Box, above Crate
+    for (const n of ['in-crate', 'in-late']) await app.eval(`[...document.querySelectorAll('#tree .conn')].find((n) => n.textContent.startsWith('${n}')).dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))`);
+    // (the Box/Lab tab became Mixed in the step before)
+    await app.waitFor(`[...document.querySelectorAll('.tab-group')].map((c) => c.title).join() === 'Box/Late,Crate,Local terminals and connections outside any folder,Sessions from different folders'`);
+  });
+
   await t.test('the sidebar grip widens the list, collapse still hides it, and the width survives a reload', async () => {
     const sideW = 'document.querySelector("#side").getBoundingClientRect().width';
     const before = await app.eval(sideW);

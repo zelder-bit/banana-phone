@@ -126,6 +126,9 @@ input:focus, select:focus { outline: none; border-color: var(--orange); }
 .tab img { width: 16px; height: 16px; }
 .tab .t { overflow: hidden; text-overflow: ellipsis; }
 .tab.active { background: var(--surface); border-color: var(--line); margin-bottom: -2px; padding-bottom: 7px; }
+.tab-group { display: flex; align-items: center; gap: 4px; align-self: center; flex: none; margin: 0 2px 0 8px; padding: 1px 8px; border-radius: 999px; background: var(--surface-2); color: var(--muted); font-size: .75rem; font-weight: 700; white-space: nowrap; }
+.tab-group:first-child { margin-left: 0; }
+.tab-group img { width: 14px; height: 14px; }
 .tab.drop, .tabs.drop { outline: 2px dashed var(--leaf); outline-offset: -2px; }
 .tab .x { border: 0; background: none; color: var(--muted); cursor: pointer; border-radius: 50%; width: 20px; height: 20px; }
 .tab .x:hover { background: var(--line); color: var(--ink); }
