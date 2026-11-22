@@ -113,7 +113,7 @@ electron .  ──▶ main.js ──require──▶ store.js ──require─�
                                                         clipboard.js, shared.mjs
 ```
 
-`shared.mjs` is the one file both sides load. It holds small pure helpers, `FRUITS` (the fruit pictures), `inFolder` and `parentOf` (the folder-path rules) and `matches` (the search rule), so there is one copy of each instead of one in the store and another in the page that could quietly drift apart. The page imports it as an ES module; `store.js` loads it with plain `require()`, which recent Node and Electron allow for an ES module with no top-level `await`.
+`shared.mjs` is the one file both sides load. It holds small pure helpers, `FRUITS` (the fruit pictures), `ICONS` (what a folder icon may be: `crate` plus `FRUITS`), `inFolder` and `parentOf` (the folder-path rules) and `matches` (the search rule), so there is one copy of each instead of one in the store and another in the page that could quietly drift apart. The page imports it as an ES module; `store.js` loads it with plain `require()`, which recent Node and Electron allow for an ES module with no top-level `await`.
 
 ---
 
@@ -232,7 +232,7 @@ A folder is just a string like `"Prod/Windows"`. There is no separate tree struc
 
 `folders` always lists **every** folder, including the parents of `"Prod/Windows"` and folders only a connection mentions. `fillFolders` makes that true on load and wherever a folder can appear (`addFolder`, `upsert`, `moveConn`), so the page can use `folders` as the full list without working anything out. It is also what lets an *empty* folder exist. `addFolder` and `removeFolder` live in the store too; `removeFolder` refuses a folder that still holds connections and drops its icons along with it.
 
-`setFolderIcon` checks the name against the fixed fruit list (`FRUITS`, from `shared.mjs`) before saving, so the renderer can never make the app read an arbitrary file name, and refuses a folder that does not exist, so no stray icon entries pile up.
+`setFolderIcon` checks the name against the fixed icon list (`ICONS` from `shared.mjs`: `crate` plus the fruit) before saving, so the renderer can never make the app read an arbitrary file name, and refuses a folder that does not exist, so no stray icon entries pile up.
 
 `password` is encrypted (see [§6](#encrypting-passwords)).
 
@@ -1056,7 +1056,7 @@ The page is a fixed skeleton; `app.js` fills it in.
 ```html example
 <header class="top"> falling fruit · brand · search pill · Terminal / + Connection / Bulk edit / theme </header>
 <div class="app">
-  <aside class="side">  … <div id="tree"> (folder tree) </aside>
+  <aside class="side">  … <div id="tree"> (folder tree) </aside>  <div id="side-grip"> (drag to resize)
   <section class="work">
     <nav class="tabbar"> <div id="tabs"> · layout buttons </nav>
     <div id="stage"> (one .split per tab lives here) </div>
@@ -1133,10 +1133,10 @@ The split layouts are pure CSS, driven by one class on each tab's container:
 The whole sidebar can be collapsed with the ☰ button or **Ctrl+B**, which gives the sessions the full width:
 
 ```css
-.side-collapsed .side { margin-left: -272px; visibility: hidden; }
+.side-collapsed .side { margin-left: calc(-2px - var(--side-w, 270px)); visibility: hidden; }
 ```
 
-A negative `margin-left` slides the sidebar out of view (with a `transition` for the animation) and the work area's flexbox grows into the space. `visibility: hidden` also takes its buttons out of the keyboard tab order while it is hidden. The open terminals notice their new size through their ResizeObserver and refit.
+A negative `margin-left` (the sidebar's width plus its 2px border, worked out by `calc()` from the same `--side-w` the resize grip sets) slides the sidebar out of view (with a `transition` for the animation) and the work area's flexbox grows into the space. `visibility: hidden` also takes its buttons out of the keyboard tab order while it is hidden. The open terminals notice their new size through their ResizeObserver and refit.
 
 ### Falling fruit in the top bar
 
@@ -1190,7 +1190,7 @@ function rain(fall, n = 10) {
     const img = el('img', { src: `svg/${FRUITS[Math.floor(Math.random() * FRUITS.length)]}.svg`, alt: '' });
 ```
 
-`FRUITS` is the list from `shared.mjs`, the same one that decides which fruit a folder icon may be.
+`FRUITS` is the list from `shared.mjs`; `ICONS`, the list of allowed folder icons, is the crate followed by this same list.
 
 ```js
       '--left': `${(i * (100 / n) + 2 + Math.random() * 6).toFixed(1)}%`, // spread evenly, then jitter
@@ -1248,7 +1248,7 @@ import { Terminal } from '../node_modules/@xterm/xterm/lib/xterm.mjs';
 import { FitAddon } from '../node_modules/@xterm/addon-fit/lib/addon-fit.mjs';
 import Guacamole from '../node_modules/guacamole-common-js/dist/esm/guacamole-common.js';
 import { shareClipboard, clean } from './clipboard.js';
-import { FRUITS, inFolder, parentOf, matches } from './shared.mjs';
+import { FRUITS, ICONS, inFolder, parentOf, matches } from './shared.mjs';
 
 const $ = (s) => document.querySelector(s);
 const el = (tag, props = {}, ...kids) => {
@@ -1299,7 +1299,17 @@ function setSide(collapsed) {
 
 `classList.toggle(name, force)` adds the class when `force` is true and removes it when false. `aria-expanded` tells screen readers whether the list is showing.
 
-Each folder shows its fruit icon (`crate` by default). Right-click → **Change icon…** opens `#icon-dlg`, a grid of `button.pic`; each has an `aria-label` with the fruit name and `aria-pressed` on the current one, and they are real buttons so Tab and Enter work.
+The sidebar's width is a CSS variable, `--side-w`, so the width and the collapse rule always agree. The thin `#side-grip` strip on its right edge resizes it:
+
+```js
+function setSideW(px, save = true) {
+  const w = Math.round(Math.max(180, Math.min(700, innerWidth * 0.6, px)));
+  document.documentElement.style.setProperty('--side-w', w + 'px');
+```
+
+`Math.max(180, Math.min(700, innerWidth * 0.6, px))` clamps the width: never under 180px, never over 700px or 60% of the window, so the sessions always keep room. Dragging works like the pane gutter below (`setPointerCapture` keeps the moves coming even when the pointer leaves the strip), and while you drag the `side-resizing` class on `<body>` turns off the slide animation so the edge follows the mouse. The grip is a `role="separator"` you can also focus with Tab and move with ← and →, and its `aria-valuenow` / `aria-valuemax` tell a screen reader the current width and how wide it may get; double-click puts it back to 270px. The width is saved in `localStorage` under `bp-side-w`. Making the window smaller narrows the list to fit (a `resize` listener calls `setSideW(sideW, false)`, where `false` means "show, don't save"), and making it bigger again gives back the width you chose. The drag ends on `lostpointercapture`, which fires both after a normal release and when the system cancels the drag, so the app can't get stuck in resize mode.
+
+Each folder shows its fruit icon (`crate` by default). Right-click → **Change icon…** opens `#icon-dlg`, a grid of `button.pic`; each has an `aria-label` with the fruit name and `aria-pressed` on the current one (the crate when the folder has none, so you can pick it to go back to the default), and they are real buttons so Tab and Enter work.
 
 Which folders are open is remembered in `localStorage` (a small per-app key/value store in the browser), wrapped in `try`/`catch` because storage can be unavailable.
 

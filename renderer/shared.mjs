@@ -1,7 +1,9 @@
 // Pure helpers used on both sides: the renderer imports this file, store.js requires it.
 
-// The fruit pictures in svg/: what a folder icon may be, and what falls behind the top bar.
+// The fruit pictures in svg/ that fall behind the top bar.
 export const FRUITS = ['apple', 'banana', 'coconut', 'grapes', 'kiwi', 'lemon', 'orange', 'orange-slice', 'peach', 'strawberry', 'watermelon'];
+// What a folder icon may be: the default crate first, then the fruit. The crate does not fall.
+export const ICONS = ['crate', ...FRUITS];
 
 // Folders are slash paths. inFolder: is `folder` the folder `f` or somewhere under it?
 export const inFolder = (folder, f) => folder === f || (folder || '').startsWith(f + '/');

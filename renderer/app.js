@@ -2,7 +2,7 @@ import { Terminal } from '../node_modules/@xterm/xterm/lib/xterm.mjs';
 import { FitAddon } from '../node_modules/@xterm/addon-fit/lib/addon-fit.mjs';
 import Guacamole from '../node_modules/guacamole-common-js/dist/esm/guacamole-common.js';
 import { shareClipboard, clean } from './clipboard.js';
-import { FRUITS, inFolder, parentOf, matches } from './shared.mjs';
+import { FRUITS, ICONS, inFolder, parentOf, matches } from './shared.mjs';
 
 const $ = (s) => document.querySelector(s);
 const el = (tag, props = {}, ...kids) => {
@@ -84,6 +84,33 @@ function setSide(collapsed) {
 }
 $('#toggle-side').onclick = () => setSide(!document.body.classList.contains('side-collapsed'));
 try { setSide(localStorage.getItem('bp-side') === '1'); } catch {}
+
+// Drag the grip on its right edge to widen the sidebar (arrows also work, double-click resets); remembered too.
+const SIDE_W = 270;
+let sideW = SIDE_W; // the width you chose; the window can only narrow what is shown, never what is saved
+function setSideW(px, save = true) {
+  const w = Math.round(Math.max(180, Math.min(700, innerWidth * 0.6, px)));
+  document.documentElement.style.setProperty('--side-w', w + 'px');
+  Object.assign($('#side-grip'), { ariaValueNow: String(w), ariaValueMax: String(Math.round(Math.min(700, innerWidth * 0.6))) });
+  if (save) { sideW = w; try { localStorage.setItem('bp-side-w', String(w)); } catch {} }
+}
+addEventListener('resize', () => setSideW(sideW, false)); // a smaller window narrows it, a bigger one gives it back
+const grip = $('#side-grip');
+grip.onpointerdown = (e) => {
+  if (e.button !== 0) return; // left button only
+  const start = e.clientX, w0 = $('#side').offsetWidth;
+  grip.setPointerCapture(e.pointerId);
+  grip.classList.add('dragging');
+  document.body.classList.add('side-resizing'); // no slide animation while following the mouse
+  grip.onpointermove = (m) => setSideW(w0 + m.clientX - start);
+  grip.onlostpointercapture = () => { grip.onpointermove = null; grip.classList.remove('dragging'); document.body.classList.remove('side-resizing'); }; // after a release or a cancelled drag
+};
+grip.ondblclick = () => setSideW(SIDE_W);
+grip.onkeydown = (e) => {
+  const step = { ArrowLeft: -16, ArrowRight: 16 }[e.key];
+  if (step) { e.preventDefault(); setSideW($('#side').offsetWidth + step); }
+};
+try { const w = Number(localStorage.getItem('bp-side-w')); if (w) setSideW(sideW = w, false); } catch {}
 
 async function refresh(v) {
   view = v || (await window.bp.get());
@@ -227,8 +254,8 @@ function folderMenu(e, f) {
 }
 
 function pickIcon(f) {
-  const d = $('#icon-dlg'), cur = view.folderIcons[f];
-  $('#icon-grid').replaceChildren(...FRUITS.map((n) => el('button', {
+  const d = $('#icon-dlg'), cur = view.folderIcons[f] || 'crate';
+  $('#icon-grid').replaceChildren(...ICONS.map((n) => el('button', {
     type: 'button', className: 'pic', title: n, ariaLabel: n, ariaPressed: String(n === cur),
     onclick: async () => { d.close(); refresh(await window.bp.folderIcon(f, n)); },
   }, el('img', { src: `svg/${n}.svg`, alt: '' }))));
