@@ -2,7 +2,7 @@ import { Terminal } from '../node_modules/@xterm/xterm/lib/xterm.mjs';
 import { FitAddon } from '../node_modules/@xterm/addon-fit/lib/addon-fit.mjs';
 import Guacamole from '../node_modules/guacamole-common-js/dist/esm/guacamole-common.js';
 import { shareClipboard, clean } from './clipboard.js';
-import { FRUITS, inFolder, parentOf, matches } from './shared.mjs';
+import { FRUITS, ICONS, inFolder, parentOf, matches } from './shared.mjs';
 
 const $ = (s) => document.querySelector(s);
 const el = (tag, props = {}, ...kids) => {
@@ -253,8 +253,8 @@ function folderMenu(e, f) {
 }
 
 function pickIcon(f) {
-  const d = $('#icon-dlg'), cur = view.folderIcons[f];
-  $('#icon-grid').replaceChildren(...FRUITS.map((n) => el('button', {
+  const d = $('#icon-dlg'), cur = view.folderIcons[f] || 'crate';
+  $('#icon-grid').replaceChildren(...ICONS.map((n) => el('button', {
     type: 'button', className: 'pic', title: n, ariaLabel: n, ariaPressed: String(n === cur),
     onclick: async () => { d.close(); refresh(await window.bp.folderIcon(f, n)); },
   }, el('img', { src: `svg/${n}.svg`, alt: '' }))));

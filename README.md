@@ -12,7 +12,7 @@ A small, fruity connection manager for Linux: SSH and local terminals, plus RDP 
 - **Full screen current.** Ctrl+Alt+F makes the active session fill the whole screen. A faint banana at the top brings back Minimize and Back to tab.
 - **Folders.** Group connections in nested folders in a collapsible sidebar (Ctrl+B hides it); drag its right edge to make it wider or narrower. Right-click a folder to open everything in it as a split, add a subfolder, or bulk edit it.
 - **Drag to reorganize.** Drag connections and folders to reorder them or nest one folder in another; the order is saved. Move up / Move down in the right-click menu do the same from the keyboard.
-- **Folder fruit icons.** Right-click a folder → Change icon… and pick a fruit. Folders without one show a crate.
+- **Folder fruit icons.** Right-click a folder → Change icon… and pick a fruit, or the crate to go back to the default. Folders without one show a crate.
 - **Quick search.** Ctrl+K finds connections by name, host, user, folder or tag. Enter opens a result, Shift+Enter opens it in a split.
 - **Bulk credential edit.** Change the username, domain or password of every connection with a given username, or in a folder, after previewing exactly which ones will change. A backup is kept.
 - **SSH, RDP, VNC and local terminals.** RDP supports Active Directory logins (domain, user, password) and admin sessions, and its pane closes when you sign out of Windows.
