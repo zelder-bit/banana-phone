@@ -287,4 +287,26 @@ test('tabs, splits, gutter and dialogs', { timeout: 120000 }, async (t) => {
     await app.click('#new-term', SHIFT); // a local terminal split into the Box/Lab tab
     await app.waitFor(`${count('.tab-group')} === 1 && document.querySelector('#tabs').lastElementChild.previousElementSibling.textContent === 'Mixed'`);
   });
+
+  await t.test('tab right-click: rename, duplicate, reconnect, close others', async () => {
+    const tabMenu = (item) => app.eval(`(() => { document.querySelector('.tab.active').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 50, clientY: 50 }));
+      [...document.querySelectorAll('#menu button')].find((b) => b.textContent === '${item}').click(); })()`);
+    const active = `document.querySelector('.tab.active .t').textContent`;
+    await tabMenu('Rename…');
+    await app.waitFor('document.querySelector("#prompt-dlg").open && document.activeElement.id === "prompt-in"');
+    await app.eval('document.querySelector("#prompt-in").select()');
+    await app.type('mine');
+    await app.key('Enter', 'Enter', 13);
+    await app.waitFor(`${active} === 'mine'`);
+
+    const n = await app.eval(count('.tab'));
+    await tabMenu('Duplicate');
+    await app.waitFor(`${count('.tab')} === ${n + 1} && ${visiblePanes} === 2 && ${active} === 'mine'`); // same two sessions, same name
+
+    await tabMenu('Close other tabs');
+    await app.waitFor(`${count('.tab')} === 1 && ${count('.pane')} === 2`);
+
+    await tabMenu('Reconnect');
+    await app.waitFor(`${count('.tab')} === 1 && ${count('.pane')} === 2 && ${count('.xterm')} === 2 && ${active} === 'mine'`);
+  });
 });
