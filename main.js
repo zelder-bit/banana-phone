@@ -41,48 +41,37 @@ const send = (ch, ...args) => win && !win.isDestroyed() && win.webContents.send(
 
 ipcMain.handle('store:get', () => publicView());
 
-ipcMain.handle('store:save', (_e, conn) => {
-  const { password, ...rest } = conn;
-  if (password !== undefined) rest.password = enc(password); // undefined = keep existing
-  store.upsert(data, rest);
-  persist(false);
-  return publicView();
+// Every change to the store: apply it, write the file, answer with the new view (plus the change's own result).
+// backup: true keeps the old file as .bak, a function returns the path to copy it to.
+const change = (channel, fn, backup = false) => ipcMain.handle(channel, (_e, ...args) => {
+  const result = fn(...args);
+  persist(typeof backup === 'function' ? backup() : backup);
+  return { ...publicView(), result };
 });
 
-ipcMain.handle('store:delete', (_e, id) => { store.remove(data, id); persist(true); return publicView(); });
-
-ipcMain.handle('store:folder', (_e, { add, remove, icon }) => {
-  if (icon) store.setFolderIcon(data, icon.folder, icon.name);
-  if (add && !data.folders.includes(add)) data.folders.push(add);
-  if (remove) {
-    if (data.connections.some((c) => store.inFolder(c.folder, remove))) throw new Error('Folder is not empty');
-    data.folders = data.folders.filter((f) => !store.inFolder(f, remove));
-    store.moveFolderIcons(data, remove, null);
-  }
-  persist(false);
-  return publicView();
+change('store:save', ({ password, ...conn }) => {
+  if (password !== undefined) conn.password = enc(password); // undefined = keep existing
+  store.upsert(data, conn); // its return value holds the encrypted password, so it is not passed on
 });
-
-// { conn: id } or { folder: path }, plus `to` (target folder, '' = top level) and optional `before` (sibling to land in front of).
-ipcMain.handle('store:move', (_e, { conn, folder, to, before }) => {
-  if (conn) store.moveConn(data, conn, to, before);
-  else store.moveFolder(data, folder, to, before);
-  persist(false);
-  return publicView();
-});
+change('store:delete', (id) => store.remove(data, id), true);
+change('store:addFolder', (f) => store.addFolder(data, f));
+change('store:removeFolder', (f) => store.removeFolder(data, f));
+change('store:folderIcon', (f, name) => store.setFolderIcon(data, f, name));
+// kind: 'conn' (id) or 'folder' (path); `to` is the target folder ('' = top level), `before` the sibling to land in front of.
+// A moved folder's result is its new path.
+change('store:move', (kind, id, to, before) => (kind === 'conn' ? store.moveConn : store.moveFolder)(data, id, to, before));
 
 ipcMain.handle('store:bulkPreview', (_e, filter) => store.select(data, filter).map((c) => ({ id: c.id, name: c.name, host: c.host, folder: c.folder, username: c.username })));
 
-ipcMain.handle('store:bulkApply', (_e, filter, patch) => {
+// result: how many connections changed.
+change('store:bulkApply', (filter, patch) => {
   const p = {};
   if (patch.username) p.username = patch.username;
   if (patch.domain !== undefined && patch.domain !== null) p.domain = patch.domain;
   if (patch.clearPassword) p.password = '';
   else if (patch.password) p.password = enc(patch.password);
-  const n = store.bulkUpdate(data, filter, p);
-  persist(bulkBackup());
-  return { count: n, view: publicView() };
-});
+  return store.bulkUpdate(data, filter, p);
+}, bulkBackup);
 
 // ---- sessions ---------------------------------------------------------------
 
@@ -239,10 +228,14 @@ ipcMain.on('session:write', (_e, id, d) => sessions.get(id)?.write(d));
 ipcMain.on('session:resize', (_e, id, c, r) => sessions.get(id)?.resize(c, r));
 ipcMain.on('session:close', (_e, id) => sessions.get(id)?.close());
 
+// ---- window (Full screen current) --------------------------------------------
+
+let wantFull = false; // what the page last asked for
+ipcMain.on('win:fullscreen', (_e, on) => { wantFull = !!on; win?.setFullScreen(wantFull); });
+ipcMain.on('win:minimize', () => win?.minimize());
+
 // ---- clipboard (text only, shared with remote desktops) ----------------------
 
-ipcMain.on('win:fullscreen', (_e, on) => win?.setFullScreen(!!on));
-ipcMain.on('win:minimize', () => win?.minimize());
 ipcMain.handle('clipboard:read', () => clipboard.readText());
 ipcMain.on('clipboard:write', (_e, text) => { if (typeof text === 'string') clipboard.writeText(text); });
 
@@ -262,6 +255,9 @@ app.whenReady().then(() => {
     backgroundColor: '#FFF8EC',
     webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, sandbox: true },
   });
+  // The window can leave full screen without the page asking (a window manager shortcut): tell the page.
+  // Not when the page asked for it itself, and not when the window was only minimized.
+  win.on('leave-full-screen', () => { if (wantFull && !win.isMinimized()) send('win:left-fullscreen'); });
   // A reloaded page has lost its terminals, so end their shells too.
   win.webContents.on('did-start-loading', () => { for (const s of sessions.values()) s.close(); });
   win.loadFile(path.join(__dirname, 'renderer/index.html'));

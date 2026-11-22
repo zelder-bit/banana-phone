@@ -14,10 +14,10 @@ const errors = [];
 const sources = [];
 (function walk(dir) {
   for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
-    if (['node_modules', 'dist', '.git', 'fonts', 'svg'].includes(e.name)) continue;
+    if (['node_modules', 'dist', '.git', '.claude', 'fonts', 'svg'].includes(e.name)) continue;
     const p = path.join(dir, e.name);
     if (e.isDirectory()) walk(p);
-    else if (/\.(js|html|css)$/.test(e.name) || e.name === 'package.json') sources.push(path.relative(root, p));
+    else if (/\.(m?js|html|css)$/.test(e.name) || e.name === 'package.json') sources.push(path.relative(root, p));
   }
 })(root);
 

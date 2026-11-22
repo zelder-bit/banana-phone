@@ -3,17 +3,18 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-const empty = () => ({ folders: [], folderIcons: {}, connections: [] });
+const { FRUITS, inFolder, parentOf, matches } = require('./renderer/shared.mjs');
 
-const FOLDER_ICONS = ['apple', 'banana', 'coconut', 'grapes', 'kiwi', 'lemon', 'orange', 'orange-slice', 'peach', 'strawberry', 'watermelon'];
+// `ordered`: array order is the order the user chose. Only files from before drag-to-reorder lack it.
+const empty = () => ({ ordered: true, folders: [], folderIcons: {}, connections: [] });
 
 function load(file) {
   try {
     const data = JSON.parse(fs.readFileSync(file, 'utf8'));
     if (!data || typeof data !== 'object') throw new Error('connections file is not a JSON object');
-    const d = { ordered: !!data.ordered, folders: data.folders || [], folderIcons: data.folderIcons || {}, connections: data.connections || [] };
+    const d = { ...empty(), folders: data.folders || [], folderIcons: data.folderIcons || {}, connections: data.connections || [] };
     fillFolders(d);
-    if (!d.ordered) { // files from before drag-to-reorder: start from the alphabetical order the sidebar used to show
+    if (!data.ordered) { // an old file: start from the alphabetical order the sidebar used to show
       d.folders.sort((a, b) => a.localeCompare(b));
       d.connections.sort((a, b) => a.name.localeCompare(b.name));
     }
@@ -33,9 +34,8 @@ function save(file, data, { backup = false } = {}) {
   fs.renameSync(tmp, file);
 }
 
-const inFolder = (folder, f) => folder === f || (folder || '').startsWith(f + '/');
-
-// Make every folder explicit (parents of "a/b/c", folders only a connection mentions) so each has a place in the order.
+// Every folder is listed: parents of "a/b/c" and folders only a connection mentions too, so each has a
+// place in the order. Everything that adds a folder calls this.
 function fillFolders(data) {
   const set = new Set(data.folders);
   for (const f of [...data.folders, ...data.connections.map((c) => c.folder).filter(Boolean)]) {
@@ -43,6 +43,26 @@ function fillFolders(data) {
     parts.forEach((_, i) => set.add(parts.slice(0, i + 1).join('/')));
   }
   data.folders = [...set];
+}
+
+function addFolder(data, f) {
+  if (!f) return;
+  data.folders.push(f);
+  fillFolders(data);
+}
+
+function removeFolder(data, f) {
+  if (data.connections.some((c) => inFolder(c.folder, f))) throw new Error('Only empty folders can be deleted');
+  data.folders = data.folders.filter((x) => !inFolder(x, f));
+  for (const k of Object.keys(data.folderIcons)) if (inFolder(k, f)) delete data.folderIcons[k];
+}
+
+// The only place a folder path is rewritten: the folder, its subfolders, their connections and their icons.
+function renameFolder(data, from, to) {
+  const re = (f) => (inFolder(f, from) ? to + f.slice(from.length) : f);
+  data.folders = data.folders.map(re);
+  for (const c of data.connections) if (c.folder) c.folder = re(c.folder);
+  data.folderIcons = Object.fromEntries(Object.entries(data.folderIcons).map(([k, v]) => [re(k), v]));
 }
 
 // Array order is the saved order. Move a connection into folder `to` ('' = top level), before connection `before` (default: last).
@@ -53,52 +73,30 @@ function moveConn(data, id, to, before) {
   if (to) c.folder = to; else delete c.folder;
   const j = before ? data.connections.findIndex((x) => x.id === before) : -1;
   data.connections.splice(j < 0 ? data.connections.length : j, 0, c);
-  data.ordered = true;
   fillFolders(data);
 }
 
-// Move folder `from` (with everything under it) into folder `to` ('' = top level), before sibling folder path `before` (default: last).
+// Move folder `from` (with everything under it) into folder `to` ('' = top level), before sibling folder
+// path `before` (default: last). Returns its new path.
 function moveFolder(data, from, to, before) {
-  fillFolders(data);
-  const name = from.split('/').pop();
-  const dest = to ? `${to}/${name}` : name;
+  const dest = (to ? to + '/' : '') + from.split('/').pop();
   if (!data.folders.includes(from)) throw new Error('No such folder');
   if (to && !data.folders.includes(to)) throw new Error('No such folder');
   if (to && inFolder(to, from)) throw new Error('A folder cannot go inside itself');
   if (dest !== from && data.folders.includes(dest)) throw new Error(`"${dest}" already exists`);
   if (before && inFolder(before, from)) return dest;
-  const rename = (f) => dest + f.slice(from.length);
-  const moved = data.folders.filter((f) => inFolder(f, from)).map(rename);
-  data.folders = data.folders.filter((f) => !inFolder(f, from));
+  renameFolder(data, from, dest);
+  const moved = data.folders.filter((f) => inFolder(f, dest));
+  data.folders = data.folders.filter((f) => !inFolder(f, dest));
   const j = before ? data.folders.indexOf(before) : -1;
   data.folders.splice(j < 0 ? data.folders.length : j, 0, ...moved);
-  for (const c of data.connections) if (inFolder(c.folder, from)) c.folder = rename(c.folder);
-  if (dest !== from) moveFolderIcons(data, from, dest);
-  data.ordered = true;
   return dest;
 }
 
 function setFolderIcon(data, folder, name) {
-  if (!FOLDER_ICONS.includes(name)) throw new Error(`Unknown folder icon: ${name}`);
+  if (!FRUITS.includes(name)) throw new Error(`Unknown folder icon: ${name}`);
+  if (!data.folders.includes(folder)) throw new Error('No such folder');
   data.folderIcons[folder] = name;
-}
-
-// Call when a folder path changes ("a" -> "b"); subfolders follow. Drop with to = null.
-function moveFolderIcons(data, from, to) {
-  for (const k of Object.keys(data.folderIcons || {})) {
-    if (!inFolder(k, from)) continue;
-    const icon = data.folderIcons[k];
-    delete data.folderIcons[k];
-    if (to != null) data.folderIcons[to + k.slice(from.length)] = icon;
-  }
-}
-
-function matches(conn, q) {
-  q = q.trim().toLowerCase();
-  if (!q) return true;
-  const hay = [conn.name, conn.host, conn.username, conn.domain, conn.folder, conn.protocol, ...(conn.tags || [])]
-    .filter(Boolean).join(' ').toLowerCase();
-  return q.split(/\s+/).every((word) => hay.includes(word));
 }
 
 // filter: { username } or { folder }; ids (optional) narrows to what the user ticked.
@@ -130,7 +128,7 @@ function upsert(data, input) {
   const i = data.connections.findIndex((c) => c.id === conn.id);
   if (i >= 0) data.connections[i] = { ...data.connections[i], ...conn };
   else data.connections.push(conn);
-  if (conn.folder && !data.folders.includes(conn.folder)) data.folders.push(conn.folder);
+  fillFolders(data);
   return conn;
 }
 
@@ -138,4 +136,4 @@ function remove(data, id) {
   data.connections = data.connections.filter((c) => c.id !== id);
 }
 
-module.exports = { load, save, matches, select, bulkUpdate, upsert, remove, inFolder, moveConn, moveFolder, FOLDER_ICONS, setFolderIcon, moveFolderIcons };
+module.exports = { load, save, matches, select, bulkUpdate, upsert, remove, addFolder, removeFolder, moveConn, moveFolder, setFolderIcon };

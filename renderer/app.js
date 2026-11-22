@@ -2,6 +2,7 @@ import { Terminal } from '../node_modules/@xterm/xterm/lib/xterm.mjs';
 import { FitAddon } from '../node_modules/@xterm/addon-fit/lib/addon-fit.mjs';
 import Guacamole from '../node_modules/guacamole-common-js/dist/esm/guacamole-common.js';
 import { shareClipboard, clean } from './clipboard.js';
+import { FRUITS, inFolder, parentOf, matches } from './shared.mjs';
 
 const $ = (s) => document.querySelector(s);
 const el = (tag, props = {}, ...kids) => {
@@ -17,10 +18,9 @@ let view = { folders: [], folderIcons: {}, connections: [] };
 let selected = null;
 
 // Falling fruit behind the top bar: each fruit gets its own position, size, speed and sway.
-const FALL_FRUITS = ['apple', 'banana', 'coconut', 'grapes', 'kiwi', 'lemon', 'orange-slice', 'orange', 'peach', 'strawberry', 'watermelon'];
 function rain(fall, n = 10) {
   for (let i = 0; i < n; i++) {
-    const img = el('img', { src: `svg/${FALL_FRUITS[Math.floor(Math.random() * FALL_FRUITS.length)]}.svg`, alt: '' });
+    const img = el('img', { src: `svg/${FRUITS[Math.floor(Math.random() * FRUITS.length)]}.svg`, alt: '' });
     const vars = {
       '--left': `${(i * (100 / n) + 2 + Math.random() * 6).toFixed(1)}%`, // spread evenly, then jitter
       '--size': `${(16 + Math.random() * 6).toFixed(1)}px`,
@@ -89,17 +89,7 @@ async function refresh(v) {
   view = v || (await window.bp.get());
   $('#keyring-warn').hidden = view.keyring !== 'basic_text';
   renderTree();
-  $('#folder-list').replaceChildren(...allFolders().map((f) => el('option', { value: f })));
-}
-
-// Every folder path, including parents of "a/b/c" and folders only implied by a connection.
-function allFolders() {
-  const set = new Set();
-  for (const f of [...view.folders, ...view.connections.map((c) => c.folder).filter(Boolean)]) {
-    const parts = f.split('/');
-    parts.forEach((_, i) => set.add(parts.slice(0, i + 1).join('/')));
-  }
-  return [...set];
+  $('#folder-list').replaceChildren(...view.folders.map((f) => el('option', { value: f })));
 }
 
 const openFolders = new Set(JSON.parse((() => { try { return localStorage.getItem('bp-open') || '[]'; } catch { return '[]'; } })()));
@@ -107,17 +97,19 @@ const saveOpen = () => { try { localStorage.setItem('bp-open', JSON.stringify([.
 
 // Saved order = array order, so these do not sort.
 const connsIn = (f) => view.connections.filter((c) => (c.folder || '') === f);
-const kidsOf = (parent) => allFolders().filter((f) => f.split('/').length === (parent ? parent.split('/').length + 1 : 1) && (!parent || f.startsWith(parent + '/')));
+const kidsOf = (parent) => view.folders.filter((f) => parentOf(f) === parent);
 
 function renderTree() {
   const build = (parent) => {
     const nodes = kidsOf(parent).map((f) => {
-      const total = view.connections.filter((c) => c.folder === f || (c.folder || '').startsWith(f + '/')).length;
+      const total = view.connections.filter((c) => inFolder(c.folder, f)).length;
       const sum = el('summary', {}, el('img', { className: 'folder-icon', src: `svg/${view.folderIcons[f] || 'crate'}.svg`, alt: '' }), el('span', { textContent: f.split('/').pop() }), el('span', { className: 'count', textContent: total }));
       sum.oncontextmenu = (e) => folderMenu(e, f);
       sum.draggable = true;
       sum.ondragstart = (e) => { e.stopPropagation(); e.dataTransfer.setData('bp/folder', f); };
-      dropTarget(sum, f, true);
+      dropZone(sum, ['bp/conn', 'bp/folder'], (e, k) => k === 'bp/folder' && e.offsetY < sum.offsetHeight / 4
+        ? { cls: 'drop-before', drop: (id) => moveTo(k, id, parentOf(f), f) } // top edge: in front of this folder
+        : { cls: 'drop', drop: (id) => moveTo(k, id, f) });
       const d = el('details', { open: openFolders.has(f) }, sum, ...build(f), ...connsIn(f).map(connRow));
       d.ontoggle = () => { d.open ? openFolders.add(f) : openFolders.delete(f); saveOpen(); };
       return d;
@@ -128,8 +120,7 @@ function renderTree() {
 }
 
 // Drop on the empty part of the list: back to the top level.
-$('#tree').ondragover = (e) => { if (e.target === e.currentTarget && dragKind(e)) e.preventDefault(); };
-$('#tree').ondrop = (e) => { if (e.target === e.currentTarget) dropMove(e, ''); };
+dropZone($('#tree'), ['bp/conn', 'bp/folder'], (e, k) => e.target === e.currentTarget && { drop: (id) => moveTo(k, id, '') });
 
 function connRow(c) {
   const row = el('div', { className: 'conn' + (selected === c.id ? ' sel' : ''), draggable: true, tabIndex: 0, title: `${c.username ? c.username + '@' : ''}${c.host || 'local'}` },
@@ -139,61 +130,59 @@ function connRow(c) {
   row.onkeydown = (e) => { if (e.key === 'Enter') connect(c.id, e.shiftKey); };
   row.oncontextmenu = (e) => connMenu(e, c);
   row.ondragstart = (e) => e.dataTransfer.setData('bp/conn', c.id);
-  dropTarget(row, c.folder || '', false, c.id);
+  dropZone(row, ['bp/conn'], (e, k) => ({ cls: 'drop-before', drop: (id) => moveTo(k, id, c.folder || '', c.id) }));
   return row;
 }
 
-const dragKind = (e) => ['bp/conn', 'bp/folder'].find((t) => e.dataTransfer.types.includes(t));
-
-// Move what is being dragged into folder `to` ('' = top level), in front of `before` (a connection id or folder path).
-async function moveTo(op) {
-  const { folder, to } = op;
-  const r = await window.bp.move(op);
-  if (folder) { // carry the open/closed state of the folder and its subfolders to their new paths
-    const dest = (to ? to + '/' : '') + folder.split('/').pop();
-    for (const f of [...openFolders]) if (f === folder || f.startsWith(folder + '/')) { openFolders.delete(f); openFolders.add(dest + f.slice(folder.length)); }
-    saveOpen();
-  }
-  refresh(r);
-}
-function dropMove(e, to, before) {
-  const conn = e.dataTransfer.getData('bp/conn');
-  const folder = e.dataTransfer.getData('bp/folder');
-  if (conn || folder) moveTo({ ...(conn ? { conn } : { folder }), to, before });
-}
-
-// A folder row: drop into it (a folder's top edge instead lands the dragged folder in front of it).
-// A connection row (isFolder false): drop a connection in front of it.
-function dropTarget(node, folder, isFolder, connId) {
-  const edge = (e) => isFolder && dragKind(e) === 'bp/folder' && e.offsetY < node.offsetHeight / 4;
+// Drag and drop, once. `types` are the drag kinds this node accepts; `where(e, kind)` says what a drop
+// here would do: nothing (falsy: not handled here, the event bubbles on), or { cls, drop(id) }.
+function dropZone(node, types, where) {
+  const hit = (e) => { const k = types.find((t) => e.dataTransfer.types.includes(t)); const w = k && where(e, k); return w && { k, ...w }; };
   const clear = () => node.classList.remove('drop', 'drop-before');
   node.ondragover = (e) => {
-    const k = dragKind(e);
-    if (!k || (!isFolder && k !== 'bp/conn')) return;
+    const h = hit(e);
+    if (!h) return;
     e.preventDefault(); e.stopPropagation();
     clear();
-    node.classList.add(isFolder && !edge(e) ? 'drop' : 'drop-before');
+    if (h.cls) node.classList.add(h.cls);
   };
   node.ondragleave = clear;
   node.ondrop = (e) => {
-    e.stopPropagation(); // the tree's own drop means "top level"
-    const before = edge(e);
     clear();
-    if (!isFolder) dropMove(e, folder, connId);
-    else if (before) dropMove(e, folder.includes('/') ? folder.slice(0, folder.lastIndexOf('/')) : '', folder);
-    else dropMove(e, folder);
+    const h = hit(e);
+    if (!h) return;
+    e.stopPropagation(); // an outer zone (the tree: "top level") must not also act
+    h.drop(e.dataTransfer.getData(h.k));
   };
 }
 
-// Keyboard path: Move up / Move down among siblings.
-const upDown = (ids, i, key) => [['Move up', i > 0, ids[i - 1]], ['Move down', i < ids.length - 1, ids[i + 2]]]
-  .filter((m) => m[1]).map((m) => [m[0], () => moveTo({ ...key, before: m[2] })]);
+// Move a connection (kind 'conn', id) or folder (kind 'folder', id = path) into folder `to` ('' = top level),
+// in front of `before` (a connection id or folder path). `kind` may also be a drag type: 'bp/conn'.
+async function moveTo(kind, id, to, before) {
+  kind = kind.replace(/^bp\//, '');
+  const v = await window.bp.move(kind, id, to, before);
+  if (kind === 'folder') { // carry the open/closed state of the folder and its subfolders to their new paths
+    for (const f of [...openFolders]) if (inFolder(f, id)) { openFolders.delete(f); openFolders.add(v.result + f.slice(id.length)); }
+    saveOpen();
+  }
+  refresh(v);
+}
+
+// Keyboard path: Move up / Move down among siblings `sibs` (ids or paths, in order). `before` is what the item
+// lands in front of: up = the one above; down = two below, since the one just below is what it passes (undefined = last).
+function moveRows(kind, id, to, sibs) {
+  const i = sibs.indexOf(id), rows = [];
+  if (i > 0) rows.push(['Move up', () => moveTo(kind, id, to, sibs[i - 1])]);
+  if (i < sibs.length - 1) rows.push(['Move down', () => moveTo(kind, id, to, sibs[i + 2])]);
+  return rows.length ? ['-', ...rows] : [];
+}
 
 // Cancel buttons are type=button so Enter submits the form's real action instead.
 document.querySelectorAll('[data-cancel]').forEach((b) => (b.onclick = () => b.closest('dialog').close('cancel')));
 
 // Any failed call to main (keyring, disk) shows up instead of failing silently.
-addEventListener('unhandledrejection', (e) => toast(String(e.reason?.message || e.reason).replace(/^Error invoking remote method '[^']+': (Error: )?/, '')));
+const errText = (e) => String(e?.message || e).replace(/^Error invoking remote method '[^']+': (Error: )?/, '');
+addEventListener('unhandledrejection', (e) => toast(errText(e.reason)));
 
 // ---------------------------------------------------------------- context menus
 
@@ -212,7 +201,7 @@ function connMenu(e, c) {
   menu(e, [
     ['Connect in new tab', () => connect(c.id)],
     ['Connect in split', () => connect(c.id, true)],
-    ...(() => { const sib = connsIn(c.folder || '').map((x) => x.id), m = upDown(sib, sib.indexOf(c.id), { conn: c.id, to: c.folder || '' }); return m.length ? ['-', ...m] : []; })(),
+    ...moveRows('conn', c.id, c.folder || '', connsIn(c.folder || '').map((x) => x.id)),
     '-',
     ['Edit…', () => editConn(c)],
     ['Duplicate', () => { const { id, ...rest } = c; editConn({ ...rest, name: c.name + ' copy', copyPasswordFrom: c.hasPassword ? id : undefined }); }],
@@ -230,20 +219,17 @@ function folderMenu(e, f) {
     ['Open all in split', () => openFolder(f)],
     ['Change icon…', () => pickIcon(f)],
     ['Bulk edit this folder…', () => openBulk('folder', f)],
-    ...(() => { const parent = f.includes('/') ? f.slice(0, f.lastIndexOf('/')) : '', sib = kidsOf(parent), m = upDown(sib, sib.indexOf(f), { folder: f, to: parent }); return m.length ? ['-', ...m] : []; })(),
+    ...moveRows('folder', f, parentOf(f), kidsOf(parentOf(f))),
     '-',
-    ['Delete folder', async () => {
-      try { refresh(await window.bp.folder({ remove: f })); } catch { toast('Only empty folders can be deleted'); }
-    }, 'danger'],
+    ['Delete folder', async () => refresh(await window.bp.removeFolder(f)), 'danger'], // main refuses a non-empty one; the rejection toasts
   ]);
 }
 
-const FRUITS = ['apple', 'banana', 'coconut', 'grapes', 'kiwi', 'lemon', 'orange', 'orange-slice', 'peach', 'strawberry', 'watermelon'];
 function pickIcon(f) {
   const d = $('#icon-dlg'), cur = view.folderIcons[f];
   $('#icon-grid').replaceChildren(...FRUITS.map((n) => el('button', {
     type: 'button', className: 'pic', title: n, ariaLabel: n, ariaPressed: String(n === cur),
-    onclick: async () => { d.close(); refresh(await window.bp.folder({ icon: { folder: f, name: n } })); },
+    onclick: async () => { d.close(); refresh(await window.bp.folderIcon(f, n)); },
   }, el('img', { src: `svg/${n}.svg`, alt: '' }))));
   d.showModal();
 }
@@ -261,12 +247,12 @@ async function ask(title, value = '') {
 
 async function newFolder(prefix = '') {
   const name = await ask('New folder', prefix);
-  if (name) { openFolders.add(name); saveOpen(); refresh(await window.bp.folder({ add: name.replace(/^\/+|\/+$/g, '') })); }
+  if (name) { openFolders.add(name); saveOpen(); refresh(await window.bp.addFolder(name.replace(/^\/+|\/+$/g, ''))); }
 }
 $('#new-folder').onclick = () => newFolder();
 
 function openFolder(f) {
-  const ids = view.connections.filter((c) => c.folder === f || (c.folder || '').startsWith(f + '/')).map((c) => c.id);
+  const ids = view.connections.filter((c) => inFolder(c.folder, f)).map((c) => c.id);
   if (ids.length > MAX_PANES) toast(`Opening the first ${MAX_PANES} of ${ids.length}`);
   ids.slice(0, MAX_PANES).forEach((id, i) => connect(id, i > 0));
 }
@@ -330,7 +316,7 @@ function openBulk(by = 'username', value = '') {
 $('#bulk').onclick = () => openBulk('username', view.connections.find((c) => c.id === selected)?.username || '');
 
 function bulkOptions() {
-  const vals = bform.elements.by.value === 'folder' ? allFolders() : [...new Set(view.connections.map((c) => c.username).filter(Boolean))].sort();
+  const vals = bform.elements.by.value === 'folder' ? view.folders : [...new Set(view.connections.map((c) => c.username).filter(Boolean))].sort();
   $('#bulk-values').replaceChildren(...vals.map((v) => el('option', { value: v })));
 }
 bform.elements.by.onchange = () => { bform.elements.value.value = ''; bulkOptions(); bulkPreview(); };
@@ -360,8 +346,8 @@ $('#bulk-apply').onclick = async (e) => {
   if (!confirm(`${what} ${ids.length} connection${ids.length > 1 ? 's' : ''}? A backup of the old file is kept.`)) return;
   const res = await window.bp.bulkApply({ ...bulkFilter, ids }, patch);
   $('#bulk-dlg').close();
-  refresh(res.view);
-  toast(`Updated ${res.count} connection${res.count === 1 ? '' : 's'} 🍌`);
+  refresh(res);
+  toast(`Updated ${res.result} connection${res.result === 1 ? '' : 's'} 🍌`);
 };
 
 // ---------------------------------------------------------------- quick search
@@ -380,12 +366,7 @@ function openSearch() {
 $('#open-search').onclick = openSearch;
 
 function runSearch() {
-  const q = sIn.value.trim().toLowerCase();
-  // same rule as store.matches: every word must appear somewhere
-  hits = view.connections.filter((c) => {
-    const hay = [c.name, c.host, c.username, c.domain, c.folder, c.protocol, ...(c.tags || [])].filter(Boolean).join(' ').toLowerCase();
-    return q.split(/\s+/).every((w) => hay.includes(w));
-  }).slice(0, 50);
+  hits = view.connections.filter((c) => matches(c, sIn.value)).slice(0, 50);
   hitIdx = 0;
   drawHits();
 }
@@ -422,7 +403,7 @@ function newTab() {
 }
 
 function selectTab(t) {
-  if (fsPane && !t?.panes.includes(fsPane)) leaveFull();
+  if (fsPane && !t?.panes.includes(fsPane)) setFull(null);
   current = t;
   for (const x of tabs) x.root.hidden = x !== t;
   if (t?.active) focusPane(t.active);
@@ -512,14 +493,7 @@ function movePane(p, to) {
 
 // Where pane headers can be dropped: a tab (join it) or empty tab bar (new tab).
 function paneDrop(node, target) {
-  node.ondragover = (e) => { if (e.dataTransfer.types.includes('bp/pane')) { e.preventDefault(); e.stopPropagation(); node.classList.add('drop'); } };
-  node.ondragleave = () => node.classList.remove('drop');
-  node.ondrop = (e) => {
-    e.stopPropagation();
-    node.classList.remove('drop');
-    const p = allPanes().find((x) => x.id === e.dataTransfer.getData('bp/pane'));
-    if (p) movePane(p, target());
-  };
+  dropZone(node, ['bp/pane'], () => ({ cls: 'drop', drop: (id) => { const p = allPanes().find((x) => x.id === id); if (p) movePane(p, target()); } }));
 }
 paneDrop($('#tabs'), () => null);
 const allPanes = () => tabs.flatMap((t) => t.panes);
@@ -540,32 +514,25 @@ $('#explode').onclick = () => {
 // Full screen current: pin the active pane over the window (no re-parenting, so the session
 // keeps running) and full-screen the real window. The pane's own ResizeObserver re-fits it.
 let fsPane = null;
-function enterFull() {
-  const p = current?.active;
-  if (!p || fsPane) return;
+function setFull(p) { // p = the pane to full-screen, or null to leave; pane class, banana and real window change together
+  if (p === fsPane) return;
+  const was = fsPane;
   fsPane = p;
-  p.root.classList.add('full');
-  $('#fs-banana').hidden = false;
-  window.bp.fullScreen(true);
-  p.body.focus();
+  was?.root.classList.remove('full');
+  p?.root.classList.add('full');
+  $('#fs-banana').hidden = !p;
+  window.bp.fullScreen(!!p);
+  focusPane(p || was); // focusPane ignores a pane that is no longer in a tab
 }
-function leaveFull() {
-  if (!fsPane) return;
-  const p = fsPane;
-  fsPane = null;
-  p.root.classList.remove('full');
-  $('#fs-banana').hidden = true;
-  window.bp.fullScreen(false);
-  (p.term || p.body).focus();
-}
-const toggleFull = () => (fsPane ? leaveFull() : enterFull());
-$('#fullscreen').onclick = enterFull;
-$('#fs-back').onclick = leaveFull;
+const unfull = (p) => { if (p === fsPane) setFull(null); }; // a pane that closes or ends leaves full screen
+window.bp.onLeftFullScreen(() => setFull(null)); // e.g. a window manager shortcut took the window out of full screen
+$('#fullscreen').onclick = () => current?.active && setFull(current.active);
+$('#fs-back').onclick = () => setFull(null);
 $('#fs-min').onclick = () => window.bp.minimize();
 
 function closePane(p) {
   p.closed = true;
-  if (p === fsPane) leaveFull();
+  unfull(p);
   p.dispose();
   const t = tabs.find((x) => x.panes.includes(p));
   if (!t) return;
@@ -615,7 +582,7 @@ async function connect(connId, split = false) {
     if (c.protocol === 'rdp' || c.protocol === 'vnc') await openRemote(p, c);
     else await openTerm(p, c);
   } catch (e) {
-    status(p, String(e.message || e).replace(/^Error invoking remote method '[^']+': (Error: )?/, ''), true);
+    status(p, errText(e), true);
   }
 }
 
@@ -658,7 +625,7 @@ window.bp.onExit((id) => {
   const p = terms.get(id);
   if (!p) return;
   terms.delete(id);
-  if (p === fsPane) leaveFull();
+  unfull(p);
   p.term.write('\r\n\x1b[2m[session ended — press any key to close]\x1b[0m');
   p.term.onKey(() => closePane(p));
 });
@@ -694,15 +661,15 @@ async function openRemote(p, c) {
   display.onresize = fitDisplay;
 
   const clip = shareClipboard(client, p.body, window.bp);
+  const fail = (msg) => { p.failed = true; unfull(p); status(p, msg, true); }; // the one way a remote session ends in error
   client.onstatechange = (s) => {
     if (s === 3) { status(p, null); clip.onConnected(); } // CONNECTED
-    if (s === 5 && !p.closed && !p.failed) { status(p, 'Disconnected', true); if (p === fsPane) leaveFull(); }
+    if (s === 5 && !p.closed && !p.failed) fail('Disconnected');
   };
   client.onerror = (e) => {
     // Status 0 (SUCCESS) is guacd's normal end, e.g. "Manually logged off." when you sign out: just close.
     if (e.code === 0) return void (p.closed || closePane(p));
-    p.failed = true; if (p === fsPane) leaveFull();
-    status(p, `${c.host}: ${e.message || 'connection error'}`, true);
+    fail(`${c.host}: ${e.message || 'connection error'}`);
   };
 
   const mouse = new Guacamole.Mouse(display.getElement());
@@ -730,7 +697,7 @@ addEventListener('keydown', (e) => {
     e.preventDefault();
     selectTab(tabs[(tabs.indexOf(current) + (e.shiftKey ? tabs.length - 1 : 1)) % tabs.length]);
   }
-  if (e.ctrlKey && e.altKey && e.key.toLowerCase() === 'f' && (fsPane || current?.active)) { e.preventDefault(); e.stopPropagation(); toggleFull(); }
+  if (e.ctrlKey && e.altKey && e.key.toLowerCase() === 'f' && (fsPane || current?.active)) { e.preventDefault(); e.stopPropagation(); setFull(fsPane ? null : current.active); }
   // Ctrl+Alt+Arrow: move focus between panes in this tab
   if (e.ctrlKey && e.altKey && e.key.startsWith('Arrow') && current?.panes.length > 1) {
     e.preventDefault();

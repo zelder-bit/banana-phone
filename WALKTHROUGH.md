@@ -91,6 +91,7 @@ banana-phone/
     ├── fruit.css       theme (light "orchard" and dark "night grove")
     ├── app.js          all interface behaviour
     ├── clipboard.js    copy/paste between this computer and remote desktops
+    ├── shared.mjs      pure helpers both sides use: fruit list, folder paths, search rule
     ├── icon.png        window icon
     ├── fonts/          Fredoka (headings) and Nunito (text)
     └── svg/            fruit icons
@@ -99,15 +100,19 @@ banana-phone/
 Who loads whom:
 
 ```
-electron .  ──▶ main.js ──require──▶ store.js, guacd.js, ssh2, node-pty
+electron .  ──▶ main.js ──require──▶ store.js ──require──▶ renderer/shared.mjs
+                  │      └─require──▶ guacd.js, ssh2, node-pty
                   │
                   └─ new BrowserWindow({ preload: preload.js })
                            │
                            └─ loads renderer/index.html
                                      ├─ <link> fruit.css, xterm.css
                                      └─ <script type="module"> app.js
-                                              └─ import xterm, addon-fit, guacamole-common-js
+                                              └─ import xterm, addon-fit, guacamole-common-js,
+                                                        clipboard.js, shared.mjs
 ```
+
+`shared.mjs` is the one file both sides load. It holds small pure helpers, `FRUITS` (the fruit pictures), `inFolder` and `parentOf` (the folder-path rules) and `matches` (the search rule), so there is one copy of each instead of one in the store and another in the page that could quietly drift apart. The page imports it as an ES module; `store.js` loads it with plain `require()`, which recent Node and Electron allow for an ES module with no top-level `await`.
 
 ---
 
@@ -202,7 +207,8 @@ This file has **no Electron code at all**. That is deliberate: it can be tested 
 
 ```json example
 {
-  "folders": ["Prod/Windows", "Lab"],
+  "ordered": true,
+  "folders": ["Prod", "Prod/Windows", "Lab"],
   "folderIcons": { "Lab": "kiwi" },
   "connections": [
     {
@@ -221,7 +227,11 @@ This file has **no Electron code at all**. That is deliberate: it can be tested 
 }
 ```
 
-A folder is just a string like `"Prod/Windows"`. There is no separate tree structure, so there is nothing to keep in sync: the sidebar builds the tree from these strings every time it draws. `folders` only exists so you can have an *empty* folder. `folderIcons` maps a folder path to the fruit shown next to it; a folder with no entry gets the `crate` picture. `setFolderIcon` in `store.js` checks the name against a fixed fruit list (`FOLDER_ICONS`) before saving, so the renderer can never make the app read an arbitrary file name. `moveFolderIcons(data, from, to)` carries the entries of a folder and its subfolders to a new path, or drops them when `to` is `null`; deleting a folder calls it that way.
+A folder is just a string like `"Prod/Windows"`. There is no separate tree structure: the sidebar builds the tree from these strings every time it draws. The path is also the **key** everywhere a folder is mentioned: in `folders`, in each connection's `folder`, and in `folderIcons`, which maps a folder path to the fruit shown next to it (a folder with no entry gets the `crate` picture). So there *is* something to keep in sync: when a folder moves, its path changes in all three places. `renameFolder(data, from, to)` in `store.js` is the only function that rewrites a path, and it does all three at once, for the folder and everything under it.
+
+`folders` always lists **every** folder, including the parents of `"Prod/Windows"` and folders only a connection mentions. `fillFolders` makes that true on load and wherever a folder can appear (`addFolder`, `upsert`, `moveConn`), so the page can use `folders` as the full list without working anything out. It is also what lets an *empty* folder exist. `addFolder` and `removeFolder` live in the store too; `removeFolder` refuses a folder that still holds connections and drops its icons along with it.
+
+`setFolderIcon` checks the name against the fixed fruit list (`FRUITS`, from `shared.mjs`) before saving, so the renderer can never make the app read an arbitrary file name, and refuses a folder that does not exist, so no stray icon entries pile up.
 
 `password` is encrypted (see [§6](#encrypting-passwords)).
 
@@ -232,9 +242,9 @@ function load(file) {
   try {
     const data = JSON.parse(fs.readFileSync(file, 'utf8'));
     if (!data || typeof data !== 'object') throw new Error('connections file is not a JSON object');
-    const d = { ordered: !!data.ordered, folders: data.folders || [], folderIcons: data.folderIcons || {}, connections: data.connections || [] };
+    const d = { ...empty(), folders: data.folders || [], folderIcons: data.folderIcons || {}, connections: data.connections || [] };
     fillFolders(d);
-    if (!d.ordered) { // files from before drag-to-reorder: start from the alphabetical order the sidebar used to show
+    if (!data.ordered) { // an old file: start from the alphabetical order the sidebar used to show
       d.folders.sort((a, b) => a.localeCompare(b));
       d.connections.sort((a, b) => a.name.localeCompare(b.name));
     }
@@ -248,6 +258,7 @@ function load(file) {
 
 * `fs.readFileSync(file, 'utf8')` reads the whole file as text. "Sync" means the program waits until it is done, which is fine for a small file read once at start-up.
 * `JSON.parse` turns the text into a JavaScript object.
+* `{ ...empty(), folders: … }` starts from a fresh empty store (which has `ordered: true`) and puts the file's arrays on top, so a loaded store always has every field.
 * `data.folders || []`: the `||` operator returns its left side if that is "truthy", otherwise the right side. So a missing `folders` becomes an empty array.
 * The `typeof data !== 'object'` line rejects files that are valid JSON but not an object (for example a file containing just `null`).
 * `try { … } catch (e) { … }` catches errors. `ENOENT` ("Error NO ENTry") means the file does not exist yet: first launch, so start empty. Any other error (for example broken JSON) is re-thrown with `throw e`, so the app refuses to start rather than overwrite your connections with an empty list. `main.js` catches it and shows a dialog naming the file and its `.bak` copies.
@@ -257,9 +268,21 @@ function load(file) {
 The order you see is the order of the two arrays in the file. There is no separate `order` field: the sidebar does not sort, it just draws `folders` and `connections` in array order (siblings only, so the order of a folder relative to a connection never matters).
 
 * `fillFolders(data)` makes every folder explicit, adding the parents of `"a/b/c"` and folders only a connection mentions, so each folder has a place in the order.
-* Old files had no order and the sidebar sorted by name. On load, a file without `"ordered": true` is sorted by name once, so it looks the same as before. The first move writes `"ordered": true`, and from then on the arrays are left alone.
+* Old files had no order and the sidebar sorted by name. A file without `"ordered": true` is sorted by name once at load, so it looks the same as before. Every store `load()` returns, and every new one, has `ordered: true`, so the next save writes it and from then on the arrays are left alone.
 * `moveConn(data, id, to, before)` takes a connection out of the array and puts it back in front of connection `before` (or last), with `folder` set to `to` (`''` is the top level).
-* `moveFolder(data, from, to, before)` does the same for a folder. A folder's name is its last path segment, so moving `"Prod"` into `"Lab"` renames it `"Lab/Prod"`, and the same prefix swap is applied to every folder and connection under it (`inFolder` finds them). It throws if the target is the folder itself or inside it, or if the new path already exists.
+* `moveFolder(data, from, to, before)` does the same for a folder, in three steps: check, rename, reorder. A folder's name is its last path segment, so moving `"Prod"` into `"Lab"` makes it `"Lab/Prod"`. It throws if either folder does not exist, if the target is the folder itself or inside it, or if the new path already exists. Then `renameFolder` swaps the prefix on the folder, its subfolders, their connections and their icons (`inFolder` finds them), and finally the moved folders are cut out of the array and put back in front of `before`. It returns the new path, which the page needs (see [§10](#the-sidebar-tree)).
+
+```js
+// The only place a folder path is rewritten: the folder, its subfolders, their connections and their icons.
+function renameFolder(data, from, to) {
+  const re = (f) => (inFolder(f, from) ? to + f.slice(from.length) : f);
+  data.folders = data.folders.map(re);
+  for (const c of data.connections) if (c.folder) c.folder = re(c.folder);
+  data.folderIcons = Object.fromEntries(Object.entries(data.folderIcons).map(([k, v]) => [re(k), v]));
+}
+```
+
+`re` maps one path: if it is `from` or under it, the `from` part is replaced with `to` (`"Prod/Windows"` → `"Lab/Prod/Windows"`), otherwise it is returned unchanged. `Object.entries` turns `folderIcons` into `[path, fruit]` pairs, each path goes through `re`, and `Object.fromEntries` builds the object back up.
 
 ### Saving safely
 
@@ -282,8 +305,10 @@ function save(file, data, { backup = false } = {}) {
 
 ### Searching
 
+The search rule lives in `shared.mjs`, because quick search in the page uses it too; `store.js` passes it on in its exports, which is where the tests reach it.
+
 ```js
-function matches(conn, q) {
+export function matches(conn, q) {
   q = q.trim().toLowerCase();
   if (!q) return true;
   const hay = [conn.name, conn.host, conn.username, conn.domain, conn.folder, conn.protocol, ...(conn.tags || [])]
@@ -311,8 +336,6 @@ function select(data, filter) {
   });
 }
 
-const inFolder = (folder, f) => folder === f || (folder || '').startsWith(f + '/');
-
 function bulkUpdate(data, filter, patch) {
   const hits = select(data, filter);
   for (const c of hits) {
@@ -322,8 +345,17 @@ function bulkUpdate(data, filter, patch) {
 }
 ```
 
+`inFolder` comes from `shared.mjs`, next to `parentOf`, which the page uses to find a folder's siblings:
+
+```js
+export const inFolder = (folder, f) => folder === f || (folder || '').startsWith(f + '/');
+// 'a/b/c' -> 'a/b'; a top-level folder -> ''.
+export const parentOf = (f) => f.slice(0, Math.max(0, f.lastIndexOf('/')));
+```
+
 * `select` returns the connections a bulk edit will touch. The dialog calls it once to **preview** the list and again to **apply**, with `ids` set to the checkboxes you left ticked.
 * `inFolder` treats `"Prod/Windows"` as inside `"Prod"`, by checking for `"Prod/"` with the slash. Without the slash, a folder called `"Production"` would wrongly match `"Prod"`. There is a test for exactly this.
+* `parentOf` cuts at the last `/`. For a top-level folder `lastIndexOf` gives `-1`, and `Math.max(0, …)` turns that into `slice(0, 0)`, the empty string that means "top level".
 * `!= null` (two equals signs) is true for anything except `null` and `undefined`. It allows an empty string `''` as a real value to search for.
 * `bulkUpdate` only copies the three credential fields, and only those the caller actually set (`!== undefined`), so leaving "New username" empty keeps every username as it was.
 * `for (const c of hits)` loops over the array's values. Because objects are shared by reference, changing `c` changes the object inside `data`.
@@ -341,11 +373,12 @@ function upsert(data, input) {
   const i = data.connections.findIndex((c) => c.id === conn.id);
   if (i >= 0) data.connections[i] = { ...data.connections[i], ...conn };
   else data.connections.push(conn);
-  ...
+  fillFolders(data);
+  return conn;
 }
 ```
 
-`{ ...old, ...conn }` builds a new object with all of `old`'s properties, then `conn`'s on top. That is how a partial update such as `{ id, folder }` (used when you drag a connection onto another folder) changes only the folder.
+`{ ...old, ...conn }` builds a new object with all of `old`'s properties, then `conn`'s on top. That is how a partial update such as `{ id, folder }` changes only the folder. `fillFolders` then makes sure a folder typed into the edit dialog for the first time (and its parents) is listed in `folders`.
 
 The first lines handle **Duplicate**. The page never sees passwords, so it cannot copy one into the duplicate. It sends `copyPasswordFrom: <id of the original>` instead, and `upsert` copies the original's stored value, which is still encrypted. The same keyring key encrypted it, so the copy decrypts just like the original. The rest pattern `{ copyPasswordFrom, ...conn }` keeps the helper field out of the saved file. `src?.password` is **optional chaining**: if no connection has that id, `src` is `undefined` and the expression gives `undefined` instead of throwing. A password typed in the dialog (or `''` from "Remove the saved password") always wins, because the copy only happens while `conn.password` is still `undefined`, and only for a new connection (no `id` yet), so an existing connection can never have its password swapped this way.
 
@@ -412,17 +445,44 @@ const publicView = () => ({
 
 ### IPC handlers for the store
 
+Every handler that changes the store does the same three things: apply the change, write the file, and answer with the new safe view. One small helper registers them all, so none can forget a step:
+
 ```js
-ipcMain.handle('store:save', (_e, conn) => {
-  const { password, ...rest } = conn;
-  if (password !== undefined) rest.password = enc(password); // undefined = keep existing
-  store.upsert(data, rest);
-  persist(false);
-  return publicView();
+const persist = (backup) => store.save(FILE, data, { backup });
+```
+
+```js
+// Every change to the store: apply it, write the file, answer with the new view (plus the change's own result).
+// backup: true keeps the old file as .bak, a function returns the path to copy it to.
+const change = (channel, fn, backup = false) => ipcMain.handle(channel, (_e, ...args) => {
+  const result = fn(...args);
+  persist(typeof backup === 'function' ? backup() : backup);
+  return { ...publicView(), result };
 });
 ```
 
-When you edit a connection and leave the password field empty, the page does not send `password` at all, so `upsert`'s merge keeps the old encrypted one. The first parameter `_e` is the IPC event; the leading underscore is a common hint that "this argument is unused".
+* `(_e, ...args)`: the first parameter is the IPC event; the leading underscore is a common hint that "this argument is unused". `...args` collects whatever the page sent, and `fn(...args)` passes it on.
+* If `fn` throws (a refused move, an unknown folder), the file is not written and the page's Promise rejects with the message.
+* `result` is whatever the change returned: a moved folder's new path, or how many connections a bulk edit changed. The page reads it as `v.result`; most changes return nothing.
+* `backup` is passed as a function for bulk edits so the timestamp is taken at the moment of the change, not when the app started.
+
+The handlers themselves are then one line each:
+
+```js
+change('store:save', ({ password, ...conn }) => {
+  if (password !== undefined) conn.password = enc(password); // undefined = keep existing
+  store.upsert(data, conn); // its return value holds the encrypted password, so it is not passed on
+});
+change('store:delete', (id) => store.remove(data, id), true);
+change('store:addFolder', (f) => store.addFolder(data, f));
+change('store:removeFolder', (f) => store.removeFolder(data, f));
+change('store:folderIcon', (f, name) => store.setFolderIcon(data, f, name));
+// kind: 'conn' (id) or 'folder' (path); `to` is the target folder ('' = top level), `before` the sibling to land in front of.
+// A moved folder's result is its new path.
+change('store:move', (kind, id, to, before) => (kind === 'conn' ? store.moveConn : store.moveFolder)(data, id, to, before));
+```
+
+When you edit a connection and leave the password field empty, the page does not send `password` at all, so `upsert`'s merge keeps the old encrypted one. `store:save`'s function has a body in braces and no `return`, so its `result` is `undefined`: `upsert` returns the saved connection, encrypted password included, and that must not travel back to the page. `(kind === 'conn' ? store.moveConn : store.moveFolder)(…)` picks one of two functions with the ternary operator and calls it straight away.
 
 Removing a saved password needs a third state besides "new password" and "keep it". The edit dialog shows a **Remove the saved password** checkbox when the connection has one, and the page then sends an empty string:
 
@@ -434,16 +494,15 @@ Removing a saved password needs a third state besides "new password" and "keep i
 `''` is not `undefined`, so main does write it, and `enc('')` returns `''` without touching the keyring. JavaScript treats `''` as **falsy**, so `hasPassword: !!password` becomes `false` and the SSH and RDP code see "no password". This matters when a server moves from password login to a key or ssh-agent: an old password would otherwise still be offered.
 
 ```js
-ipcMain.handle('store:bulkApply', (_e, filter, patch) => {
+// result: how many connections changed.
+change('store:bulkApply', (filter, patch) => {
   const p = {};
   if (patch.username) p.username = patch.username;
   if (patch.domain !== undefined && patch.domain !== null) p.domain = patch.domain;
   if (patch.clearPassword) p.password = '';
   else if (patch.password) p.password = enc(patch.password);
-  const n = store.bulkUpdate(data, filter, p);
-  persist(bulkBackup());
-  return { count: n, view: publicView() };
-});
+  return store.bulkUpdate(data, filter, p);
+}, bulkBackup);
 ```
 
 ```js
@@ -668,6 +727,8 @@ app.whenReady().then(() => {
     width: 1280, height: 820,
     webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, sandbox: true },
   });
+  // The window can leave full screen without the app asking (a window manager shortcut): tell the page.
+  win.on('leave-full-screen', () => { if (wantFull && !win.isMinimized()) send('win:left-fullscreen'); });
   win.webContents.on('did-start-loading', () => { for (const s of sessions.values()) s.close(); });
   win.loadFile(path.join(__dirname, 'renderer/index.html'));
   win.webContents.on('will-navigate', (e) => e.preventDefault());
@@ -678,6 +739,7 @@ app.whenReady().then(() => {
 * `app.whenReady()` returns a Promise; `.then(fn)` runs `fn` once Electron has finished starting.
 * `__dirname` is the folder of the current file. Inside the AppImage that is a path inside `app.asar`, which Electron's `fs` can read like a normal folder.
 * `contextIsolation` and `sandbox` keep the page locked down (see [§12](#12-security-choices)).
+* `leave-full-screen` fires whenever the window stops being full screen, whatever the reason. `wantFull` is what the page last asked for (set in the `win:fullscreen` handler), so main only tells the page when the page did not ask to leave, and never for a minimize. Telling the page lets it drop its own full-screen state too (see [Full screen current](#tabs-and-panes-the-data-model)), so the pinned pane never stays stuck over a normal-sized window.
 * If the page reloads, its terminals are gone, so `did-start-loading` closes their shells in main too, rather than leaving orphan processes.
 * `will-navigate` and `setWindowOpenHandler` stop the window from ever leaving the app's own page or opening pop-ups.
 
@@ -721,10 +783,12 @@ The full list of channels:
 | `store:get` | invoke | the connection list without passwords |
 | `store:save` | invoke | create or update one connection (encrypts a new password) |
 | `store:delete` | invoke | delete a connection (writes `.bak` first) |
-| `store:folder` | invoke | add an empty folder, remove one that is empty, or set a folder's fruit icon (`{ icon: { folder, name } }`) |
-| `store:move` | invoke | move a connection or folder into a folder, in front of a sibling (saves the order) |
+| `store:addFolder` | invoke | add a folder (and its parents), empty for now |
+| `store:removeFolder` | invoke | remove a folder and its subfolders; refused if any connection is inside |
+| `store:folderIcon` | invoke | set a folder's fruit icon, `(folder, name)`; refused for an unknown fruit or folder |
+| `store:move` | invoke | `(kind, id, to, before)`: move a connection (`'conn'`, its id) or folder (`'folder'`, its path) into folder `to`, in front of sibling `before` (saves the order); `result` is a moved folder's new path |
 | `store:bulkPreview` | invoke | which connections a bulk edit would touch |
-| `store:bulkApply` | invoke | apply a bulk edit (writes a timestamped backup first) |
+| `store:bulkApply` | invoke | apply a bulk edit (writes a timestamped backup first); `result` is how many changed |
 | `store:forgetHost` | invoke | forget a connection's saved SSH host key or RDP certificate |
 | `session:open` | invoke | start a terminal (returns a session id) or a remote desktop (returns a websocket URL) |
 | `session:write` | send | keystrokes into a terminal |
@@ -735,7 +799,10 @@ The full list of channels:
 | `clipboard:read` | invoke | the system clipboard's text |
 | `win:fullscreen` | send | `setFullScreen(on)` on the window |
 | `win:minimize` | send | minimize the window |
+| `win:left-fullscreen` | main → page | the window left full screen without the page asking (not sent for a minimize) |
 | `clipboard:write` | send | put text on the system clipboard |
+
+Every `store:` channel that changes something answers the same way, with the new view plus a `result` (see `change` in [§6](#ipc-handlers-for-the-store)), so the page can pass the answer straight to `refresh`.
 
 Note `onData` strips the IPC event object (`_e`) before calling the page's function, so no Electron internals leak into the page either.
 
@@ -1118,8 +1185,10 @@ Each fruit is an `<img>` that runs one **keyframe animation** forever:
 ```js
 function rain(fall, n = 10) {
   for (let i = 0; i < n; i++) {
-    const img = el('img', { src: `svg/${FALL_FRUITS[Math.floor(Math.random() * FALL_FRUITS.length)]}.svg`, alt: '' });
+    const img = el('img', { src: `svg/${FRUITS[Math.floor(Math.random() * FRUITS.length)]}.svg`, alt: '' });
 ```
+
+`FRUITS` is the list from `shared.mjs`, the same one that decides which fruit a folder icon may be.
 
 ```js
       '--left': `${(i * (100 / n) + 2 + Math.random() * 6).toFixed(1)}%`, // spread evenly, then jitter
@@ -1148,6 +1217,8 @@ The `<details>`/`<summary>` sidebar is the "dropdown view": every folder is a na
 import { Terminal } from '../node_modules/@xterm/xterm/lib/xterm.mjs';
 import { FitAddon } from '../node_modules/@xterm/addon-fit/lib/addon-fit.mjs';
 import Guacamole from '../node_modules/guacamole-common-js/dist/esm/guacamole-common.js';
+import { shareClipboard, clean } from './clipboard.js';
+import { FRUITS, inFolder, parentOf, matches } from './shared.mjs';
 
 const $ = (s) => document.querySelector(s);
 const el = (tag, props = {}, ...kids) => {
@@ -1159,6 +1230,7 @@ const el = (tag, props = {}, ...kids) => {
 
 * `import { Terminal } from '…'` is ES-module syntax: take the export named `Terminal`. `import Guacamole from '…'` takes the module's **default** export.
 * There is no bundler (webpack, vite…). The page imports the libraries' ready-made ES-module files straight from `node_modules`, which keeps the build to zero steps.
+* `./shared.mjs` is the helper file `store.js` also loads (see [§2](#2-the-files-and-how-they-fit-together)), so the page and the store agree on folder paths, search and the fruit list by construction.
 * `$` is a short alias for `document.querySelector`.
 * `el('div', { className: 'pane' }, child1, child2)` creates an element, copies properties onto it, and appends children. `...kids` is a **rest parameter**: it collects all remaining arguments into an array.
 
@@ -1166,23 +1238,12 @@ const el = (tag, props = {}, ...kids) => {
 
 ### The sidebar tree
 
-```js
-function allFolders() {
-  const set = new Set();
-  for (const f of [...view.folders, ...view.connections.map((c) => c.folder).filter(Boolean)]) {
-    const parts = f.split('/');
-    parts.forEach((_, i) => set.add(parts.slice(0, i + 1).join('/')));
-  }
-  return [...set];
-}
-```
+The page works straight from `view.folders`. The store guarantees it lists every folder, parents and folders only a connection mentions included (`fillFolders`, see [§5](#the-data-on-disk)), so the page has nothing to work out. It is not sorted: the saved order is the order.
 
-For `"Prod/Windows/DCs"` this adds `"Prod"`, `"Prod/Windows"` and `"Prod/Windows/DCs"`. A `Set` ignores duplicates. `[...set]` turns it back into an array. It is not sorted: the saved order is the order.
-
-`renderTree` then builds nested `<details>` with a **recursive** function `build(parent)` that finds the folders exactly one level below `parent`, and for each one calls `build` again for its children:
+`renderTree` builds nested `<details>` with a **recursive** function `build(parent)` that finds the folders exactly one level below `parent`, and for each one calls `build` again for its children:
 
 ```js
-const kidsOf = (parent) => allFolders().filter((f) => f.split('/').length === (parent ? parent.split('/').length + 1 : 1) && (!parent || f.startsWith(parent + '/')));
+const kidsOf = (parent) => view.folders.filter((f) => parentOf(f) === parent);
 const build = (parent) => {
   const nodes = kidsOf(parent).map((f) => {
     const sum = el('summary', {}, el('img', { className: 'folder-icon', src: `svg/${view.folderIcons[f] || 'crate'}.svg`, alt: '' }), el('span', { textContent: f.split('/').pop() }), el('span', { className: 'count', textContent: total }));
@@ -1193,6 +1254,8 @@ const build = (parent) => {
   return nodes;
 };
 ```
+
+`kidsOf('')` is the top-level folders, because `parentOf` of a top-level folder is `''`. The same `view.folders` fills the folder suggestions in the edit dialog and the bulk edit dialog.
 
 The collapse toggle for the whole sidebar is a class on `<body>`:
 
@@ -1212,13 +1275,53 @@ Which folders are open is remembered in `localStorage` (a small per-app key/valu
 
 Each connection row supports: click to select, double-click or Enter to connect, **Shift**+double-click to connect into a split, right-click for a menu, and drag to move it (HTML5 drag-and-drop with a custom data type `bp/conn`).
 
-Dragging works on folders too (`bp/folder`). `dropTarget` decides what a drop means:
+Dragging works on folders too (`bp/folder`). Every place something can be dropped (the tree itself, folder rows, connection rows, and the tab bar for pane headers) goes through one helper:
+
+```js
+// Drag and drop, once. `types` are the drag kinds this node accepts; `where(e, kind)` says what a drop
+// here would do: nothing (falsy: not handled here, the event bubbles on), or { cls, drop(id) }.
+function dropZone(node, types, where) {
+  const hit = (e) => { const k = types.find((t) => e.dataTransfer.types.includes(t)); const w = k && where(e, k); return w && { k, ...w }; };
+  const clear = () => node.classList.remove('drop', 'drop-before');
+  node.ondragover = (e) => {
+    const h = hit(e);
+    if (!h) return;
+    e.preventDefault(); e.stopPropagation();
+    clear();
+    if (h.cls) node.classList.add(h.cls);
+  };
+  node.ondragleave = clear;
+  node.ondrop = (e) => {
+    clear();
+    const h = hit(e);
+    if (!h) return;
+    e.stopPropagation(); // an outer zone (the tree: "top level") must not also act
+    h.drop(e.dataTransfer.getData(h.k));
+  };
+}
+```
+
+* `hit(e)` asks the same question on hover and on drop: is something I accept being dragged (`e.dataTransfer.types`), and if so, what would dropping it here do? Asking once in one place means the highlight you see while dragging always matches what the drop does.
+* In `dragover`, `e.preventDefault()` is what tells the browser "a drop is allowed here"; without it the drop event never fires. `cls` is the highlight: `drop` (dashed outline, "into") or `drop-before` (a line above, "in front of").
+* `e.stopPropagation()` keeps an outer zone from acting too. The tree contains every row, so without it a drop onto a folder would also count as a drop on the tree, meaning "top level".
+
+Each caller only says what a drop means:
 
 * a connection onto a connection row: in front of that row (a line shows above it);
 * a connection or folder onto a folder row: into that folder, at the end (dashed outline). For a folder being dragged, the top quarter of the row means "in front of this folder" instead (the line);
-* onto the empty part of the list: the top level.
+* onto the empty part of the list: the top level. Its `where` is falsy unless `e.target === e.currentTarget`, i.e. the pointer is on the tree itself and not on a row inside it.
 
-Each drop calls `window.bp.move`, which reaches `moveConn` or `moveFolder` in the store. A refused move (a folder into itself, a duplicate path) throws, and the error shows as a toast. After a folder move the renderer renames the matching entries in `openFolders`, so open folders stay open. The right-click menus have **Move up** and **Move down**, which send the same call, so the feature works without a mouse.
+```js
+dropZone($('#tree'), ['bp/conn', 'bp/folder'], (e, k) => e.target === e.currentTarget && { drop: (id) => moveTo(k, id, '') });
+```
+
+Each drop calls `moveTo`, which calls `window.bp.move(kind, id, to, before)` and so reaches `moveConn` or `moveFolder` in the store. A refused move (a folder into itself, a duplicate path) throws, and the error shows as a toast. A folder's open/closed state is remembered by path, so after a folder move the renderer renames the matching entries in `openFolders`, using the new path main returns as `result` rather than working it out again:
+
+```js
+    for (const f of [...openFolders]) if (inFolder(f, id)) { openFolders.delete(f); openFolders.add(v.result + f.slice(id.length)); }
+```
+
+The right-click menus have **Move up** and **Move down**, so the feature works without a mouse. `moveRows(kind, id, to, sibs)` builds those two menu rows for a connection or a folder from its siblings in order: up lands it in front of the one above, down in front of the one *two* below (the one just below is the one it passes; past the end means "last"). They call the same `moveTo`.
 
 ### Quick search (Ctrl+K)
 
@@ -1230,7 +1333,7 @@ sIn.onkeydown = (e) => {
 };
 ```
 
-`runSearch` uses the same "every word must appear somewhere" rule as `store.matches`. `Math.min`/`Math.max` keep the highlighted index inside the list. `e.preventDefault()` stops the arrow key from also moving the text cursor. The highlighted row has `aria-selected="true"`, which both styles it (banana yellow) and tells screen readers which option is current.
+`runSearch` is one line, `view.connections.filter((c) => matches(c, sIn.value))`: it calls the very `matches` from `shared.mjs` that `store.js` exports and `store.test.js` exercises (see [§5](#searching)), so quick search and the store cannot disagree about what "every word must appear somewhere" means. `Math.min`/`Math.max` keep the highlighted index inside the list. `e.preventDefault()` stops the arrow key from also moving the text cursor. The highlighted row has `aria-selected="true"`, which both styles it (banana yellow) and tells screen readers which option is current.
 
 ### Tabs and panes: the data model
 
@@ -1271,13 +1374,34 @@ How the user's actions map onto it:
 | ◫ ⬒ ⊞ buttons | set `current.layout` to `h`, `v` or `grid`, then `render()` |
 | **Split all** | `movePane` every open pane into the current tab (up to 4) |
 | **Tab all** | `movePane(p, null)` for every pane but the first: each gets a new tab |
-| **Full screen current** (Ctrl+Alt+F) | `enterFull()`: adds `.full` to the active pane (`position: fixed; inset: 0`, header hidden) and calls `window.bp.fullScreen(true)`; the pane stays in the DOM. A faint banana at top centre reveals **Minimize** (`window.bp.minimize()`) and **Back to tab** (`leaveFull()`). It also leaves when the pane closes or its session ends |
+| **Full screen current** (Ctrl+Alt+F) | `setFull(current.active)`: adds `.full` to the active pane (`position: fixed; inset: 0`, header hidden) and calls `window.bp.fullScreen(true)`; the pane stays in the DOM. A faint banana at top centre reveals **Minimize** (`window.bp.minimize()`) and **Back to tab** (`setFull(null)`). It also leaves when the pane closes or its session ends, and when the window leaves full screen by itself (see below) |
 | ⇱ on a pane / drag a pane header onto the tab bar | `movePane(p, null)` → its own tab |
 | Drag a pane header onto another tab | `movePane(p, thatTab)` → joins that tab's split |
 | Folder menu → Open all in split | opens up to 4 connections of that folder in one tab |
 | Ctrl+Alt+Arrow | move focus between panes in the tab |
 | Ctrl+Tab / Ctrl+Shift+Tab | next / previous tab |
 | Ctrl+Shift+C / Ctrl+Shift+V in a terminal | copy selection / paste |
+
+Full screen has three parts that must always agree: the pane's `.full` class, the banana, and the real window. One function changes all three, so they cannot get out of step:
+
+```js
+function setFull(p) { // p = the pane to full-screen, or null to leave; pane class, banana and real window change together
+  if (p === fsPane) return;
+  const was = fsPane;
+  fsPane = p;
+  was?.root.classList.remove('full');
+  p?.root.classList.add('full');
+  $('#fs-banana').hidden = !p;
+  window.bp.fullScreen(!!p);
+  focusPane(p || was); // focusPane ignores a pane that is no longer in a tab
+}
+const unfull = (p) => { if (p === fsPane) setFull(null); }; // a pane that closes or ends leaves full screen
+window.bp.onLeftFullScreen(() => setFull(null)); // e.g. a window manager shortcut took the window out of full screen
+```
+
+* `was?.root…` and `p?.root…` use optional chaining, so the same lines work for entering (`was` is `null`), leaving (`p` is `null`) and switching panes.
+* `unfull(p)` is for "this pane went away": closing it, its shell ending, or a remote desktop failing all call it, and it only acts if that pane is the full-screen one.
+* `onLeftFullScreen` is the page's end of `win:left-fullscreen` (see [§6](#creating-the-window)). If your window manager takes the window out of full screen, the page drops its pinned pane too instead of leaving it covering a normal window.
 
 ### The draggable gutter
 
@@ -1323,12 +1447,12 @@ async function connect(connId, split = false) {
     if (c.protocol === 'rdp' || c.protocol === 'vnc') await openRemote(p, c);
     else await openTerm(p, c);
   } catch (e) {
-    status(p, String(e.message || e).replace(/^Error invoking remote method '[^']+': (Error: )?/, ''), true);
+    status(p, errText(e), true);
   }
 }
 ```
 
-The pane is shown **first** and filled afterwards, so you see "Connecting to …" with a bobbing banana immediately. Errors from main arrive wrapped as "Error invoking remote method 'session:open': Error: …"; the regex strips that prefix so you see only the useful part.
+The pane is shown **first** and filled afterwards, so you see "Connecting to …" with a bobbing banana immediately. Errors from main arrive wrapped as "Error invoking remote method 'session:open': Error: …"; `errText` strips that prefix so you see only the useful part (see [Errors you can see](#errors-you-can-see)).
 
 ### Terminal panes (xterm.js)
 
@@ -1403,22 +1527,25 @@ async function openRemote(p, c) {
 * Signing out of Windows (or choosing Disconnect in its Start menu) closes the pane by itself. guacd ends every session with an *error* message, even a normal one, and attaches a status code. Code `0` means SUCCESS: guacd uses it when you logged off or disconnected yourself ("Manually logged off."). Anything else (server unreachable, idle timeout, another login took the session, the network dropped) keeps the pane open with the message, so you can see what happened.
 
 ```js
+const fail = (msg) => { p.failed = true; unfull(p); status(p, msg, true); }; // the one way a remote session ends in error
 client.onerror = (e) => {
   if (e.code === 0) return void (p.closed || closePane(p));
-  p.failed = true; if (p === fsPane) leaveFull();
-  status(p, `${c.host}: ${e.message || 'connection error'}`, true);
+  fail(`${c.host}: ${e.message || 'connection error'}`);
 };
 ```
 
-`p.closed || closePane(p)` runs `closePane` only when the pane is not closed already (`||` stops at the first true value). `return void …` returns nothing, so the rest of the function is skipped.
+`fail` is shared with the state handler, which calls `fail('Disconnected')` when the connection drops without an error: either way the pane is marked failed, leaves full screen (`unfull`) and shows the message. `p.closed || closePane(p)` runs `closePane` only when the pane is not closed already (`||` stops at the first true value). `return void …` returns nothing, so the rest of the function is skipped.
 
 ### Errors you can see
 
 ```js
-addEventListener('unhandledrejection', (e) => toast(String(e.reason?.message || e.reason).replace(/^Error invoking remote method '[^']+': (Error: )?/, '')));
+const errText = (e) => String(e?.message || e).replace(/^Error invoking remote method '[^']+': (Error: )?/, '');
+addEventListener('unhandledrejection', (e) => toast(errText(e.reason)));
 ```
 
-Every call to `window.bp` returns a Promise. If main throws (keyring locked, disk full), the Promise **rejects**; if nothing catches that, the browser fires `unhandledrejection`. One listener turns all of those into a toast message at the bottom of the window instead of failing silently.
+Every call to `window.bp` returns a Promise. If main throws (keyring locked, disk full, a folder that is not empty), the Promise **rejects**; if nothing catches that, the browser fires `unhandledrejection`. One listener turns all of those into a toast message at the bottom of the window instead of failing silently. That is why **Delete folder** has no `try` of its own: main's "Only empty folders can be deleted" arrives here as a toast.
+
+`errText` turns an error into the message you should see. Electron wraps every error from an `invoke` handler as "Error invoking remote method 'store:move': Error: …"; the regex removes that prefix. `[^']+` matches the channel name (anything up to the next quote) and `(Error: )?` the optional second prefix. `connect` uses the same function for the pane's status line.
 
 ### Clipboard: `clipboard.js` and terminal shortcuts
 
@@ -1529,9 +1656,13 @@ $('#bulk-apply').onclick = async (e) => {
   const what = patch.clearPassword ? 'Remove the saved password of' : 'Update';
   if (!confirm(`${what} ${ids.length} connection${ids.length > 1 ? 's' : ''}? A backup of the old file is kept.`)) return;
   const res = await window.bp.bulkApply({ ...bulkFilter, ids }, patch);
-  …
+  $('#bulk-dlg').close();
+  refresh(res);
+  toast(`Updated ${res.result} connection${res.result === 1 ? '' : 's'} 🍌`);
 };
 ```
+
+Like every store change, `bulkApply` answers with the new view plus `result`, here the number of connections changed, so the same object goes to `refresh` and its count to the toast.
 
 The filter **and** the ticked `ids` both go to main, and `store.select` requires both to match. Unticking a row really does protect that connection, and a connection added between preview and apply cannot sneak in.
 
@@ -1658,7 +1789,7 @@ If the app crashes, `ws.onclose` rejects every request still waiting, so the tes
 
 `scripts/check-walkthrough.js` fails if this walkthrough has fallen behind the code. It checks three things:
 
-1. Every `.js`, `.html` and `.css` file (and `package.json`) is named somewhere in this document, so a new file cannot be added without being explained.
+1. Every `.js`, `.mjs`, `.html` and `.css` file (and `package.json`) is named somewhere in this document, so a new file cannot be added without being explained.
 2. Every IPC channel used in `preload.js` appears in it, so the channel table in [§7](#7-preloadjs-the-bridge) stays complete.
 3. Every line of every ` ```js `, ` ```css `, ` ```html ` and ` ```json ` block in this document still exists in the source (ignoring indentation). Change a line of code that is quoted here and the check fails until the quote is updated. Lines containing `…` are treated as "code left out". Blocks written to illustrate an idea rather than quote the code are marked with an extra word after the language (` ```js example `) and skipped.
 
