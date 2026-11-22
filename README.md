@@ -1,5 +1,7 @@
 # banana-phone 🍌📞
 
+![A pixel-art banana sitting at a desk, typing at a terminal](renderer/banana-typing.gif)
+
 A small, fruity connection manager for Linux: SSH and local terminals, plus RDP (including Active Directory logins) and VNC desktops, in tabs or split views of up to four sessions. Connections live in a collapsible folder tree, are searchable with Ctrl+K, and their credentials can be bulk-edited by username or by folder.
 
 ![banana-phone with four sessions in a 2×2 grid: two SSH servers and two local terminals, next to the folder tree](docs/screenshots/main.webp)
@@ -14,6 +16,7 @@ A small, fruity connection manager for Linux: SSH and local terminals, plus RDP 
 - **Identity checks.** SSH host keys and RDP certificates are remembered on first connect. If one changes, you're shown both fingerprints and asked whether to trust it, with Cancel as the default.
 - **Clipboard sharing** with RDP and VNC desktops.
 - **Saved passwords encrypted** with your system keyring, and never shown to the window.
+- **Juice cup status.** The cup in the top bar is empty <img src="renderer/juice-empty.png" alt="an empty glass" width="24"> when nothing is open, and full and glowing <img src="renderer/juice-full.png" alt="a full glass of orange juice" width="24"> as soon as a connection tab is open.
 - **Light and dark themes.**
 
 | Quick search (Ctrl+K) | Bulk edit by username or folder |
