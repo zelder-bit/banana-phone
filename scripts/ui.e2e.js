@@ -252,6 +252,7 @@ test('tabs, splits, gutter and dialogs', { timeout: 120000 }, async (t) => {
 
     await app.eval(menu('Lab', 'Change icon…'));
     await app.waitFor('document.querySelector("#icon-dlg").open');
+    assert.ok(await app.eval('document.querySelector(\'#icon-grid .pic[title="crate"]\').ariaPressed === "true"')); // no icon yet = the crate
     await app.click('#icon-grid .pic[title="kiwi"]');
     await app.waitFor(`${row('Lab')}.querySelector('img').src.endsWith('svg/kiwi.svg')`);
 
