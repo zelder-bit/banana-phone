@@ -97,11 +97,17 @@ input:focus, select:focus { outline: none; border-color: var(--orange); }
 .tree summary:hover, .conn:hover { background: var(--surface-2); }
 .tree summary .count { margin-left: auto; color: var(--muted); font-weight: 500; font-size: .8rem; }
 .conn { display: flex; align-items: center; gap: 8px; padding: 4px 8px 4px 24px; border-radius: 10px; cursor: pointer; user-select: none; }
+.tree summary .folder-icon { width: 20px; height: 20px; flex: none; }
+.icon-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(52px, 1fr)); gap: 6px; }
+.pic { border: 2px solid transparent; background: var(--surface-2); border-radius: 12px; padding: 6px; cursor: pointer; }
+.pic img { width: 100%; }
+.pic[aria-pressed="true"] { border-color: var(--leaf); }
 .conn img { width: 20px; height: 20px; flex: none; }
 .conn .host { color: var(--muted); font-size: .8rem; margin-left: auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 45%; }
 .conn .label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .conn.sel { background: color-mix(in srgb, var(--orange) 14%, transparent); }
 .tree summary.drop, .conn.drop { outline: 2px dashed var(--leaf); }
+.tree summary.drop-before, .conn.drop-before { box-shadow: 0 -2px 0 var(--leaf); }
 
 .work { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 .tabbar { display: flex; align-items: center; gap: 8px; padding: 6px 10px 0; border-bottom: 2px solid var(--line); flex: none; min-height: 44px; }
@@ -139,6 +145,14 @@ input:focus, select:focus { outline: none; border-color: var(--orange); }
 .pane-head img { width: 16px; height: 16px; }
 .pane-head .t { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .split.single .pane-head { display: none; }
+.pane.full { position: fixed; inset: 0; z-index: 50; border: 0; border-radius: 0; }
+.pane.full .pane-head { display: none; }
+.fs-banana { position: fixed; top: 0; left: 50%; transform: translateX(-50%); z-index: 60; opacity: .25; display: flex; flex-direction: column; align-items: center; }
+.fs-banana[hidden] { display: none; }
+.fs-banana img { width: 28px; height: 28px; }
+.fs-banana:hover, .fs-banana:focus-within { opacity: 1; }
+.fs-actions { display: none; gap: 6px; padding: 6px; background: var(--surface-2); border-radius: 0 0 12px 12px; }
+.fs-banana:hover .fs-actions, .fs-banana:focus-within .fs-actions { display: flex; }
 .pane-body { flex: 1; min-height: 0; position: relative; overflow: hidden; }
 .pane-body:focus { outline: none; }
 .term { position: absolute; inset: 6px 4px 4px 8px; }

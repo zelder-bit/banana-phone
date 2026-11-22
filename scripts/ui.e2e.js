@@ -158,6 +158,19 @@ test('tabs, splits, gutter and dialogs', { timeout: 120000 }, async (t) => {
     await app.waitFor(`${count('.tab')} === 1 && ${visiblePanes} === 4`);
   });
 
+  await t.test('Full screen current fills the window, Back to tab restores the split', async () => {
+    const rect = 'JSON.stringify(document.querySelector(".pane.full")?.getBoundingClientRect().toJSON())';
+    await app.click('.split:not([hidden]) > .pane ~ .pane');
+    await app.click('#fullscreen');
+    await app.waitFor('!!document.querySelector(".pane.full") && !document.querySelector("#fs-banana").hidden');
+    await app.waitFor(`(() => { const r = JSON.parse(${rect}); return r.width === innerWidth && r.height === innerHeight; })()`);
+    assert.strictEqual(await app.eval(count('.pane.full')), 1);
+    await app.mouse('mouseMoved', await app.center('#fs-banana img')); // hovering the banana reveals the buttons
+    await app.click('#fs-back');
+    await app.waitFor(`!document.querySelector(".pane.full") && ${visiblePanes} === 4 && document.querySelector("#fs-banana").hidden`);
+    assert.strictEqual(await app.eval(count('.xterm')), 4);
+  });
+
   await t.test('the pane button pops a session into its own tab', async () => {
     await app.click('.split:not([hidden]) > .pane ~ .pane button[title="Own tab"]');
     await app.waitFor(`${count('.tab')} === 2 && ${visiblePanes} === 1`);
@@ -210,5 +223,51 @@ test('tabs, splits, gutter and dialogs', { timeout: 120000 }, async (t) => {
     await app.key('Enter', 'Enter', 13);
     await app.waitFor(`(async () => (await ${folders}) === "Lab")()`);
     assert.ok(await app.eval('document.querySelector("#tree").textContent.includes("Lab")'));
+  });
+
+  await t.test('dragging a connection onto a folder moves it and the order is saved', async () => {
+    const where = '(async () => (await window.bp.get()).connections.map((c) => c.name + ":" + (c.folder || "")).join())()';
+    assert.strictEqual(await app.eval(where), 'kept:,quick:');
+    // Real mouse drags do not start HTML5 drag-and-drop through CDP, so dispatch the drag events.
+    await app.eval(`(() => {
+      const dt = new DataTransfer();
+      const fire = (n, type) => n.dispatchEvent(new DragEvent(type, { bubbles: true, cancelable: true, dataTransfer: dt }));
+      const row = [...document.querySelectorAll('.conn')].find((n) => n.textContent.startsWith('quick'));
+      const lab = [...document.querySelectorAll('#tree summary')].find((n) => n.textContent.startsWith('Lab'));
+      fire(row, 'dragstart'); fire(lab, 'dragover'); fire(lab, 'drop');
+    })()`);
+    await app.waitFor(`(async () => (await ${where}) === "kept:,quick:Lab")()`);
+  });
+
+  await t.test('folders: set an icon, drag a folder into another with its contents, only empty folders delete', async () => {
+    const state = '(async () => { const v = await window.bp.get(); return JSON.stringify([v.folders, v.folderIcons, v.connections.map((c) => c.folder || "")]); })()';
+    const row = (name) => `[...document.querySelectorAll('#tree summary')].find((n) => n.textContent.startsWith('${name}'))`;
+    const menu = (name, item) => `(() => { ${row(name)}.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+      [...document.querySelectorAll('#menu button')].find((b) => b.textContent === '${item}').click(); })()`;
+    await app.click('#new-folder');
+    await app.waitFor('document.querySelector("#prompt-dlg").open && document.activeElement.id === "prompt-in"');
+    await app.type('Box');
+    await app.key('Enter', 'Enter', 13);
+    await app.waitFor(`!!${row('Box')}`);
+
+    await app.eval(menu('Lab', 'Change icon…'));
+    await app.waitFor('document.querySelector("#icon-dlg").open');
+    await app.click('#icon-grid .pic[title="kiwi"]');
+    await app.waitFor(`${row('Lab')}.querySelector('img').src.endsWith('svg/kiwi.svg')`);
+
+    // Dropped on the middle of the Box row: into it (the top quarter would mean "in front of it").
+    await app.eval(`(() => {
+      const dt = new DataTransfer();
+      const box = ${row('Box')}, r = box.getBoundingClientRect();
+      const fire = (n, type) => n.dispatchEvent(new DragEvent(type, { bubbles: true, cancelable: true, dataTransfer: dt, clientX: r.x + r.width / 2, clientY: r.y + r.height / 2 }));
+      fire(${row('Lab')}, 'dragstart'); fire(box, 'dragover'); fire(box, 'drop');
+    })()`);
+    const moved = JSON.stringify([['Box', 'Box/Lab'], { 'Box/Lab': 'kiwi' }, ['', 'Box/Lab']]);
+    await app.waitFor(`(async () => (await ${state}) === ${JSON.stringify(moved)})()`);
+    await app.waitFor(`${row('Lab')}.querySelector('img').src.endsWith('svg/kiwi.svg')`); // the icon came along
+
+    await app.eval(menu('Box', 'Delete folder'));
+    await app.waitFor('!document.querySelector("#toast").hidden && document.querySelector("#toast").textContent === "Only empty folders can be deleted"');
+    assert.strictEqual(await app.eval(state), moved);
   });
 });
