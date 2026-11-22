@@ -102,6 +102,7 @@ input:focus, select:focus { outline: none; border-color: var(--orange); }
 .conn .label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .conn.sel { background: color-mix(in srgb, var(--orange) 14%, transparent); }
 .tree summary.drop, .conn.drop { outline: 2px dashed var(--leaf); }
+.tree summary.drop-before, .conn.drop-before { box-shadow: 0 -2px 0 var(--leaf); }
 
 .work { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 .tabbar { display: flex; align-items: center; gap: 8px; padding: 6px 10px 0; border-bottom: 2px solid var(--line); flex: none; min-height: 44px; }

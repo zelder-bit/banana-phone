@@ -60,6 +60,14 @@ ipcMain.handle('store:folder', (_e, { add, remove }) => {
   return publicView();
 });
 
+// { conn: id } or { folder: path }, plus `to` (target folder, '' = top level) and optional `before` (sibling to land in front of).
+ipcMain.handle('store:move', (_e, { conn, folder, to, before }) => {
+  if (conn) store.moveConn(data, conn, to, before);
+  else store.moveFolder(data, folder, to, before);
+  persist(false);
+  return publicView();
+});
+
 ipcMain.handle('store:bulkPreview', (_e, filter) => store.select(data, filter).map((c) => ({ id: c.id, name: c.name, host: c.host, folder: c.folder, username: c.username })));
 
 ipcMain.handle('store:bulkApply', (_e, filter, patch) => {

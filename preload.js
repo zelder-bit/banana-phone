@@ -6,6 +6,7 @@ contextBridge.exposeInMainWorld('bp', {
   remove: (id) => ipcRenderer.invoke('store:delete', id),
   forgetHost: (id) => ipcRenderer.invoke('store:forgetHost', id),
   folder: (op) => ipcRenderer.invoke('store:folder', op),
+  move: (op) => ipcRenderer.invoke('store:move', op),
   bulkPreview: (filter) => ipcRenderer.invoke('store:bulkPreview', filter),
   bulkApply: (filter, patch) => ipcRenderer.invoke('store:bulkApply', filter, patch),
   open: (connId, cols, rows) => ipcRenderer.invoke('session:open', connId, cols, rows),

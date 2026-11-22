@@ -75,3 +75,42 @@ test('save writes a backup and load round-trips', () => {
   assert.strictEqual(store.load(file).connections[0].name, 'changed');
   assert.deepStrictEqual(store.load(path.join(dir, 'missing.json')), { folders: [], connections: [] });
 });
+
+test('moveConn reorders within and across folders', () => {
+  const d = sample();
+  store.moveConn(d, 'a', 'Prod', 'b'); // dc01 into Prod, in front of web
+  assert.deepStrictEqual(d.connections.map((c) => c.id), ['a', 'b', 'c', 'd']);
+  assert.strictEqual(d.connections[0].folder, 'Prod');
+  store.moveConn(d, 'a', ''); // to the top level, last
+  assert.deepStrictEqual(d.connections.map((c) => c.id), ['b', 'c', 'd', 'a']);
+  assert.strictEqual(d.connections[3].folder, undefined);
+});
+
+test('moveFolder takes children along, reorders and un-nests', () => {
+  const d = sample();
+  assert.strictEqual(store.moveFolder(d, 'Prod', 'Lab'), 'Lab/Prod');
+  assert.deepStrictEqual(d.folders, ['Lab', 'Production', 'Lab/Prod', 'Lab/Prod/Windows']);
+  assert.strictEqual(d.connections.find((c) => c.id === 'a').folder, 'Lab/Prod/Windows');
+  assert.strictEqual(d.connections.find((c) => c.id === 'd').folder, 'Production'); // look-alike prefix stays put
+  store.moveFolder(d, 'Lab/Prod', '', 'Lab'); // back to the top, in front of Lab
+  assert.deepStrictEqual(d.folders, ['Prod', 'Prod/Windows', 'Lab', 'Production']);
+});
+
+test('moveFolder refuses itself, its children and duplicate paths', () => {
+  const d = sample();
+  assert.throws(() => store.moveFolder(d, 'Prod', 'Prod'), /inside itself/);
+  assert.throws(() => store.moveFolder(d, 'Prod', 'Prod/Windows'), /inside itself/);
+  d.folders.push('Lab/Windows');
+  assert.throws(() => store.moveFolder(d, 'Prod/Windows', 'Lab'), /already exists/);
+  assert.deepStrictEqual(d.connections.find((c) => c.id === 'a').folder, 'Prod/Windows');
+});
+
+test('an old file loads alphabetical and keeps a saved order afterwards', () => {
+  const f = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'bp-')), 'c.json');
+  fs.writeFileSync(f, JSON.stringify({ folders: ['b', 'a'], connections: [{ id: '1', name: 'z' }, { id: '2', name: 'y' }] }));
+  const d = store.load(f);
+  assert.deepStrictEqual([d.folders, d.connections.map((c) => c.id)], [['a', 'b'], ['2', '1']]);
+  store.moveConn(d, '2', '');
+  store.save(f, d);
+  assert.deepStrictEqual(store.load(f).connections.map((c) => c.id), ['1', '2']);
+});
