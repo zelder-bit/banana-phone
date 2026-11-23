@@ -1482,6 +1482,7 @@ function setFull(p) { // p = the pane to full-screen, or null to leave; pane cla
   was?.root.classList.remove('full');
   p?.root.classList.add('full');
   $('#fs-banana').hidden = !p;
+  $('#fs-cad').hidden = !canCtrlAltDel(p);
   window.bp.fullScreen(!!p);
   focusPane(p || was); // focusPane ignores a pane that is no longer in a tab
 }
@@ -1640,7 +1641,7 @@ async function openRemote(p, c) {
   }
   ```
 
-  The three numbers are the keysyms of left Control, left Alt and Delete. `sendKeyEvent(1, k)` presses a key and `sendKeyEvent(0, k)` lets it go, so the first loop holds all three down and the second releases them last-pressed-first (`toReversed()` gives a reversed copy and leaves the list alone), the way fingers do. Afterwards `focusPane(p)` gives the keyboard back to the remote screen, because clicking the menu or the button took it away. One rule, `canCtrlAltDel(p)`, decides whether the option is shown: the pane has a Guacamole client (`p.guac`, so never a terminal) and its session has not failed. The menu asks it when it opens and the banana asks it each time its buttons are revealed, so a pane that connects or fails while full screen gets the right answer. During the short "Connecting…" phase the option is already there, and Guacamole simply drops the keys until the session is up.
+  The three numbers are the keysyms of left Control, left Alt and Delete. `sendKeyEvent(1, k)` presses a key and `sendKeyEvent(0, k)` lets it go, so the first loop holds all three down and the second releases them last-pressed-first (`toReversed()` gives a reversed copy and leaves the list alone), the way fingers do. Afterwards `focusPane(p)` gives the keyboard back to the remote screen, because clicking the menu or the button took it away. One rule, `canCtrlAltDel(p)`, decides whether the option is shown: the pane has a Guacamole client (`p.guac`, so never a terminal) and its session has not failed. The menu asks it when it opens. The full-screen button is set by `setFull` whenever the full-screen pane changes, and once more by `openRemote` if a pane gets its client after it went full screen; a pane that fails leaves full screen, so those are the only moments the answer can change. During the short "Connecting…" phase the option is already there, and Guacamole simply drops the keys until the session is up.
 * Signing out of Windows (or choosing Disconnect in its Start menu) closes the pane by itself. guacd ends every session with an *error* message, even a normal one, and attaches a status code. Code `0` means SUCCESS: guacd uses it when you logged off or disconnected yourself ("Manually logged off."). Anything else (server unreachable, idle timeout, another login took the session, the network dropped) keeps the pane open with the message, so you can see what happened.
 
 ```js

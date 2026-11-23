@@ -655,6 +655,7 @@ function setFull(p) { // p = the pane to full-screen, or null to leave; pane cla
   was?.root.classList.remove('full');
   p?.root.classList.add('full');
   $('#fs-banana').hidden = !p;
+  $('#fs-cad').hidden = !canCtrlAltDel(p);
   window.bp.fullScreen(!!p);
   focusPane(p || was); // focusPane ignores a pane that is no longer in a tab
 }
@@ -664,9 +665,6 @@ $('#fullscreen').onclick = () => current?.active && setFull(current.active);
 $('#fs-back').onclick = () => setFull(null);
 $('#fs-min').onclick = () => window.bp.minimize();
 $('#fs-cad').onclick = () => sendCtrlAltDel(fsPane);
-// Decided each time the banana's buttons are revealed (hover or keyboard focus), as a menu is when it opens:
-// the pane may have connected or failed since it went full screen.
-$('#fs-banana').onpointerenter = $('#fs-banana').onfocusin = () => { $('#fs-cad').hidden = !canCtrlAltDel(fsPane); };
 
 function closePane(p) {
   p.closed = true;
@@ -804,6 +802,7 @@ async function openRemote(p, c) {
   p.body.append(wrap);
   p.body.tabIndex = 0;
   p.guac = client;
+  if (p === fsPane) $('#fs-cad').hidden = false; // it went full screen while still starting: it can take Ctrl+Alt+Del from now on
 
   // Scale the remote screen to fit the pane, and ask the server to match the pane size.
   const fitDisplay = () => {

@@ -165,8 +165,8 @@ test('tabs, splits, gutter and dialogs', { timeout: 120000 }, async (t) => {
     await app.waitFor('!!document.querySelector(".pane.full") && !document.querySelector("#fs-banana").hidden');
     await app.waitFor(`(() => { const r = JSON.parse(${rect}); return r.width === innerWidth && r.height === innerHeight; })()`);
     assert.strictEqual(await app.eval(count('.pane.full')), 1);
-    await app.mouse('mouseMoved', await app.center('#fs-banana img')); // hovering the banana reveals the buttons
     assert.ok(await app.eval('document.querySelector("#fs-cad").hidden'), 'no Ctrl+Alt+Del button for a terminal');
+    await app.mouse('mouseMoved', await app.center('#fs-banana img')); // hovering the banana reveals the buttons
     await app.click('#fs-back');
     await app.waitFor(`!document.querySelector(".pane.full") && ${visiblePanes} === 4 && document.querySelector("#fs-banana").hidden`);
     assert.strictEqual(await app.eval(count('.xterm')), 4);
