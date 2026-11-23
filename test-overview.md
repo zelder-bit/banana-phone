@@ -1,7 +1,7 @@
 # What banana-phone tests, and what it does not
 
 This page lists every automated test and check in the repository, in plain words, so you can see the gaps.
-Counts are from `npm test` on 2026-11-22 (26 passed) and from reading `scripts/ui.e2e.js`, as of the saved-commands change together with the resizable-sidebar change.
+Counts are from `npm test` on 2026-11-22 (26 passed) and from reading `scripts/ui.e2e.js`, as of the Send Ctrl+Alt+Del change.
 
 | Suite | File | Tests |
 |---|---|---|
@@ -184,7 +184,8 @@ It says nothing about whether the code works.
 - Leaving full screen when the session ends or the pane closes: not tested at all.
 - Leaving full screen when the window manager takes the window out of full screen: not tested at all.
 - Leaving full screen when you switch to another tab: not tested at all.
-- A remote-desktop pane in full screen: not tested at all.
+- A remote-desktop pane in full screen: not tested at all. This includes its Ctrl+Alt+Del button; the test only checks that a terminal does not get one.
+- Send Ctrl+Alt+Del in a remote desktop's pane menu, the keys it sends, and that Windows shows its security screen: not tested at all (the pane-menu step only checks that a terminal's menu does not offer it).
 - That the real window goes full screen (not just the pane covering the page): not tested at all.
 
 ### Look and window

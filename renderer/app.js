@@ -655,6 +655,7 @@ function setFull(p) { // p = the pane to full-screen, or null to leave; pane cla
   was?.root.classList.remove('full');
   p?.root.classList.add('full');
   $('#fs-banana').hidden = !p;
+  $('#fs-cad').hidden = !canCtrlAltDel(p);
   window.bp.fullScreen(!!p);
   focusPane(p || was); // focusPane ignores a pane that is no longer in a tab
 }
@@ -663,6 +664,7 @@ window.bp.onLeftFullScreen(() => setFull(null)); // e.g. a window manager shortc
 $('#fullscreen').onclick = () => current?.active && setFull(current.active);
 $('#fs-back').onclick = () => setFull(null);
 $('#fs-min').onclick = () => window.bp.minimize();
+$('#fs-cad').onclick = () => sendCtrlAltDel(fsPane);
 
 function closePane(p) {
   p.closed = true;
@@ -690,9 +692,10 @@ function makePane(title, protocol) {
     el('button', { className: 'icon-btn small', textContent: '×', title: 'Close', onclick: () => closePane(p) }));
   head.ondragstart = (e) => e.dataTransfer.setData('bp/pane', p.id);
   head.oncontextmenu = (e) => {
-    const cmds = p.term && !p.ended ? cmdsOf(p.connId) : [];
-    menu(e, [...cmds.map((x) => [`Run: ${x.name}`, () => { runCmd(p, x.cmd); focusPane(p); }]), ...(cmds.length ? ['-'] : []),
-      ['Own tab', () => movePane(p, null)], ['Close', () => closePane(p), 'danger']]);
+    // What this kind of session offers of its own, then what every pane has.
+    const own = canCtrlAltDel(p) ? [['Send Ctrl+Alt+Del', () => sendCtrlAltDel(p)]]
+      : p.term && !p.ended ? cmdsOf(p.connId).map((x) => [`Run: ${x.name}`, () => { runCmd(p, x.cmd); focusPane(p); }]) : [];
+    menu(e, [...own, ...(own.length ? ['-'] : []), ['Own tab', () => movePane(p, null)], ['Close', () => closePane(p), 'danger']]);
   };
   p.body = el('div', { className: 'pane-body', tabIndex: -1 });
   p.root = el('div', { className: 'pane' }, head, p.body);
@@ -799,6 +802,7 @@ async function openRemote(p, c) {
   p.body.append(wrap);
   p.body.tabIndex = 0;
   p.guac = client;
+  if (p === fsPane) $('#fs-cad').hidden = false; // it went full screen while still starting: it can take Ctrl+Alt+Del from now on
 
   // Scale the remote screen to fit the pane, and ask the server to match the pane size.
   const fitDisplay = () => {
@@ -838,6 +842,16 @@ async function openRemote(p, c) {
   client.connect(`${query}&width=${p.body.clientWidth || 1024}&height=${p.body.clientHeight || 768}&dpi=${dpi}`);
   p.dispose = () => { p.closed = true; ro.disconnect(); kb.reset(); client.disconnect(); };
   p.body.focus();
+}
+
+// Ctrl+Alt+Del for a remote desktop, as the X11 keysyms of Control_L, Alt_L and Delete: pressed in that order, released in reverse.
+// It has to be sent this way: this computer's own system takes the real key combination before the app sees it.
+const CTRL_ALT_DEL = [0xFFE3, 0xFFE9, 0xFFFF];
+function canCtrlAltDel(p) { return !!p?.guac && !p.failed; } // a remote desktop whose session has not failed
+function sendCtrlAltDel(p) {
+  for (const k of CTRL_ALT_DEL) p.guac.sendKeyEvent(1, k);
+  for (const k of CTRL_ALT_DEL.toReversed()) p.guac.sendKeyEvent(0, k);
+  focusPane(p); // the click took the keyboard away from the remote screen
 }
 
 // ---------------------------------------------------------------- shortcuts
