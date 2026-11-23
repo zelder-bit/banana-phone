@@ -166,6 +166,7 @@ test('tabs, splits, gutter and dialogs', { timeout: 120000 }, async (t) => {
     await app.waitFor(`(() => { const r = JSON.parse(${rect}); return r.width === innerWidth && r.height === innerHeight; })()`);
     assert.strictEqual(await app.eval(count('.pane.full')), 1);
     await app.mouse('mouseMoved', await app.center('#fs-banana img')); // hovering the banana reveals the buttons
+    assert.ok(await app.eval('document.querySelector("#fs-cad").hidden'), 'no Ctrl+Alt+Del button for a terminal');
     await app.click('#fs-back');
     await app.waitFor(`!document.querySelector(".pane.full") && ${visiblePanes} === 4 && document.querySelector("#fs-banana").hidden`);
     assert.strictEqual(await app.eval(count('.xterm')), 4);
@@ -358,8 +359,11 @@ test('tabs, splits, gutter and dialogs', { timeout: 120000 }, async (t) => {
     await app.eval(`${row}.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))`);
     const answers = `(document.querySelector('.split:not([hidden]) .xterm-rows')?.textContent.match(/bp-42/g) || []).length`;
     await app.waitFor(`${answers} === 1`); // ran on start
-    await app.eval(`(() => { document.querySelector('.split:not([hidden]) .pane-head').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 50, clientY: 50 }));
-      [...document.querySelectorAll('#menu button')].find((b) => b.textContent === 'Run: answer').click(); })()`);
+    const paneMenu = await app.eval(`(() => { document.querySelector('.split:not([hidden]) .pane-head').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 50, clientY: 50 }));
+      const items = [...document.querySelectorAll('#menu button')];
+      items.find((b) => b.textContent === 'Run: answer').click();
+      return items.map((b) => b.textContent); })()`);
+    assert.ok(!paneMenu.includes('Send Ctrl+Alt+Del'), 'no Ctrl+Alt+Del in a terminal\'s menu');
     await app.waitFor(`${answers} === 2`);
 
     // From the sidebar with no session open: a new one runs "Run on start", then the picked command.

@@ -1450,7 +1450,7 @@ How the user's actions map onto it:
 | ◫ ⬒ ⊞ buttons | set `current.layout` to `h`, `v` or `grid`, then `render()` |
 | **Split all** | `movePane` every open pane into the current tab (up to 4) |
 | **Tab all** | `movePane(p, null)` for every pane but the first: each gets a new tab |
-| **Full screen current** (Ctrl+Alt+F) | `setFull(current.active)`: adds `.full` to the active pane (`position: fixed; inset: 0`, header hidden) and calls `window.bp.fullScreen(true)`; the pane stays in the DOM. A faint banana at top centre reveals **Minimize** (`window.bp.minimize()`) and **Back to tab** (`setFull(null)`). It also leaves when the pane closes or its session ends, and when the window leaves full screen by itself (see below) |
+| **Full screen current** (Ctrl+Alt+F) | `setFull(current.active)`: adds `.full` to the active pane (`position: fixed; inset: 0`, header hidden) and calls `window.bp.fullScreen(true)`; the pane stays in the DOM. A faint banana at top centre reveals **Minimize** (`window.bp.minimize()`) and **Back to tab** (`setFull(null)`), plus **Ctrl+Alt+Del** when the pane is a remote desktop (see [Remote desktop panes](#remote-desktop-panes-guacamole)). It also leaves when the pane closes or its session ends, and when the window leaves full screen by itself (see below) |
 | ⇱ on a pane / drag a pane header onto the tab bar | `movePane(p, null)` → its own tab |
 | Drag a pane header onto another tab | `movePane(p, thatTab)` → joins that tab's split |
 | Folder menu → Open all in split | opens up to 4 connections of that folder in one tab |
@@ -1629,6 +1629,18 @@ async function openRemote(p, c) {
 * `Guacamole.Keyboard(p.body)` listens **only on that pane**, so with four desktops in a grid your typing goes only to the one you clicked. It sends X11 "keysyms", which handle keyboard layouts and modifier keys properly. `return false` stops the browser acting on the key itself (e.g. Ctrl+W would otherwise not reach Windows).
 * A ResizeObserver scales the display to fit the pane straight away, then (after the pane has been still for 300 ms, a **debounce**) calls `client.sendSize(w, h)` to ask the remote desktop for the new resolution.
 * `client.onstatechange` and `client.onerror` drive the status overlay: it disappears when connected (state 3) and shows the error message, for example "Connection failed (server unreachable?)", if guacd cannot reach the host.
+* **Ctrl+Alt+Del** cannot be typed: your own computer takes that combination before banana-phone sees it. So it is an option, in the pane header's right-click menu (**Send Ctrl+Alt+Del**) and as a button under the full-screen banana. Both call `sendCtrlAltDel(p)`:
+
+  ```js
+  const CTRL_ALT_DEL = [0xFFE3, 0xFFE9, 0xFFFF];
+  function sendCtrlAltDel(p) {
+    for (const k of CTRL_ALT_DEL) p.guac.sendKeyEvent(1, k);
+    for (const k of CTRL_ALT_DEL.toReversed()) p.guac.sendKeyEvent(0, k);
+    focusPane(p); // the click took the keyboard away from the remote screen
+  }
+  ```
+
+  The three numbers are the keysyms of left Control, left Alt and Delete. `sendKeyEvent(1, k)` presses a key and `sendKeyEvent(0, k)` lets it go, so the first loop holds all three down and the second releases them last-pressed-first (`toReversed()` gives a reversed copy and leaves the list alone), the way fingers do. Afterwards `focusPane(p)` gives the keyboard back to the remote screen, because clicking the menu or the button took it away. One rule, `canCtrlAltDel(p)`, decides whether the option is shown: the pane has a Guacamole client (`p.guac`, so never a terminal) and its session has not failed. The menu asks it when it opens and the banana asks it each time its buttons are revealed, so a pane that connects or fails while full screen gets the right answer. During the short "Connecting…" phase the option is already there, and Guacamole simply drops the keys until the session is up.
 * Signing out of Windows (or choosing Disconnect in its Start menu) closes the pane by itself. guacd ends every session with an *error* message, even a normal one, and attaches a status code. Code `0` means SUCCESS: guacd uses it when you logged off or disconnected yourself ("Manually logged off."). Anything else (server unreachable, idle timeout, another login took the session, the network dropped) keeps the pane open with the message, so you can see what happened.
 
 ```js
