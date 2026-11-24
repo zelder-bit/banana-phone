@@ -79,6 +79,7 @@ banana-phone/
 ├── scripts/
 │   ├── check-walkthrough.js   CI check that this document matches the code
 │   ├── ui.e2e.js       end-to-end test: drives the real app's window (tabs, splits, dialogs)
+│   ├── share.itest.js  integration test for shared folders: real Docker, guacd and an RDP server
 │   └── make-banana-gif.py     rebuilds the typing-banana GIF from its source video (not part of the app)
 ├── .github/workflows/ci.yml   runs the tests and that check on every push / PR
 ├── .github/workflows/release.yml  builds and publishes the AppImage for a version tag
@@ -89,6 +90,7 @@ banana-phone/
 ├── requirements.txt    what a machine needs to run the AppImage (shipped with each release)
 ├── build/icon.png      AppImage icon
 ├── docs/screenshots/   README pictures (made-up hosts and names)
+├── docs/shared-folders-check.md   what has been checked about shared folders, and what to check on Windows
 └── renderer/           everything the window shows
     ├── index.html      layout and dialogs
     ├── fruit.css       theme (light "orchard" and dark "night grove")
@@ -2058,6 +2060,10 @@ npm run check:walkthrough
 npm run test:ui
 ```
 
+```bash
+npm run test:share
+```
+
 `store.test.js` uses Node's built-in `node:test` and `node:assert`:
 
 ```js
@@ -2112,6 +2118,8 @@ Page updates are not instant, so instead of sleeping for a guessed time the test
 ```
 
 `t.test(name, fn)` inside a test makes **subtests**, so the report shows each step (split, grid, gutter, Tab all, dialogs) as its own pass or fail, while all of them share one running app.
+
+One subtest is about shared folders. It fills in the edit dialog and checks that the box is shown for RDP only, that a connection sharing the home folder is refused with the reason in a toast, that a share is saved by its real path and read-only unless the checkbox is ticked, and that emptying the path removes it. It also plays a misbehaving page: it sends `store:save` a made-up `shareOk` and then reads this run's `connections.json` (`app.profile` is the throwaway profile's folder) to see that it never reached the file. The system dialogs themselves (the folder picker, the question before sharing) cannot be clicked from DevTools, so those are covered by `share.js`'s unit tests and the hand check in `docs/shared-folders-check.md`.
 
 The dialog step caught a real bug. The edit dialog used to save from its `close` event, with a new listener added each time it opened. Chromium can deliver a `close` event late. Under the test's fast input, the Esc that cancelled one opening only "arrived" together with the next opening's Save. Both listeners then read `returnValue` as `ok`, and the connection was saved twice. In the opposite order (Save, then reopen at once), a Save could be lost. The dialogs now save on `submit` instead (see [§9](#9-rendererindexhtml-and-fruitcss-the-look)), and the test covers both orders: Esc then Save, and Save then an immediate reopen.
 
@@ -2228,6 +2236,8 @@ The rules were tested by committing throwaway fakes (a random AWS-style key, a r
 Covered: multi-word search, that an empty password removes the saved one while a missing one keeps it, that Duplicate's `copyPasswordFrom` copies the encrypted password unless a new one is given, bulk update by username, by folder (including subfolders but not `Production` when asking for `Prod`), respecting unticked ids, backup and round-trip of the file, and (in `guacd.test.js`) that a token with a non-ASCII password decrypts correctly with guacamole-lite's own code, that `rdpFingerprint` returns the right fingerprint from a fake RDP server using a throwaway certificate made with `openssl`, and that it refuses a server offering only legacy RDP security, and that it fails quickly when the server hangs up or is not an RDP server at all.
 
 `share.test.js` builds a pretend home folder in a temporary directory and checks `checkFolder` against it: an ordinary folder passes and comes back as its real path; the home folder, anything above it, hidden folders, system folders, the app's own folder, a file, a missing folder and a path with a comma are refused, and so is a link leading to any of them. It also checks that `approvalOf` changes when the folder, the mode, the host, the port or the certificate does. `store.test.js` checks that `upsert` keeps only a well-formed share, only on RDP, and removes the agreement along with it.
+
+`scripts/share.itest.js` (`npm run test:share`) is the one test that touches the real things, so it is not part of `npm test`. It needs Docker, an RDP server on this machine (xrdp, standing in for Windows) and a second account to log in as; CI's `share` job installs all three on a fresh machine. The test calls `rdpFingerprint` and `openRemote` exactly as `main.js` does, opens the websocket the page would open, and then looks at the redirected drive *as the logged-in account*: what a program on the remote computer could do. It checks that a read-only share can be read and not changed, that a writable one can and that the new files are yours, that links pointing out of the folder lead nowhere, that the container has one mount, no port and no way in from the network, and that quitting stops it. `docs/shared-folders-check.md` lists the results and what is left to check by hand on a real Windows host.
 
 `guacd.test.js` also checks `remoteSettings`: the RDP settings pin the certificate, ask for the admin session only when it is ticked, and turn the drive on (and guacd's own file transfer off) only for an RDP connection that was given a share. For shared folders it checks the `docker run` arguments (read-only unless `writable` is exactly `true`, your user, no published port, bad paths refused), and, with a stand-in `docker` program on the `PATH`, that `ensureShare` starts the container once, that its socket is private and carries bytes both ways through `docker exec`, and that `stopGuacd` stops the container and removes the socket.
 

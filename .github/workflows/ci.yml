@@ -37,3 +37,43 @@ jobs:
       - run: xvfb-run -a npm run test:ui
       # The RDP certificate probe again, inside Electron: its TLS library (BoringSSL) is stricter than Node's.
       - run: npm run test:electron
+
+  # Shared folders for real: the guacd image from Docker Hub, and an xrdp server standing in for Windows.
+  share:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci --ignore-scripts
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+      - name: Start an RDP server (xrdp) with a throwaway account
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends xrdp xorgxrdp fuse3
+          # No desktop is needed: the session only has to stay logged in.
+          printf '#!/bin/sh\nexec sleep 100000\n' | sudo tee /etc/xrdp/startwm.sh > /dev/null
+          echo 'allowed_users=anybody' | sudo tee /etc/X11/Xwrapper.config > /dev/null
+          # Its own certificate, readable by the xrdp service, so the server offers TLS (the app refuses legacy RDP security).
+          sudo rm -f /etc/xrdp/cert.pem /etc/xrdp/key.pem
+          sudo openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=xrdp-ci -keyout /etc/xrdp/key.pem -out /etc/xrdp/cert.pem
+          sudo chmod 644 /etc/xrdp/key.pem
+          password=$(openssl rand -hex 16)
+          echo "::add-mask::$password"
+          sudo useradd -m bp-rdp
+          echo "bp-rdp:$password" | sudo chpasswd
+          echo "BP_RDP_PASSWORD=$password" >> "$GITHUB_ENV"
+          sudo systemctl restart xrdp-sesman xrdp
+      - run: npm run test:share
+        env:
+          BP_RDP_USER: bp-rdp
+      - name: What guacd and xrdp said, if it failed
+        if: failure()
+        run: |
+          for c in $(docker ps -aq); do docker logs "$c" 2>&1 | tail -40; done
+          sudo journalctl -u xrdp -u xrdp-sesman --no-pager | tail -60
+          sudo -u bp-rdp sh -c 'tail -40 ~/.local/share/xrdp/*.log' || true
