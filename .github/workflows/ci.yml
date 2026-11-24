@@ -40,7 +40,9 @@ jobs:
 
   # Shared folders for real: the guacd image from Docker Hub, and an xrdp server standing in for Windows.
   share:
-    runs-on: ubuntu-latest
+    # 24.04 on purpose: its xrdp (0.9) shows a redirected drive as a folder in the session, which is how the
+    # test looks at it. With the xrdp of 26.04 (0.10.1) the drive is announced but that folder never appears.
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
