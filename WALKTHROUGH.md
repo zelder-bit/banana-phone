@@ -72,8 +72,10 @@ banana-phone/
 ├── preload.js          exposes a safe `window.bp` API to the page
 ├── store.js            load/save connections.json, search, bulk update (pure logic)
 ├── guacd.js            starts guacd in Docker, runs the websocket bridge, makes tokens
+├── share.js            shared folders: which folders may be shared, what the user agreed to (pure logic)
 ├── store.test.js       tests for store.js
-├── guacd.test.js       test for token encryption
+├── guacd.test.js       tests for tokens, the RDP identity check and shared folders' containers
+├── share.test.js       tests for share.js
 ├── scripts/
 │   ├── check-walkthrough.js   CI check that this document matches the code
 │   ├── ui.e2e.js       end-to-end test: drives the real app's window (tabs, splits, dialogs)
@@ -102,7 +104,7 @@ Who loads whom:
 
 ```
 electron .  ──▶ main.js ──require──▶ store.js ──require──▶ renderer/shared.mjs
-                  │      └─require──▶ guacd.js, ssh2, node-pty
+                  │      └─require──▶ guacd.js, share.js, ssh2, node-pty
                   │
                   └─ new BrowserWindow({ preload: preload.js })
                            │
@@ -222,7 +224,9 @@ This file has **no Electron code at all**. That is deliberate: it can be tested 
       "domain": "CORP",
       "password": "djExNOUCiQK/…",
       "folder": "Prod/Windows",
-      "tags": ["ad"]
+      "tags": ["ad"],
+      "share": { "path": "/home/you/Projects/acme", "writable": false },
+      "shareOk": "9f2c…"
     }
   ]
 }
@@ -234,7 +238,7 @@ A folder is just a string like `"Prod/Windows"`. There is no separate tree struc
 
 `setFolderIcon` checks the name against the fixed icon list (`ICONS` from `shared.mjs`: `crate` plus the fruit) before saving, so the renderer can never make the app read an arbitrary file name, and refuses a folder that does not exist, so no stray icon entries pile up.
 
-`password` is encrypted (see [§6](#encrypting-passwords)).
+`password` is encrypted (see [§6](#encrypting-passwords)). `share` is the folder an RDP connection shows the server as a drive, and `shareOk` records that you agreed to it (see [§8](#shared-folders-which-folders-and-who-agrees)).
 
 ### Loading
 
@@ -443,12 +447,12 @@ const dec = (s) => {
 const publicView = () => ({
   folders: data.folders,
   folderIcons: data.folderIcons,
-  connections: data.connections.map(({ password, ...c }) => ({ ...c, hasPassword: !!password })),
+  connections: data.connections.map(({ password, shareOk, ...c }) => ({ ...c, hasPassword: !!password })),
   keyring: safeStorage.getSelectedStorageBackend?.() || 'unknown',
 });
 ```
 
-* `({ password, ...c })` in a parameter list destructures each connection: `password` goes into its own variable and `c` gets **all the other** properties (the "rest" pattern). The returned object therefore has no password at all, only `hasPassword: true/false`.
+* `({ password, shareOk, ...c })` in a parameter list destructures each connection: `password` and `shareOk` go into their own variables and `c` gets **all the other** properties (the "rest" pattern). The returned object therefore has no password at all, only `hasPassword: true/false`. `shareOk` (your agreement to a shared folder) is left out because the page has no use for it.
 * `!!x` turns any value into a real boolean.
 * `?.()` is **optional chaining**: call the function only if it exists. Older Electron versions lacked `getSelectedStorageBackend`.
 
@@ -478,8 +482,9 @@ const change = (channel, fn, backup = false) => ipcMain.handle(channel, (_e, ...
 The handlers themselves are then one line each:
 
 ```js
-change('store:save', ({ password, ...conn }) => {
+change('store:save', ({ password, shareOk, ...conn }) => {
   if (password !== undefined) conn.password = enc(password); // undefined = keep existing
+  if (conn.share?.path) conn.share = { ...conn.share, path: share.checkFolder(String(conn.share.path).trim(), shareRules()) };
   store.upsert(data, conn); // its return value holds the encrypted password, so it is not passed on
 });
 change('store:delete', (id) => store.remove(data, id), true);
@@ -490,6 +495,8 @@ change('store:folderIcon', (f, name) => store.setFolderIcon(data, f, name));
 // A moved folder's result is its new path.
 change('store:move', (kind, id, to, before) => (kind === 'conn' ? store.moveConn : store.moveFolder)(data, id, to, before));
 ```
+
+`shareOk` is taken out of what the page sent and thrown away, and a shared folder is checked and replaced by its real path before it is saved; both are explained in [§8](#shared-folders-which-folders-and-who-agrees).
 
 When you edit a connection and leave the password field empty, the page does not send `password` at all, so `upsert`'s merge keeps the old encrypted one. `store:save`'s function has a body in braces and no `return`, so its `result` is `undefined`: `upsert` returns the saved connection, encrypted password included, and that must not travel back to the page. `(kind === 'conn' ? store.moveConn : store.moveFolder)(…)` picks one of two functions with the ternary operator and calls it straight away.
 
@@ -614,7 +621,7 @@ If `known_hosts.json` exists but cannot be read (half-written, hand-edited into 
 A changed key is legitimate after a server is reinstalled, and suspicious otherwise, and only you can tell which. So banana-phone **asks**:
 
 ```js
-async function confirmChanged(id, what, host, saved, fp) {
+async function confirmChanged(id, what, host, saved, fp, also = '') {
   const { response } = await dialog.showMessageBox(win, {
 ```
 
@@ -701,12 +708,14 @@ ipcMain.handle('session:open', async (_e, connId, cols = 80, rows = 24, run) => 
     const cert = await guacd.rdpFingerprint(conn.host, conn.port || 3389);
     const fp = cert.fingerprint;
     const saved = trust(rdpId(conn), fp);
-    if (saved && saved !== fp && !(await confirmChanged(rdpId(conn), 'certificate', `${conn.host}:${conn.port || 3389}`, saved, fp))) {
+    const also = conn.share ? `\n\nThis connection shares the folder ${conn.share.path} with the server.` : '';
+    if (saved && saved !== fp && !(await confirmChanged(rdpId(conn), 'certificate', `${conn.host}:${conn.port || 3389}`, saved, fp, also))) {
       throw new Error(`The certificate of ${conn.host} has changed and was not trusted, so banana-phone did not connect. Expected SHA256 ${saved}, got ${fp}.`);
     }
     const notice = !saved ? `Saved the certificate of ${conn.host}: SHA256 ${fp}`
       : saved !== fp ? `Trusted the new certificate of ${conn.host}: SHA256 ${fp}` : undefined;
-    return { kind: 'remote', url: await guacd.openRemote(conn, dec(conn.password), cert), notice };
+    const shared = await shareFor(conn, fp); // after the identity check: the agreement is with that server
+    return { kind: 'remote', url: await guacd.openRemote(conn, dec(conn.password), cert, shared), notice, shared };
   }
   if (conn.protocol === 'vnc') {
     return { kind: 'remote', url: await guacd.openRemote(conn, dec(conn.password)) };
@@ -724,6 +733,7 @@ For a terminal, main works out `start`, the lines to type in once the shell is r
 * `async` makes the function return a **Promise** and lets it use `await`, which pauses this function (not the whole app) until another Promise settles. `guacd.openRemote` may need to start a Docker container, which takes a while.
 * `throw new Error(...)` inside a `handle` rejects the Promise on the page side, where `connect()` catches it and shows the message in the pane.
 * **RDP server identity** works like SSH host keys: the certificate's fingerprint is saved the first time and must match afterwards. A changed certificate opens a warning dialog with both fingerprints: Cancel (the default) stops the connection with an explanation in the pane, and Trust saves the new one and connects. A newly saved or newly trusted certificate is announced with a `notice` carrying the full fingerprint, which the page shows as a toast for 12 seconds so you can compare it with the one the server's administrator sees. See [`rdpFingerprint`](#checking-the-rdp-servers-identity) for how the certificate is fetched.
+* A connection with a **shared folder** then goes through `shareFor` ([§8](#shared-folders-which-folders-and-who-agrees)), which may ask you to agree. The warning for a changed certificate says so when the connection shares a folder (`also`), since trusting an impostor would now hand it your files.
 * VNC has no certificate to check: guacd's VNC support has no TLS, so VNC is best kept on trusted networks or inside a VPN.
 * The page only ever sends a connection **id**. It cannot ask main to connect to an arbitrary host with stored credentials.
 
@@ -805,6 +815,7 @@ The full list of channels:
 | `store:bulkPreview` | invoke | which connections a bulk edit would touch |
 | `store:bulkApply` | invoke | apply a bulk edit (writes a timestamped backup first); `result` is how many changed |
 | `store:forgetHost` | invoke | forget a connection's saved SSH host key or RDP certificate |
+| `share:pick` | invoke | show the system's folder dialog; answers with the chosen folder's real path, `null` if cancelled, or an error if it may not be shared |
 | `session:open` | invoke | start a terminal (returns a session id) or a remote desktop (returns a websocket URL) |
 | `session:write` | send | keystrokes into a terminal |
 | `session:resize` | send | new terminal size in columns and rows |
@@ -1155,6 +1166,101 @@ function ensureShare(share) {
 * `stopGuacd` stops every share's container on quit and deletes the socket folder. Unlike the ordinary guacd, nothing else can be using them.
 
 This was run for real with a local Docker and an xrdp server standing in for Windows (and guacd 1.3 in a stand-in image with the official image's entrypoint, since the 1.6.0 image itself could not be downloaded there). Read-only: files could be read, and creating, changing and deleting were refused. Writable: files made by the remote side belonged to the local user, mode 600. A symlink in the share pointing at a file elsewhere in the home folder could not be opened; one pointing at `/etc/passwd` showed the *container's* file. Another account on the machine could reach neither the socket nor the container's port. Without `HOME=/tmp` the connection failed.
+
+### Shared folders: which folders, and who agrees
+
+The container limits what a share can reach to one folder. Two questions are left, and neither is guacd's or Docker's to answer: is that folder a sensible thing to share, and did *you* decide to share it? `share.js` holds the rules, `main.js` asks them, and nothing in the page is trusted with either.
+
+**Where a share comes from.** The edit dialog of an RDP connection has a *Shared folder* box: a path (typed, or picked with **Choose…**, which calls `share:pick` so the main process shows the system's folder dialog) and one checkbox, *Let the remote computer change and delete files in it*. An empty path means nothing is shared. The page sends `share: { path, writable }` or `share: null` along with the rest of the connection, and `upsert` in `store.js` tidies it the way it tidies saved commands:
+
+```js
+  if (conn.share !== undefined) {
+    const s = conn.share;
+    conn.share = typeof s?.path === 'string' && s.path.trim() ? { path: s.path.trim(), writable: s.writable === true } : undefined;
+  }
+```
+
+```js
+  if (saved.protocol !== 'rdp' || !saved.share) { delete saved.share; delete saved.shareOk; }
+```
+
+* Only `path` and `writable` survive, and `writable` only when it is exactly `true`. Anything malformed removes the share rather than saving something half-understood.
+* Only RDP has drives, so a share on any other kind of connection is dropped, together with `shareOk`, your agreement to it.
+
+**Which folders.** Before a share is saved (`store:save`), when one is picked (`share:pick`), and again every time a session opens, the folder goes through `checkFolder`:
+
+```js
+function checkFolder(input, { home = os.homedir(), keep = [] } = {}) {
+  if (typeof input !== 'string' || !path.isAbsolute(input)) throw new Error('Choose the folder to share by its full path, starting with /');
+  const no = (why) => new Error(`${input} cannot be shared: ${why}`);
+  let folder;
+  // Links are followed first, so the rules below judge where the folder really is.
+  try { folder = fs.realpathSync(input); } catch (e) { throw no(e.code === 'ENOENT' ? 'it does not exist' : e.message); }
+  if (!fs.statSync(folder).isDirectory()) throw no('it is not a folder');
+  // guacd.js refuses these too; said here in words a person chose a folder can act on.
+  if (/[,"\x00-\x1f\x7f]/.test(folder)) throw no('its path has a comma, a quote or a control character, which Docker cannot mount');
+  home = real(home);
+  // Covers /, /home and the home folder itself: with them would go your keys, settings and saved logins.
+  if (within(home, folder)) throw no('it holds your whole home folder. Share one folder inside it instead');
+  if (folder.split('/').length < 3) throw no('it is a top-level system folder. Share a folder inside it instead');
+  if (SYSTEM.some((s) => within(folder, s) && !within(home, s)) && !within(folder, '/run/media')) throw no('it is a system folder'); // root's own home is /root
+  // Hidden folders in the home folder are where keys and settings live: ~/.ssh, ~/.gnupg, ~/.config, ~/.mozilla ...
+  if (within(folder, home) && path.relative(home, folder).split(path.sep).some((part) => part.startsWith('.'))) {
+    throw no('it is inside a hidden folder of your home folder, where keys and settings are kept');
+  }
+  for (const k of keep.map(real)) if (within(folder, k) || within(k, folder)) throw no("it holds banana-phone's own files");
+  return folder;
+}
+```
+
+* `fs.realpathSync` follows every symlink in the path and returns where it really leads. All the rules are applied to that, so a harmless-looking link to `~/.ssh` is judged as `~/.ssh`. The real path is also what gets saved, so the folder you see in the dialog, the one you agree to and the one that is mounted are the same.
+* The rules are about *your* secrets. guacd runs as you with no extra powers, so a share can never show the remote side more than you can read yourself; what needs guarding is what you can read and would not hand over: the home folder as a whole, its hidden folders (`~/.ssh`, `~/.gnupg`, `~/.config`, browser profiles), and banana-phone's own folder with `connections.json` and `known_hosts.json` (`keep`, passed in by `main.js` so this file stays free of Electron and easy to test).
+* `{ home = os.homedir(), keep = [] } = {}` is a **destructured parameter with defaults**: callers pass an options object and may leave out any part, or all of it.
+* The rules cannot know which of your ordinary folders are sensitive. That part is your call, which is the second question.
+
+**Who agrees.** The page can save a connection with any share it likes; that is how saving works. If the page were ever taken over (the scenario the sandbox and the hidden passwords already plan for), it could add a share of `~/Documents` to a connection and open it. So a saved share is only a *request*. Before a folder is mounted, `main.js` needs your agreement, given in a system dialog the page cannot click:
+
+```js
+async function shareFor(conn, fp) {
+  if (!conn.share) return null;
+  const folder = share.checkFolder(conn.share.path, shareRules());
+  if (folder !== conn.share.path) throw new Error(`The shared folder ${conn.share.path} now leads to ${folder}. Edit the connection and choose the folder again.`);
+  const writable = conn.share.writable === true;
+  const ok = share.approvalOf(conn, fp);
+  if (conn.shareOk !== ok) {
+    const { response } = await dialog.showMessageBox(win, {
+```
+
+```js
+      buttons: ['Cancel', 'Share and connect'],
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true,
+    });
+    if (response !== 1) throw new Error('Did not connect: the folder was not shared. To connect without it, edit the connection and empty its shared folder.');
+    conn.shareOk = ok;
+    persist();
+  }
+  return { path: folder, writable };
+}
+```
+
+```js
+function approvalOf(conn, fingerprint) {
+  const { path: folder, writable } = conn.share;
+  return crypto.createHash('sha256').update(JSON.stringify([folder, writable === true, conn.host, conn.port || 3389, fingerprint])).digest('hex');
+}
+```
+
+* The dialog names the folder and the server and says in plain words what the server will be able to do. **Cancel** is the default, as in the changed-certificate warning.
+* What you agreed to is remembered as `shareOk`: a SHA-256 hash of the folder, read-only or writable, the server's address and port, and the **certificate fingerprint** just checked. Next time the same five things give the same hash and nothing is asked. Change any of them (another folder, read-only made writable, the connection pointed at another host, a new certificate on the server) and the hash no longer matches, so you are asked again.
+* The page cannot fake the agreement. `store:save` drops any `shareOk` the page sends (`({ password, shareOk, ...conn })` takes it out and never uses it), `publicView` does not send it to the page, and `upsert` deletes it when the share goes away.
+* The folder is checked again here, and must still *be* the saved path. If a folder in the path has been replaced by a link since you agreed, its real path differs and the session refuses to open instead of quietly mounting somewhere else.
+* `shareFor` runs after the certificate check, so "this server" means the one whose identity was just verified.
+
+The page shows what a session can reach: a toast when it connects (`Sharing … with … (read-only)`), and a label on the pane's header for as long as it is open (full screen hides the header, as it hides everything else).
+
+Shares are set one connection at a time. Bulk edit does not touch them, and **Duplicate** copies the folder but not the agreement, so the copy asks when it first connects.
 * `console: 'true'` is set only when the connection's **Admin session (mstsc /admin)** box is ticked. It connects to the server's console session (session 0 on older Windows, the "admin" session on Remote Desktop Session Host servers) instead of a new user session. Admins use it to reach a server directly when a session-host farm's load balancing would send them elsewhere, or when the normal session limit is reached. guacd's parameters are all strings, hence `'true'` rather than `true`.
 * `Object.assign(target, source)` copies `source`'s properties onto `target`.
 * `encodeURIComponent` makes the token safe to put in a URL (escaping `+`, `/`, `=`).
@@ -1704,8 +1810,14 @@ In the edit dialog, the **Saved commands** box (class `term-only`, hidden for RD
 ```js
 async function openRemote(p, c) {
   status(p, `Connecting to ${c.host}…`);
-  const { url, notice } = await window.bp.open(c.id);
-  if (notice) toast(notice, 12000); // long enough to compare the fingerprint
+  const { url, notice, shared } = await window.bp.open(c.id);
+  // What this session can reach on this computer is said out loud and stays on the pane's header.
+  const sharing = shared && `Sharing ${shared.path} with ${c.host} (${shared.writable ? 'it can change files' : 'read-only'})`;
+  if (notice || sharing) toast([notice, sharing].filter(Boolean).join(' · '), 12000); // long enough to compare the fingerprint
+  if (sharing) {
+    p.root.classList.add('sharing'); // keeps the header, and so the label, even when the pane has the tab to itself
+    p.root.querySelector('.pane-head .t').after(el('span', { className: 'shared', textContent: shared.writable ? 'shared folder: writable' : 'shared folder: read-only', title: sharing }));
+  }
   if (p.closed) return; // pane closed while guacd was starting
   const [base, query] = url.split('?');
   const client = new Guacamole.Client(new Guacamole.WebSocketTunnel(base));
@@ -1726,6 +1838,7 @@ async function openRemote(p, c) {
 * `if (p.closed) return;` handles closing a pane while it still says "Connecting" (the first RDP connection may wait minutes while Docker downloads guacd). `closePane` sets `p.closed = true`; without this check the connection would carry on in a pane nobody can see. Terminals do the same and close the session main just opened.
 * `const [base, query] = url.split('?')` is **array destructuring**: the first piece goes to `base`, the second to `query`.
 * `WebSocketTunnel(base)` is the connection to guacamole-lite; `client.connect(query)` appends the token plus the pane's current size, so the remote desktop starts at exactly the right resolution.
+* `shared` is the folder main mounted for this session, if any ([§8](#shared-folders-which-folders-and-who-agrees)). `[notice, sharing].filter(Boolean).join(' · ')` joins whichever of the two messages exist; `.after(…)` puts the label right behind the pane's title. A pane alone in its tab normally has no header; the `sharing` class keeps it (one CSS rule), so the label is there for as long as the folder is reachable.
 * `display.getElement()` is a `<div>` containing layered `<canvas>` elements that guacd's drawing instructions paint on.
 * `Guacamole.Mouse` turns browser mouse events into remote mouse events; the `true` in `sendMouseState(state, true)` corrects for the display's scaling.
 * `Guacamole.Keyboard(p.body)` listens **only on that pane**, so with four desktops in a grid your typing goes only to the one you clicked. It sends X11 "keysyms", which handle keyboard layouts and modifier keys properly. `return false` stops the browser acting on the key itself (e.g. Ctrl+W would otherwise not reach Windows).
@@ -1916,10 +2029,16 @@ You hold **Shift** and double-click `dc01` (RDP, `admin` / `CORP`) while an SSH 
 | SSH man-in-the-middle | Trust-on-first-use host key fingerprints; a changed key is only accepted after you confirm it in a warning dialog that defaults to Cancel. |
 | RDP server impersonation | The certificate fingerprint is saved on first use and pinned in guacd (`cert-fingerprints`); a changed certificate is only accepted after you confirm it, and the newly trusted one is pinned instead. guacd is told to use exactly the TLS or NLA security seen during the check, so an impostor cannot fall back to legacy RDP; servers offering only legacy RDP security are refused. |
 | Other machines using your guacd | guacd and the websocket bridge listen on `127.0.0.1` only. |
+| A shared folder giving away more than that folder | Each share has its own guacd container with only that folder mounted, read-only unless you tick otherwise, running as you with no capabilities. Links pointing out of the folder lead nowhere in there. |
+| Other programs or accounts on this computer reaching a shared folder through guacd | A share's guacd publishes no port and listens on its container's loopback only; the app reaches it through `docker exec` behind a unix socket in a folder only you can open. |
+| A share you did not decide on (a taken-over page, an edited connection) | A saved share is a request. The folder is mounted only after you agree in a system dialog, and the agreement is tied to the folder, read-only or writable, the server's address and its certificate. |
+| Sharing your keys or settings by accident | The home folder itself, hidden folders in it, system folders and the app's own folder are refused, judged by the folder's real path. |
 | Shell injection | `docker` is called with `execFile` and an argument array, never a shell string. |
 | Clipboard leaking to remote hosts | Only text, and only to the remote pane you click into; the page can read the clipboard through `clipboard:read`, but the CSP leaves it nowhere to send it except localhost. |
 | A bad bulk edit | Preview with checkboxes, a confirmation, and `connections.json.bak` before every bulk edit or delete. |
 | Half-written file after a crash | Write to `.tmp`, then atomic rename. |
+
+Known trade-offs of shared folders: the remote computer, and anything running on it, can read the whole shared folder (and change it, if you allowed that) for as long as the session is open; what it writes there is as trustworthy as that computer, so think before opening or running it; and the share's container is stopped when banana-phone quits, not when the session ends.
 
 Known trade-offs: the first connection to a server is trusted without proof (the nature of trust on first use: check the fingerprint shown in the toast if it matters); VNC connections cannot be verified at all; and anyone who can run Docker commands as your user can also inspect the guacd container.
 
@@ -2107,6 +2226,8 @@ keywords = ["/home/", "/users/"]
 The rules were tested by committing throwaway fakes (a random AWS-style key, a random GitHub-style token, a freshly generated private key, an email address and a `/home/<name>/` path) to a scratch copy: each was reported and the push was blocked, while the allowed addresses and paths passed. For a genuine false positive, `git push --no-verify` skips the hook, and the pattern belongs in an allowlist.
 
 Covered: multi-word search, that an empty password removes the saved one while a missing one keeps it, that Duplicate's `copyPasswordFrom` copies the encrypted password unless a new one is given, bulk update by username, by folder (including subfolders but not `Production` when asking for `Prod`), respecting unticked ids, backup and round-trip of the file, and (in `guacd.test.js`) that a token with a non-ASCII password decrypts correctly with guacamole-lite's own code, that `rdpFingerprint` returns the right fingerprint from a fake RDP server using a throwaway certificate made with `openssl`, and that it refuses a server offering only legacy RDP security, and that it fails quickly when the server hangs up or is not an RDP server at all.
+
+`share.test.js` builds a pretend home folder in a temporary directory and checks `checkFolder` against it: an ordinary folder passes and comes back as its real path; the home folder, anything above it, hidden folders, system folders, the app's own folder, a file, a missing folder and a path with a comma are refused, and so is a link leading to any of them. It also checks that `approvalOf` changes when the folder, the mode, the host, the port or the certificate does. `store.test.js` checks that `upsert` keeps only a well-formed share, only on RDP, and removes the agreement along with it.
 
 `guacd.test.js` also checks `remoteSettings`: the RDP settings pin the certificate, ask for the admin session only when it is ticked, and turn the drive on (and guacd's own file transfer off) only for an RDP connection that was given a share. For shared folders it checks the `docker run` arguments (read-only unless `writable` is exactly `true`, your user, no published port, bad paths refused), and, with a stand-in `docker` program on the `PATH`, that `ensureShare` starts the container once, that its socket is private and carries bytes both ways through `docker exec`, and that `stopGuacd` stops the container and removes the socket.
 

@@ -22,6 +22,7 @@
       "preload.js",
       "store.js",
       "guacd.js",
+      "share.js",
       "renderer/**",
       "node_modules/**"
     ],

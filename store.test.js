@@ -205,3 +205,27 @@ test('upsert keeps only well-formed saved commands', () => {
   store.upsert(d, { id: c.id, name: 'box2' }); // not sent: left alone
   assert.deepStrictEqual(d.connections[0].commands, []);
 });
+
+test('a shared folder is kept only well-formed, only on RDP, and loses its agreement when removed', () => {
+  const d = sample();
+  const share = () => d.connections[0].share;
+  store.upsert(d, { id: 'a', share: { path: ' /home/user/Projects ', writable: 'yes', extra: 1 } });
+  assert.deepStrictEqual(share(), { path: '/home/user/Projects', writable: false }); // writable only when exactly true
+  store.upsert(d, { id: 'a', share: { path: '/home/user/Projects', writable: true } });
+  assert.deepStrictEqual(share(), { path: '/home/user/Projects', writable: true });
+  d.connections[0].shareOk = 'agreed'; // main.js sets this once the user has agreed
+  store.upsert(d, { id: 'a', name: 'dc01 renamed' }); // an edit that does not mention the share keeps both
+  assert.deepStrictEqual([share().path, d.connections[0].shareOk], ['/home/user/Projects', 'agreed']);
+  for (const off of [null, '', '/home/user/Projects', { path: '' }, { path: 42 }, {}]) {
+    Object.assign(d.connections[0], { share: { path: '/x', writable: false }, shareOk: 'agreed' });
+    store.upsert(d, { id: 'a', share: off });
+    assert.ok(!('share' in d.connections[0]) && !('shareOk' in d.connections[0]), JSON.stringify(off));
+  }
+  // SSH has no drives: a share sent for one is dropped, and an RDP connection turned into SSH loses its own.
+  store.upsert(d, { id: 'b', share: { path: '/home/user/Projects' } });
+  assert.ok(!('share' in d.connections[1]));
+  Object.assign(d.connections[0], { share: { path: '/x', writable: false }, shareOk: 'agreed' });
+  store.upsert(d, { id: 'a', protocol: 'ssh' });
+  assert.ok(!('share' in d.connections[0]) && !('shareOk' in d.connections[0]));
+  assert.ok(store.upsert(d, { name: 'new rdp', protocol: 'rdp', share: { path: '/srv/files' } }).share.path === '/srv/files');
+});

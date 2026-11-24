@@ -5,6 +5,7 @@ contextBridge.exposeInMainWorld('bp', {
   save: (conn) => ipcRenderer.invoke('store:save', conn),
   remove: (id) => ipcRenderer.invoke('store:delete', id),
   forgetHost: (id) => ipcRenderer.invoke('store:forgetHost', id),
+  pickFolder: (from) => ipcRenderer.invoke('share:pick', from),
   addFolder: (f) => ipcRenderer.invoke('store:addFolder', f),
   removeFolder: (f) => ipcRenderer.invoke('store:removeFolder', f),
   folderIcon: (f, name) => ipcRenderer.invoke('store:folderIcon', f, name),
