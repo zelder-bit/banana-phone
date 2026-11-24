@@ -108,10 +108,11 @@ const shares = new Map(); // container name -> { starting: Promise of its relay'
 const me = () => `${process.getuid()}:${process.getgid()}`;
 
 // share: what share.js's pin() found, for one connection:
-//   { path: the folder, writable: boolean, dev, ino: which folder that was on disk, id: the connection }
-// The name says whose it is: your user number, then this launch (its process id), then the connection, folder and mode.
+//   { path: the folder, writable: boolean, dev, ino: which folder that was on disk, id: the connection, server: its host and port }
+// The name says whose it is: your user number, then this launch (its process id), then the connection, server, folder and mode.
+// The server is in it so that a connection pointed at another server does not join the first one's container.
 const shareName = (share) => `${NAME}-${process.getuid()}-${process.pid}-`
-  + crypto.createHash('sha256').update(JSON.stringify([share.id, share.path, share.writable === true])).digest('hex').slice(0, 12);
+  + crypto.createHash('sha256').update(JSON.stringify([share.id, share.server, share.path, share.writable === true])).digest('hex').slice(0, 12);
 
 function shareRunArgs(name, share) {
   // --mount takes comma-separated fields, so a path with a comma or quote could add fields of its own.

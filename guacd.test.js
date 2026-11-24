@@ -108,8 +108,8 @@ test("a share's container sees only that folder, read-only by default, as you, w
   // One container per connection, folder and mode, named for this user and this launch.
   assert.match(shareName({ id: 'c1', path: '/a' }), new RegExp(`^banana-phone-guacd-${process.getuid()}-${process.pid}-[0-9a-f]{12}$`));
   assert.strictEqual(shareName({ id: 'c1', path: '/a' }), shareName({ id: 'c1', path: '/a', writable: false, dev: '1', ino: '2' }));
-  const names = [{ id: 'c1', path: '/a' }, { id: 'c1', path: '/a', writable: true }, { id: 'c1', path: '/b' }, { id: 'c2', path: '/a' }].map(shareName);
-  assert.strictEqual(new Set(names).size, 4); // two servers never share a container, nor do read-only and writable
+  const names = [{ id: 'c1', path: '/a' }, { id: 'c1', path: '/a', writable: true }, { id: 'c1', path: '/b' }, { id: 'c2', path: '/a' }, { id: 'c1', server: 'dc02:3389', path: '/a' }].map(shareName);
+  assert.strictEqual(new Set(names).size, 5); // two servers never share a container, nor do read-only and writable
 });
 
 // A stand-in for the docker program: writes down what it was asked, `exec -i` (the relay's way in) echoes,

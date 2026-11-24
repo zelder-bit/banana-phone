@@ -188,7 +188,7 @@ async function shareFor(conn, fp) {
     conn.shareOk = ok;
     persist();
   }
-  return { ...pinned, writable, id: conn.id };
+  return { ...pinned, writable, id: conn.id, server: `${conn.host}:${conn.port || 3389}` };
 }
 
 function openSsh(id, conn, cols, rows, start) {

@@ -1183,7 +1183,7 @@ function startShare(share) {
 }
 ```
 
-* The container's name comes from `shareName`: `banana-phone-guacd-<your user number>-<this launch's process id>-<12 hex digits>`, the digits being a SHA-256 hash of the connection's id, the folder and whether it is writable. Sessions of the same connection use one container; another connection, or the same folder shared read-only instead of writable, gets another.
+* The container's name comes from `shareName`: `banana-phone-guacd-<your user number>-<this launch's process id>-<12 hex digits>`, the digits being a SHA-256 hash of the connection's id, its server, the folder and whether it is writable. Sessions of the same connection to the same server use one container; another connection, another server, or the same folder shared read-only instead of writable, gets another.
 * The same `starting ||=` pattern as `ensureGuacd` makes four panes opened at once share one start-up.
 * `nc -z` only tests whether the port accepts connections. It is the same command the image's own health check runs.
 * `sweep` removes containers left over from a launch that crashed: ones with your user number whose process id is no longer running (`process.kill(pid, 0)` sends no signal, it only reports whether the process exists). It runs when the app starts and again before the first share. A second banana-phone that is still running, with another profile for instance, keeps its containers.
@@ -1310,7 +1310,7 @@ async function shareFor(conn, fp) {
     conn.shareOk = ok;
     persist();
   }
-  return { ...pinned, writable, id: conn.id };
+  return { ...pinned, writable, id: conn.id, server: `${conn.host}:${conn.port || 3389}` };
 }
 ```
 
