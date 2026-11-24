@@ -105,19 +105,19 @@ test("a share's container sees only that folder, read-only by default, as you, w
     assert.throws(() => shareRunArgs('n', { path: bad }), /cannot be shared/, String(bad));
   }
   assert.throws(() => shareRunArgs('n', undefined), /cannot be shared/);
-  // One container per folder and mode, named for this user.
-  assert.match(shareName({ path: '/a' }), new RegExp(`^banana-phone-guacd-${process.getuid()}-${process.pid}-[0-9a-f]{12}$`));
-  assert.strictEqual(shareName({ path: '/a' }), shareName({ path: '/a', writable: false }));
-  assert.notStrictEqual(shareName({ path: '/a' }), shareName({ path: '/a', writable: true }));
-  assert.notStrictEqual(shareName({ path: '/a' }), shareName({ path: '/b' }));
+  // One container per connection, folder and mode, named for this user and this launch.
+  assert.match(shareName({ id: 'c1', path: '/a' }), new RegExp(`^banana-phone-guacd-${process.getuid()}-${process.pid}-[0-9a-f]{12}$`));
+  assert.strictEqual(shareName({ id: 'c1', path: '/a' }), shareName({ id: 'c1', path: '/a', writable: false, dev: '1', ino: '2' }));
+  const names = [{ id: 'c1', path: '/a' }, { id: 'c1', path: '/a', writable: true }, { id: 'c1', path: '/b' }, { id: 'c2', path: '/a' }].map(shareName);
+  assert.strictEqual(new Set(names).size, 4); // two servers never share a container, nor do read-only and writable
 });
 
 // A stand-in for the docker program: writes down what it was asked, `exec -i` (the relay's way in) echoes,
-// and `ps` lists the container names in `existing`.
+// `ps` lists the container names in `existing`, and `exec <name> stat` says which folder is mounted (the file `mounted`).
 function fakeDocker(t, existing = []) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bp-docker-'));
   const log = path.join(dir, 'log');
-  fs.writeFileSync(path.join(dir, 'docker'), `#!/bin/sh\necho "$*" >> "${log}"\n[ "$1 $2" = "exec -i" ] && exec cat\n[ "$1" = inspect ] && echo true\n[ "$1" = ps ] && cat "${dir}/ps"\nexit 0\n`, { mode: 0o755 });
+  fs.writeFileSync(path.join(dir, 'docker'), `#!/bin/sh\necho "$*" >> "${log}"\n[ "$1 $2" = "exec -i" ] && exec cat\n[ "$1" = inspect ] && echo true\n[ "$1" = ps ] && cat "${dir}/ps"\n[ "$1 $3" = "exec stat" ] && cat "${dir}/mounted"\nexit 0\n`, { mode: 0o755 });
   fs.writeFileSync(path.join(dir, 'ps'), existing.map((n) => n + '\n').join(''));
   const before = { PATH: process.env.PATH, XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR };
   Object.assign(process.env, { PATH: `${dir}:${before.PATH}`, XDG_RUNTIME_DIR: dir });
@@ -126,7 +126,8 @@ function fakeDocker(t, existing = []) {
     if (before.XDG_RUNTIME_DIR === undefined) delete process.env.XDG_RUNTIME_DIR; else process.env.XDG_RUNTIME_DIR = before.XDG_RUNTIME_DIR;
     fs.rmSync(dir, { recursive: true, force: true });
   });
-  return () => (fs.existsSync(log) ? fs.readFileSync(log, 'utf8').trim().split('\n') : []);
+  const calls = () => (fs.existsSync(log) ? fs.readFileSync(log, 'utf8').trim().split('\n') : []);
+  return Object.assign(calls, { mounted: (id) => fs.writeFileSync(path.join(dir, 'mounted'), id + '\n') });
 }
 
 test('a share starts its container once, is reached through a private socket, and is stopped on quit', async (t) => {
@@ -137,8 +138,9 @@ test('a share starts its container once, is reached through a private socket, an
   const left = `banana-phone-guacd-${uid}-${ended}-aaaaaaaaaaaa`;
   const calls = fakeDocker(t, [left, `banana-phone-guacd-${uid}-${process.pid}-bbbbbbbbbbbb`, `banana-phone-guacd-${uid + 1}-${ended}-cccccccccccc`, `banana-phone-guacd-${uid}-${ended}-not-ours`]);
   const { ensureShare, shareName, stopGuacd } = require('./guacd');
-  const share = { path: fs.mkdtempSync(path.join(os.tmpdir(), 'bp-share-')) };
+  const share = { id: 'c1', path: fs.mkdtempSync(path.join(os.tmpdir(), 'bp-share-')), dev: '64', ino: '1234' };
   const name = shareName(share);
+  calls.mounted('64:1234');
   const [sock, again] = await Promise.all([ensureShare(share), ensureShare(share)]);
   assert.strictEqual(sock, again);
   const runs = calls().filter((c) => c.startsWith('run '));
@@ -157,9 +159,52 @@ test('a share starts its container once, is reached through a private socket, an
   });
   assert.strictEqual(echoed, '6.select,3.rdp;');
   assert.ok(calls().includes(`exec -i ${name} nc 127.0.0.1 4822`));
+
+  // The container must hold the folder that was looked at, not whatever its path led to when Docker mounted it.
+  calls.mounted('64:9999'); // as if the folder had been swapped for a link to another one
+  await assert.rejects(ensureShare(share), /changed while it was being shared/);
+  assert.strictEqual(calls().filter((c) => c === `rm -f ${name}`).length, 2); // once before starting, once now
+  await assert.rejects(ensureShare({ id: 'c2', path: share.path }), /changed while it was being shared/); // a share nobody identified is not served either
+
   stopGuacd();
-  assert.ok(calls().includes(`stop -t 1 ${name}`));
+  assert.ok(calls().some((c) => c.startsWith('stop -t 1 ') && c.split(' ').includes(name)));
   assert.ok(!fs.existsSync(path.dirname(sock)));
+});
+
+test('a token opens one websocket, soon, and says itself which guacd it is for', async (t) => {
+  const calls = fakeDocker(t);
+  const { openRemote, verifyClient, ticket, stopGuacd } = require('./guacd');
+  t.after(stopGuacd);
+  const asked = (token) => verifyClient({ req: { url: `/?token=${encodeURIComponent(token)}&width=1` } });
+  const make = (once) => encryptToken({ once, connection: { type: 'rdp', settings: {} } });
+  const good = make(ticket());
+  assert.strictEqual(asked(good), true);
+  assert.strictEqual(asked(good), false, 'a second use is refused');
+  assert.strictEqual(asked(make('never-issued')), false);
+  assert.strictEqual(asked(encryptToken({ connection: { type: 'rdp', settings: {} } })), false, 'a token without a ticket');
+  assert.strictEqual(asked('not a token'), false);
+  assert.strictEqual(verifyClient({ req: { url: '/' } }), false);
+  assert.strictEqual(verifyClient({ req: { url: `/?token=${encodeURIComponent(make(ticket()))}&token=x` } }), false, 'two tokens');
+  t.mock.timers.enable({ apis: ['Date'] });
+  const late = make(ticket());
+  t.mock.timers.tick(61000);
+  assert.strictEqual(asked(late), false, 'too late');
+  t.mock.timers.reset();
+
+  // A share's token carries the way to its own guacd, encrypted with the settings that were agreed to.
+  // The page cannot pair those settings with another share's folder: there is one bridge, and no port to choose.
+  const share = (id, dir) => ({ id, path: fs.mkdtempSync(path.join(os.tmpdir(), dir)), dev: '64', ino: '1' });
+  calls.mounted('64:1');
+  const cert = { fingerprint: 'AA:BB', nla: false };
+  const conn = { protocol: 'rdp', host: '127.0.0.1', username: 'u' };
+  const open = async (c, s) => { const u = new URL(await openRemote(c, 'pw', cert, s)); return { port: u.port, ...new Crypt('AES-256-CBC', key).decrypt(u.searchParams.get('token')) }; };
+  const a = await open({ ...conn, id: 'c1' }, share('c1', 'bp-a-'));
+  const b = await open({ ...conn, id: 'c2' }, share('c2', 'bp-b-'));
+  assert.strictEqual(a.port, b.port);
+  assert.match(a.connection.guacdPort, /\.sock$/);
+  assert.notStrictEqual(a.connection.guacdPort, b.connection.guacdPort);
+  assert.strictEqual(a.connection.settings['enable-drive'], 'true');
+  assert.notStrictEqual(a.once, b.once);
 });
 
 test('resolveHost looks names up with the system resolver (including /etc/hosts)', async () => {

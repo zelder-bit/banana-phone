@@ -109,17 +109,25 @@ function select(data, filter) {
   });
 }
 
+// What the user's agreement to a shared folder (shareOk) was about, as far as the store can see: change
+// any of it and the agreement is gone for good, so changing it back does not bring an old one back.
+// (main.js's share.approvalOf adds the server's certificate.)
+const agreedTo = (c) => JSON.stringify([c.share?.path, c.share?.writable === true, c.protocol, c.host, c.port || null, c.username || '', c.domain || '', c.adminSession === true]);
+
 // patch keys: username, domain, password (already encrypted). Undefined keys are left alone.
 function bulkUpdate(data, filter, patch) {
   const hits = select(data, filter);
   for (const c of hits) {
+    const was = agreedTo(c);
     for (const k of ['username', 'domain', 'password']) if (patch[k] !== undefined) c[k] = patch[k];
+    if (agreedTo(c) !== was) delete c.shareOk; // the folder would now go to another account
   }
   return hits.length;
 }
 
 function upsert(data, input) {
-  const { copyPasswordFrom, ...conn } = input;
+  // shareOk is never taken from what is being saved: only main.js records an agreement, on the saved connection itself.
+  const { copyPasswordFrom, shareOk, ...conn } = input;
   // Saved commands come from the page: keep only well-formed ones.
   if (conn.commands !== undefined) {
     conn.commands = (Array.isArray(conn.commands) ? conn.commands : [])
@@ -130,7 +138,7 @@ function upsert(data, input) {
   // Whether that folder may be shared at all is main.js's question (share.js); `writable` must be said outright.
   if (conn.share !== undefined) {
     const s = conn.share;
-    conn.share = typeof s?.path === 'string' && s.path.trim() ? { path: s.path.trim(), writable: s.writable === true } : undefined;
+    conn.share = typeof s?.path === 'string' && s.path.trim() ? { path: s.path, writable: s.writable === true } : undefined; // the path as main.js checked it
   }
   if (copyPasswordFrom && !conn.id && conn.password === undefined) { // new connections only
     const src = data.connections.find((c) => c.id === copyPasswordFrom);
@@ -138,11 +146,13 @@ function upsert(data, input) {
   }
   if (!conn.id) conn.id = crypto.randomUUID();
   const i = data.connections.findIndex((c) => c.id === conn.id);
+  const was = i >= 0 ? agreedTo(data.connections[i]) : null;
   if (i >= 0) data.connections[i] = { ...data.connections[i], ...conn };
   else data.connections.push(conn);
   const saved = data.connections[i >= 0 ? i : data.connections.length - 1];
   // Only RDP has drives. A connection changed to another type loses its share, and the user's agreement with it.
-  if (saved.protocol !== 'rdp' || !saved.share) { delete saved.share; delete saved.shareOk; }
+  if (saved.protocol !== 'rdp' || !saved.share) delete saved.share;
+  if (!saved.share || agreedTo(saved) !== was) delete saved.shareOk;
   fillFolders(data);
   return conn;
 }

@@ -3,7 +3,7 @@ const assert = require('node:assert');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { checkFolder, approvalOf } = require('./share');
+const { pin, checkFolder, approvalOf } = require('./share');
 
 // A pretend home folder: ~/Projects/acme to share, ~/.ssh and the app's own folder to keep out.
 function world(t) {
@@ -42,8 +42,30 @@ test('folders that would give away more than they seem are refused', (t) => {
   no(w.at('Projects', 'file.txt'), /not a folder/);
   no(w.at('Projects', 'gone'), /does not exist/);
   no(w.at('Odd, name'), /comma/);
-  for (const p of ['/etc', '/etc/ssl', '/proc/self', '/dev', '/sys/kernel', '/run', '/usr', '/var']) no(p, /system folder/);
+  for (const p of ['/etc', '/etc/ssl', '/proc/self', '/dev', '/sys/kernel', '/run', '/usr', '/var']) no(p, /system folder|top-level folder/);
+  // Not hidden, but where snap programs keep their settings and logins.
+  fs.mkdirSync(w.at('snap', 'firefox', 'common'), { recursive: true });
+  no(w.at('snap', 'firefox'), /snap programs/);
+  no(w.at('snap'), /snap programs/);
   for (const p of ['Projects/acme', '', '~/Projects', undefined, null, 42, { path: '/tmp' }]) assert.throws(() => checkFolder(p, w.rules), /full path/, String(p));
+});
+
+test('the folder is identified as well as located, and both homes are protected', (t) => {
+  const w = world(t);
+  const seen = pin(w.at('Projects', 'acme'), w.rules);
+  const st = fs.statSync(w.at('Projects', 'acme'), { bigint: true });
+  assert.deepStrictEqual(seen, { path: w.at('Projects', 'acme'), dev: String(st.dev), ino: String(st.ino) });
+  // Through a link, it is still that folder: same place, same numbers.
+  fs.symlinkSync(w.at('Projects', 'acme'), w.at('via-link'));
+  assert.deepStrictEqual(pin(w.at('via-link'), w.rules), seen);
+  // $HOME may point somewhere else than the home folder the system has on record: neither can be shared.
+  const other = path.join(w.root, 'home', 'other');
+  fs.mkdirSync(path.join(other, '.ssh'), { recursive: true });
+  const both = { home: [w.home, other], keep: [] };
+  assert.throws(() => checkFolder(other, both), /whole home folder/);
+  assert.throws(() => checkFolder(path.join(other, '.ssh'), both), /hidden folder/);
+  assert.throws(() => checkFolder(w.home, both), /whole home folder/);
+  assert.strictEqual(checkFolder(w.at('Projects'), both), w.at('Projects'));
 });
 
 test("the app's own folder is kept out wherever it is", (t) => {
@@ -54,8 +76,8 @@ test("the app's own folder is kept out wherever it is", (t) => {
   assert.strictEqual(checkFolder(w.at('Projects'), { home: w.home, keep }), w.at('Projects'));
 });
 
-test('an agreement covers one folder, one mode, one server and one certificate', () => {
-  const conn = { host: 'dc01', share: { path: '/home/user/Projects', writable: false } };
+test('an agreement covers one folder, one mode, one account on one server, and one certificate', () => {
+  const conn = { host: 'dc01', username: 'admin', domain: 'CORP', share: { path: '/home/user/Projects', writable: false } };
   const ok = approvalOf(conn, 'AA:BB');
   assert.match(ok, /^[0-9a-f]{64}$/);
   assert.strictEqual(approvalOf({ ...conn, port: 3389, share: { path: '/home/user/Projects' } }, 'AA:BB'), ok); // the same thing said differently
@@ -64,7 +86,10 @@ test('an agreement covers one folder, one mode, one server and one certificate',
     approvalOf({ ...conn, share: { ...conn.share, writable: true } }, 'AA:BB'),
     approvalOf({ ...conn, host: 'dc02' }, 'AA:BB'),
     approvalOf({ ...conn, port: 3390 }, 'AA:BB'),
+    approvalOf({ ...conn, username: 'guest' }, 'AA:BB'),
+    approvalOf({ ...conn, domain: 'OTHER' }, 'AA:BB'),
+    approvalOf({ ...conn, adminSession: true }, 'AA:BB'),
     approvalOf(conn, 'CC:DD'),
   ];
-  assert.strictEqual(new Set([ok, ...changed]).size, 6);
+  assert.strictEqual(new Set([ok, ...changed]).size, 9);
 });

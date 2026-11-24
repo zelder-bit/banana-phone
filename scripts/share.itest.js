@@ -13,6 +13,7 @@ const net = require('net');
 const os = require('os');
 const path = require('path');
 const guacd = require('../guacd');
+const { pin } = require('../share');
 
 const USER = process.env.BP_RDP_USER;
 const PASSWORD = process.env.BP_RDP_PASSWORD;
@@ -37,10 +38,17 @@ async function until(what, check, ms = 60000) {
   throw new Error(`timed out waiting for ${what}`);
 }
 
-// One RDP session through the app's own code, with `share` as its drive. `inside` runs while the drive is up.
+// Does the bridge accept a websocket for this URL? (It refuses before guacd hears of it.)
+const accepted = (url) => new Promise((resolve) => {
+  const ws = new WebSocket(`${url}&width=1024&height=768&dpi=96`, 'guacamole');
+  ws.onopen = () => { ws.close(); resolve(true); };
+  ws.onerror = () => resolve(false);
+});
+
+// One RDP session through the app's own code, with `share` as its drive. `inside(url)` runs while the drive is up.
 async function session(host, share, inside) {
   const cert = await guacd.rdpFingerprint(host, 3389);
-  const url = await guacd.openRemote({ protocol: 'rdp', host, username: USER }, PASSWORD, cert, share);
+  const url = await guacd.openRemote({ id: share.id, protocol: 'rdp', host, username: USER }, PASSWORD, cert, share);
   // What the page does: a websocket to the bridge, answering guacd's sync messages so it keeps sending.
   const ws = new WebSocket(`${url}&width=1024&height=768&dpi=96`, 'guacamole');
   let failed = null;
@@ -56,7 +64,7 @@ async function session(host, share, inside) {
   try {
     await until('the shared drive to appear in the RDP session', () => { if (failed) throw new Error(`RDP session failed: ${failed}`); return findDrive(); });
     failed = null;
-    await inside();
+    await inside(url);
     assert.strictEqual(failed, null, 'the session stayed up');
   } catch (e) {
     // A failure here is rarely explained by the assertion alone: add what guacd logged.
@@ -88,10 +96,12 @@ test('a shared folder, end to end', { skip: !USER && 'set BP_RDP_USER and BP_RDP
   t.after(() => { guacd.stopGuacd(); fs.rmSync(base, { recursive: true, force: true }); });
   const listing = () => fs.readdirSync(folder).sort().join();
   const before = listing();
+  // What main.js hands to openRemote: the folder as share.js saw it (path, device, inode), for one connection.
+  const shareOf = (id, writable) => ({ ...pin(folder, { home: os.homedir() }), writable, id });
 
   await t.test('read-only: the remote side reads the folder and can change nothing', async () => {
-    const share = { path: folder, writable: false };
-    await session(host, share, async () => {
+    const share = shareOf('conn-1', false);
+    await session(host, share, async (url) => {
       assert.strictEqual(remote(`cat ${DRIVE}/hello.txt`).out, 'hello from this computer');
       for (const cmd of [`echo x > ${DRIVE}/new.txt`, `mkdir ${DRIVE}/newdir`, `echo more >> ${DRIVE}/hello.txt`, `rm ${DRIVE}/doomed.txt`, `mv ${DRIVE}/hello.txt ${DRIVE}/moved.txt`]) {
         assert.ok(!remote(cmd).ok, `refused: ${cmd}`);
@@ -124,11 +134,28 @@ test('a shared folder, end to end', { skip: !USER && 'set BP_RDP_USER and BP_RDP
       // The socket that does lead to it is ours alone.
       const sock = await guacd.ensureShare(share);
       assert.ok(!remote(`ls ${path.dirname(sock)}`).ok, 'another account cannot reach the socket');
+      // The page keeps the URL it was given. It opened this session and is good for nothing more.
+      assert.ok(!(await accepted(url)), 'a token cannot be used twice');
     });
   });
 
+  await t.test('a folder swapped for a link to another one is not shared', async () => {
+    // What someone who can write to the folder above could do between the check and the mount.
+    const share = shareOf('conn-swap', false);
+    const aside = path.join(base, 'aside');
+    fs.renameSync(folder, aside);
+    fs.symlinkSync(base, folder); // the path now leads to the folder holding not-shared.txt
+    try {
+      await assert.rejects(guacd.ensureShare(share), /changed while it was being shared/);
+      assert.ok(!docker('inspect', guacd.shareName(share)).ok, 'the container that mounted the wrong folder is gone');
+    } finally {
+      fs.unlinkSync(folder);
+      fs.renameSync(aside, folder);
+    }
+  });
+
   await t.test('writable: what the remote side writes is ours, and guacd adds nothing of its own', async () => {
-    await session(host, { path: folder, writable: true }, async () => {
+    await session(host, shareOf('conn-1', true), async () => {
       assert.ok(remote(`echo from the remote side > ${DRIVE}/new.txt`).ok);
       assert.ok(remote(`rm ${DRIVE}/doomed.txt`).ok);
       await until('the new file to arrive', () => fs.existsSync(path.join(folder, 'new.txt')), 10000);

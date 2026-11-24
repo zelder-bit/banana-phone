@@ -7,7 +7,9 @@ const net = require('net');
 const tls = require('tls');
 const crypto = require('crypto');
 const dns = require('dns');
+const url = require('url');
 const GuacamoleLite = require('guacamole-lite');
+const Crypt = require('guacamole-lite/lib/Crypt');
 
 const NAME = 'banana-phone-guacd';
 const IMAGE = 'guacamole/guacd:1.6.0'; // 1.6 adds cert-fingerprints; still serves guacamole-common-js 1.5 clients
@@ -44,19 +46,43 @@ function ensureGuacd() {
   })().catch((e) => { starting = null; throw e; }));
 }
 
-// One websocket bridge per guacd. `guacd` is where that guacd answers: a TCP port on localhost,
-// or the path of a unix socket (a shared folder's guacd, below).
-const bridges = new Map();
-function ensureBridge(guacd = GUACD_PORT) {
-  if (!bridges.has(guacd)) bridges.set(guacd, new Promise((resolve) => {
-    const server = new GuacamoleLite(
-      { host: '127.0.0.1', port: 0 },
-      { host: '127.0.0.1', port: guacd }, // guacamole-lite calls net.connect(port, host), which takes a socket path in place of the port
+let bridge, bridgeServer;
+function ensureBridge() {
+  if (bridge) return bridge;
+  bridge = new Promise((resolve) => {
+    const server = bridgeServer = new GuacamoleLite(
+      { host: '127.0.0.1', port: 0, verifyClient },
+      { host: '127.0.0.1', port: GUACD_PORT }, // where a token goes unless it names another guacd (a shared folder's, below)
       { crypt: { cypher: 'AES-256-CBC', key }, log: { level: 'ERRORS' }, maxInactivityTime: 0 },
     );
     server.webSocketServer.on('listening', () => resolve(server.webSocketServer.address().port));
-  }));
-  return bridges.get(guacd);
+  });
+  return bridge;
+}
+
+// A token opens one websocket, within a minute of being made. The page holds every token it was
+// given, and a token decides what guacd is told (which server, which folder), so one that worked
+// twice would let the page open an agreed share again after you had taken it away.
+const TOKEN_LIFE = 60000;
+const tickets = new Map(); // a token's `once` -> when it stops being good
+function ticket() {
+  for (const [t, end] of tickets) if (end < Date.now()) tickets.delete(t);
+  const t = crypto.randomBytes(16).toString('hex');
+  tickets.set(t, Date.now() + TOKEN_LIFE);
+  return t;
+}
+// Asked by the websocket server before it accepts a connection, so a spent token never reaches guacamole-lite.
+function verifyClient(info) {
+  try {
+    const { token } = url.parse(info.req.url, true).query; // parsed the way guacamole-lite will parse it
+    if (typeof token !== 'string') return false;
+    const { once } = new Crypt('AES-256-CBC', key).decrypt(token);
+    const end = tickets.get(once);
+    tickets.delete(once);
+    return end > Date.now();
+  } catch {
+    return false;
+  }
 }
 
 // ---- shared folders -----------------------------------------------------------
@@ -64,7 +90,10 @@ function ensureBridge(guacd = GUACD_PORT) {
 // folder and nothing else of this computer. guacd follows symlinks and trusts whoever connects to it,
 // so the limits are set by the container, not by guacd:
 //  - only the shared folder is mounted, read-only unless the share is writable. A link inside it that
-//    points elsewhere leads nowhere, and sessions with different shares cannot reach each other's.
+//    points elsewhere on this computer leads nowhere. Each connection has its own container, so two
+//    servers never meet in one.
+//  - which container a session reaches is written inside its encrypted token (guacdPort), with the
+//    settings you agreed to. The page cannot pair one share's settings with another share's folder.
 //  - guacd runs as you (--user), so it can open only what you can, and what the remote side writes is yours.
 //  - guacd listens on the container's own loopback (-b 127.0.0.1) and no port is published. The plain
 //    guacd's port on localhost is harmless; this one would hand the folder to any program or user on
@@ -75,13 +104,14 @@ const DRIVE = '/drive'; // where the folder appears inside the container
 // folder in your folder, and a file the remote side moves into it is sent to the page instead of
 // being moved; the page takes no files, so the move would seem to work and do nothing.
 const NO_TRANSFER = { 'disable-download': 'true', 'disable-upload': 'true' };
-const shares = new Map(); // container name -> { starting: Promise of its relay's socket path }
+const shares = new Map(); // container name -> { starting: Promise of its relay's socket path, up: it has started }
 const me = () => `${process.getuid()}:${process.getgid()}`;
 
-// share: { path: an absolute folder on this computer, writable: boolean }. The caller has checked the folder.
-// The name says whose it is: your user number, then this launch (its process id), then the folder and mode.
+// share: what share.js's pin() found, for one connection:
+//   { path: the folder, writable: boolean, dev, ino: which folder that was on disk, id: the connection }
+// The name says whose it is: your user number, then this launch (its process id), then the connection, folder and mode.
 const shareName = (share) => `${NAME}-${process.getuid()}-${process.pid}-`
-  + crypto.createHash('sha256').update(`${share.path}\n${!!share.writable}`).digest('hex').slice(0, 12);
+  + crypto.createHash('sha256').update(JSON.stringify([share.id, share.path, share.writable === true])).digest('hex').slice(0, 12);
 
 function shareRunArgs(name, share) {
   // --mount takes comma-separated fields, so a path with a comma or quote could add fields of its own.
@@ -133,7 +163,7 @@ const sweep = () => (swept ||= (async () => {
 
 const shareRunning = (name) => docker(['inspect', '-f', '{{.State.Running}}', name]).then((out) => out === 'true', () => false);
 
-function ensureShare(share) {
+function startShare(share) {
   const name = shareName(share);
   const s = shares.get(name) || shares.set(name, {}).get(name);
   return (s.starting ||= (async () => {
@@ -143,11 +173,32 @@ function ensureShare(share) {
     await docker(args);
     for (let i = 0; i < 50; i++) {
       const up = await docker(['exec', name, 'nc', '-z', '127.0.0.1', String(GUACD_PORT)]).then(() => true, () => false);
-      if (up) return (s.sock ||= relay(name).catch((e) => { s.sock = null; throw e; }));
+      if (up) { s.up = true; return (s.sock ||= relay(name).catch((e) => { s.sock = null; throw e; })); }
       await new Promise((r) => setTimeout(r, 200));
     }
     throw new Error('guacd for the shared folder did not start');
   })().catch((e) => { s.starting = null; throw e; }));
+}
+
+// The socket that leads to this share's guacd, once its container is known to hold the right folder.
+// Docker mounts by path, and a path can be made to lead elsewhere between the moment the folder was
+// checked and the moment it is mounted (someone who can write to a folder above it swaps in a link).
+// So the folder is identified the way the kernel does, by device and inode number: what the container
+// has at /drive must be the very folder share.js looked at. Asked on every connect, as the folder at
+// that path may have been replaced since the container started.
+async function ensureShare(share) {
+  const name = shareName(share);
+  const s = shares.get(name);
+  // Only a container that had started can have died: one still starting is not "gone".
+  if (s?.up && !(await shareRunning(name))) Object.assign(s, { starting: null, up: false }); // Docker restarted, or it crashed
+  const sock = await startShare(share);
+  const mounted = await docker(['exec', name, 'stat', '-c', '%d:%i', DRIVE]).catch(() => '');
+  if (!share.dev || !share.ino || mounted !== `${share.dev}:${share.ino}`) {
+    Object.assign(shares.get(name), { starting: null, up: false });
+    await docker(['rm', '-f', name]).catch(() => {});
+    throw new Error(`${share.path} changed while it was being shared, so nothing was shared. Connect again.`);
+  }
+  return sock;
 }
 
 // guacamole-lite decrypts as ASCII, so escape non-ASCII (e.g. "pässword") to \uXXXX first.
@@ -209,21 +260,19 @@ function probeRdp(host, port, tlsOptions) {
 }
 
 // cert: required for RDP (the result of rdpFingerprint), ignored for VNC.
-// share: a folder to show the RDP server as a drive ({ path, writable }), already checked by the caller. VNC has no drives.
+// share: a folder to show the RDP server as a drive (see shareName), already checked and agreed to. VNC has no drives.
 async function openRemote(conn, password, cert, share) {
   if (conn.protocol !== 'rdp') share = null;
-  let port;
-  if (share) {
-    const s = shares.get(shareName(share));
-    if (s?.starting && !(await shareRunning(shareName(share)))) s.starting = null; // container died or Docker restarted: start again
-    port = await ensureBridge(await ensureShare(share));
-  } else {
+  conn = { ...conn }; // as it is now: a change made while Docker starts must not reach a session already agreed to
+  let guacdPort; // guacamole-lite reads this from the token and calls net.connect(guacdPort, host), which takes a socket path too
+  if (share) guacdPort = await ensureShare(share);
+  else {
     if (starting && !(await portOpen())) starting = null; // container died or Docker restarted: start again
     await ensureGuacd();
-    port = await ensureBridge();
   }
+  const port = await ensureBridge();
   const host = await resolveHost(conn.host);
-  const token = encryptToken({ connection: { type: conn.protocol, settings: remoteSettings({ ...conn, host }, password, cert, share) } });
+  const token = encryptToken({ once: ticket(), connection: { type: conn.protocol, settings: remoteSettings({ ...conn, host }, password, cert, share), ...(guacdPort && { guacdPort }) } });
   return `ws://127.0.0.1:${port}/?token=${encodeURIComponent(token)}`;
 }
 
@@ -262,10 +311,13 @@ function remoteSettings(conn, password, cert, share) {
 function stopGuacd() {
   const names = [...(startedHere ? [NAME] : []), ...shares.keys()];
   if (names.length) try { execFileSync('docker', ['stop', '-t', '1', ...names], { timeout: 10000, stdio: 'ignore' }); } catch {}
+  bridgeServer?.close();
+  bridge = bridgeServer = null;
   for (const r of relays.splice(0)) r.close();
   shares.clear();
+  tickets.clear();
   if (runDir) fs.rmSync(runDir, { recursive: true, force: true });
   runDir = null;
 }
 
-module.exports = { openRemote, remoteSettings, resolveHost, rdpFingerprint, stopGuacd, encryptToken, key, shareRunArgs, shareName, ensureShare };
+module.exports = { openRemote, remoteSettings, resolveHost, rdpFingerprint, stopGuacd, encryptToken, key, shareRunArgs, shareName, ensureShare, sweep, verifyClient, ticket };
