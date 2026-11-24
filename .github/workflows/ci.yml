@@ -79,3 +79,7 @@ jobs:
           sudo -u bp-rdp sh -c 'cat ~/.local/share/xrdp/xrdp-chansrv.*.log | grep -v "sound_process\|wFormat\|nChannels\|nSamples\|nAvgBytes\|nBlockAlign\|wBitsPerSample\|cbSize"' || true
           lsb_release -ds; xrdp --version | head -3; sed -n '/^\[Chansrv\]/,$p' /etc/xrdp/sesman.ini | grep -v '^;\|^$' | head -20
           ls -la /dev/fuse; command -v fusermount3 fusermount; dpkg -l | grep -i 'xrdp\|fuse' | awk '{print $2, $3}'
+          pid=$(pgrep -f xrdp-chansrv | head -n 1); echo "chansrv $pid"; sudo readlink /proc/1/ns/mnt "/proc/$pid/ns/mnt"
+          sudo grep -i 'fuse\|thinclient' "/proc/$pid/mountinfo" || echo "no fuse mount in the session"
+          sudo ls -la "/proc/$pid/root$(getent passwd bp-rdp | cut -d: -f6)/" || true
+          systemctl cat xrdp-sesman | grep -v '^#' | grep -i 'protect\|private\|namespace\|ReadWrite\|ExecStart' || true

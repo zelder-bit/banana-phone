@@ -23,7 +23,14 @@ const docker = (...args) => sh('docker', args);
 // A command as the account logged in over RDP: what a program on the remote computer could do.
 const remote = (cmd) => sh('sudo', ['-n', '-u', USER, 'sh', '-c', cmd]);
 // xrdp shows a redirected drive in the session's home under its 8-letter device name, which guacd sets to GUACFS.
-const DRIVE = `/home/${USER}/thinclient_drives/GUACFS`;
+// It is looked at through the session's own view of the disk (/proc/<its pid>/root): some systems give
+// every login its own mount table, and then the drive cannot be seen from outside the session.
+let DRIVE = '';
+const findDrive = () => {
+  const pid = remote('pgrep -u "$(id -u)" -f xrdp-chansrv | head -n 1').out;
+  DRIVE = `/proc/${/^\d+$/.test(pid) ? pid : 'self'}/root/home/${USER}/thinclient_drives/GUACFS`;
+  return remote(`ls ${DRIVE}`).ok;
+};
 
 async function until(what, check, ms = 60000) {
   for (const end = Date.now() + ms; Date.now() < end; await sleep(500)) if (await check()) return;
@@ -47,14 +54,14 @@ async function session(host, share, inside) {
   // The page's Guacamole client says "still here" every five seconds; guacd drops a client that is silent for fifteen.
   const alive = setInterval(() => { if (ws.readyState === WebSocket.OPEN) ws.send('3.nop;'); }, 5000);
   try {
-    await until('the shared drive to appear in the RDP session', () => { if (failed) throw new Error(`RDP session failed: ${failed}`); return remote(`ls ${DRIVE}`).ok; });
+    await until('the shared drive to appear in the RDP session', () => { if (failed) throw new Error(`RDP session failed: ${failed}`); return findDrive(); });
     failed = null;
     await inside();
     assert.strictEqual(failed, null, 'the session stayed up');
   } catch (e) {
     // A failure here is rarely explained by the assertion alone: add what guacd logged.
     e.message += `\n--- guacd, in ${guacd.shareName(share)}:\n${docker('logs', '--tail', '40', guacd.shareName(share)).out}`
-      + `\n--- the RDP session's drives:\n${remote('ls -la ~/thinclient_drives; grep -i fuse /proc/mounts; grep -i "fuse\\|drive\\|error" ~/.local/share/xrdp/xrdp-chansrv.*.log | tail -15').out}`;
+      + `\n--- the RDP session's drives:\n${remote(`ls -la ~/thinclient_drives ${path.dirname(DRIVE)}; grep -i fuse /proc/mounts`).out}`;
     throw e;
   } finally {
     clearInterval(alive);
