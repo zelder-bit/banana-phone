@@ -79,8 +79,10 @@ test('the drive is on only for an RDP connection that was given a share', () => 
   // The path guacd gets is the mount point in its container, never the folder's real path.
   assert.deepStrictEqual([s['enable-drive'], s['drive-path'], s['drive-name'], s['client-name']], ['true', '/drive', 'Shared', 'banana-phone']);
   assert.ok(!JSON.stringify(s).includes('/home/u'));
+  // Files move through the folder only: guacd's own transfer through the page is off, and with it the "Download" folder it would make.
+  assert.deepStrictEqual([s['disable-download'], s['disable-upload']], ['true', 'true']);
   for (const plain of [remoteSettings(rdp, 'pw', cert), remoteSettings({ protocol: 'vnc', host: 'k' }, 'pw', undefined, { path: '/x' })]) {
-    assert.ok(!Object.keys(plain).some((k) => /drive|client-name/.test(k)));
+    assert.ok(!Object.keys(plain).some((k) => /drive|client-name|disable-/.test(k)));
   }
 });
 

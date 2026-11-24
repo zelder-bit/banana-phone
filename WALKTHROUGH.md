@@ -1047,7 +1047,7 @@ function remoteSettings(conn, password, cert, share) {
       'resize-method': 'display-update',
     });
     if (conn.adminSession) settings.console = 'true'; // the server's console / admin session, like mstsc /admin
-    if (share) Object.assign(settings, { 'enable-drive': 'true', 'drive-path': DRIVE, 'drive-name': 'Shared', 'client-name': 'banana-phone' });
+    if (share) Object.assign(settings, { 'enable-drive': 'true', 'drive-path': DRIVE, 'drive-name': 'Shared', 'client-name': 'banana-phone', ...NO_TRANSFER });
   } else if (conn.username) settings.username = conn.username;
   return settings;
 }
@@ -1065,6 +1065,14 @@ The settings are built by their own function, `remoteSettings`, which only compu
 * `cert-fingerprints` pins the certificate checked above, as explained in the previous section.
 * `resize-method: display-update` lets the remote desktop change resolution live when you resize a pane or switch from one pane to a 2×2 grid.
 * With a `share`, `enable-drive` turns on RDP **drive redirection**: the server sees one more drive, backed by the folder `drive-path` on the machine guacd runs on. Windows lists it as "Shared on banana-phone" (`drive-name` on `client-name`) and as `\\tsclient\Shared`.
+
+* `...NO_TRANSFER` spreads in two more settings, explained next.
+
+```js
+const NO_TRANSFER = { 'disable-download': 'true', 'disable-upload': 'true' };
+```
+
+Guacamole has a second way to move files, made for its web client, where there is no folder to share: the files travel through the Guacamole connection itself. Uploads come from the page (drag a file onto the screen). Downloads use a trick: guacd creates a folder called `Download` in the drive, and a file the remote side moves into it is not moved at all but streamed to the page, while Windows is told the move worked. banana-phone shares a real folder, so it needs neither, and leaving them on would do harm: a `Download` folder would appear in your folder (seen in testing with a writable share), and anything moved into it from Windows would be sent to a page that takes no files, so the move would seem to work and nothing would arrive. With both off, guacd creates no `Download` folder and refuses file streams, and the mounted folder is the only way a file can cross. It also keeps the page out of it: the page never handles file contents or chooses where a file lands.
 
 ### Shared folders: a guacd of its own
 
@@ -2100,7 +2108,7 @@ The rules were tested by committing throwaway fakes (a random AWS-style key, a r
 
 Covered: multi-word search, that an empty password removes the saved one while a missing one keeps it, that Duplicate's `copyPasswordFrom` copies the encrypted password unless a new one is given, bulk update by username, by folder (including subfolders but not `Production` when asking for `Prod`), respecting unticked ids, backup and round-trip of the file, and (in `guacd.test.js`) that a token with a non-ASCII password decrypts correctly with guacamole-lite's own code, that `rdpFingerprint` returns the right fingerprint from a fake RDP server using a throwaway certificate made with `openssl`, and that it refuses a server offering only legacy RDP security, and that it fails quickly when the server hangs up or is not an RDP server at all.
 
-`guacd.test.js` also checks `remoteSettings`: the RDP settings pin the certificate, ask for the admin session only when it is ticked, and turn the drive on only for an RDP connection that was given a share. For shared folders it checks the `docker run` arguments (read-only unless `writable` is exactly `true`, your user, no published port, bad paths refused), and, with a stand-in `docker` program on the `PATH`, that `ensureShare` starts the container once, that its socket is private and carries bytes both ways through `docker exec`, and that `stopGuacd` stops the container and removes the socket.
+`guacd.test.js` also checks `remoteSettings`: the RDP settings pin the certificate, ask for the admin session only when it is ticked, and turn the drive on (and guacd's own file transfer off) only for an RDP connection that was given a share. For shared folders it checks the `docker run` arguments (read-only unless `writable` is exactly `true`, your user, no published port, bad paths refused), and, with a stand-in `docker` program on the `PATH`, that `ensureShare` starts the container once, that its socket is private and carries bytes both ways through `docker exec`, and that `stopGuacd` stops the container and removes the socket.
 
 ---
 
