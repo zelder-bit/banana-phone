@@ -70,6 +70,8 @@ jobs:
           echo "bp-rdp:$password" | sudo chpasswd
           echo "BP_RDP_PASSWORD=$password" >> "$GITHUB_ENV"
           sudo systemctl restart xrdp-sesman xrdp
+          # The service returns before the port is open.
+          timeout 30 bash -c 'until (echo > /dev/tcp/127.0.0.1/3389) 2>/dev/null; do sleep 1; done'
       - run: npm run test:share
         env:
           BP_RDP_USER: bp-rdp
