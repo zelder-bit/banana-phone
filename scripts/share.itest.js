@@ -110,7 +110,8 @@ test('a shared folder, end to end', { skip: !USER && 'set BP_RDP_USER and BP_RDP
       assert.deepStrictEqual(facts.Mounts.map((m) => [m.Source, m.Destination, m.RW]), [[folder, '/drive', false]]);
       assert.strictEqual(facts.Config.User, `${process.getuid()}:${process.getgid()}`);
       assert.deepStrictEqual(facts.HostConfig.CapDrop, ['ALL']);
-      assert.deepStrictEqual(facts.NetworkSettings.Ports || {}, {});
+      // The image declares port 4822 (EXPOSE), which shows up here with nothing bound to it; published would list an address.
+      assert.deepStrictEqual(Object.values(facts.NetworkSettings.Ports || {}).filter((bound) => bound && bound.length), []);
       assert.strictEqual(facts.HostConfig.PortBindings && Object.keys(facts.HostConfig.PortBindings).length || 0, 0);
       const ip = Object.values(facts.NetworkSettings.Networks)[0].IPAddress;
       const reached = await new Promise((resolve) => {
