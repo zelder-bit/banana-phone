@@ -7,7 +7,7 @@
 // The "share" job in .github/workflows/ci.yml sets all of that up. Run with `npm run test:share`.
 const test = require('node:test');
 const assert = require('node:assert');
-const { execFileSync } = require('child_process');
+const { spawnSync } = require('child_process');
 const fs = require('fs');
 const net = require('net');
 const os = require('os');
@@ -17,7 +17,8 @@ const guacd = require('../guacd');
 const USER = process.env.BP_RDP_USER;
 const PASSWORD = process.env.BP_RDP_PASSWORD;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const sh = (file, args) => { try { return { ok: true, out: execFileSync(file, args, { stdio: ['ignore', 'pipe', 'pipe'], timeout: 20000 }).toString().trim() }; } catch (e) { return { ok: false, out: String(e.stderr || e.message).trim() }; } };
+// ok: did it succeed; out: everything it printed (guacd, for one, logs to stderr).
+const sh = (file, args) => { const r = spawnSync(file, args, { encoding: 'utf8', timeout: 20000 }); return { ok: r.status === 0, out: `${r.stdout || ''}${r.stderr || ''}`.trim() }; };
 const docker = (...args) => sh('docker', args);
 // A command as the account logged in over RDP: what a program on the remote computer could do.
 const remote = (cmd) => sh('sudo', ['-n', '-u', USER, 'sh', '-c', cmd]);
@@ -43,6 +44,8 @@ async function session(host, share, inside) {
     if (err) failed = err[1];
   };
   ws.onclose = () => { failed ||= 'the connection closed'; };
+  // The page's Guacamole client says "still here" every five seconds; guacd drops a client that is silent for fifteen.
+  const alive = setInterval(() => { if (ws.readyState === WebSocket.OPEN) ws.send('3.nop;'); }, 5000);
   try {
     await until('the shared drive to appear in the RDP session', () => { if (failed) throw new Error(`RDP session failed: ${failed}`); return remote(`ls ${DRIVE}`).ok; });
     failed = null;
@@ -50,9 +53,11 @@ async function session(host, share, inside) {
     assert.strictEqual(failed, null, 'the session stayed up');
   } catch (e) {
     // A failure here is rarely explained by the assertion alone: add what guacd logged.
-    e.message += `\n--- guacd, in ${guacd.shareName(share)}:\n${docker('logs', '--tail', '40', guacd.shareName(share)).out}`;
+    e.message += `\n--- guacd, in ${guacd.shareName(share)}:\n${docker('logs', '--tail', '40', guacd.shareName(share)).out}`
+      + `\n--- the RDP session's drives:\n${remote('ls -la ~/thinclient_drives; grep -i fuse /proc/mounts; grep -i "fuse\\|drive\\|error" ~/.local/share/xrdp/xrdp-chansrv.*.log | tail -15').out}`;
     throw e;
   } finally {
+    clearInterval(alive);
     ws.onclose = null;
     ws.close();
     await until('the drive to go away after disconnecting', () => !remote(`ls ${DRIVE}`).ok, 30000).catch(() => {});
