@@ -76,4 +76,6 @@ jobs:
         run: |
           sudo journalctl -u xrdp -u xrdp-sesman --no-pager | tail -60
           sudo tail -40 /var/log/xrdp.log /var/log/xrdp-sesman.log || true
-          sudo -u bp-rdp sh -c 'tail -40 ~/.local/share/xrdp/*.log' || true
+          sudo -u bp-rdp sh -c 'cat ~/.local/share/xrdp/xrdp-chansrv.*.log | grep -v "sound_process\|wFormat\|nChannels\|nSamples\|nAvgBytes\|nBlockAlign\|wBitsPerSample\|cbSize"' || true
+          lsb_release -ds; xrdp --version | head -3; sed -n '/^\[Chansrv\]/,$p' /etc/xrdp/sesman.ini | grep -v '^;\|^$' | head -20
+          ls -la /dev/fuse; command -v fusermount3 fusermount; dpkg -l | grep -i 'xrdp\|fuse' | awk '{print $2, $3}'
