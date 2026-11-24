@@ -48,6 +48,10 @@ async function session(host, share, inside) {
     failed = null;
     await inside();
     assert.strictEqual(failed, null, 'the session stayed up');
+  } catch (e) {
+    // A failure here is rarely explained by the assertion alone: add what guacd logged.
+    e.message += `\n--- guacd, in ${guacd.shareName(share)}:\n${docker('logs', '--tail', '40', guacd.shareName(share)).out}`;
+    throw e;
   } finally {
     ws.onclose = null;
     ws.close();

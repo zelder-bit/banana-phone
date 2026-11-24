@@ -1161,10 +1161,10 @@ function ensureShare(share) {
 }
 ```
 
-* The container's name comes from `shareName`: `banana-phone-guacd-<your user number>-<12 hex digits>`, the digits being a SHA-256 hash of the folder and whether it is writable. The same folder shared the same way by two connections uses one container; read-only and writable never mix.
+* The container's name comes from `shareName`: `banana-phone-guacd-<your user number>-<this launch's process id>-<12 hex digits>`, the digits being a SHA-256 hash of the folder and whether it is writable. The same folder shared the same way by two connections uses one container; read-only and writable never mix.
 * The same `starting ||=` pattern as `ensureGuacd` makes four panes opened at once share one start-up.
 * `nc -z` only tests whether the port accepts connections. It is the same command the image's own health check runs.
-* `sweep` runs once per launch and removes containers with this user's prefix left over from a launch that crashed. Only one banana-phone runs per user (the single-instance lock in `main.js`), so anything found there belongs to nobody.
+* `sweep` runs once per launch and removes containers left over from a launch that crashed: ones with your user number whose process id is no longer running (`process.kill(pid, 0)` sends no signal, it only reports whether the process exists). A second banana-phone that is still running, with another profile for instance, keeps its containers.
 * `stopGuacd` stops every share's container on quit and deletes the socket folder. Unlike the ordinary guacd, nothing else can be using them.
 
 This was run for real with a local Docker and an xrdp server standing in for Windows (and guacd 1.3 in a stand-in image with the official image's entrypoint, since the 1.6.0 image itself could not be downloaded there). Read-only: files could be read, and creating, changing and deleting were refused. Writable: files made by the remote side belonged to the local user, mode 600. A symlink in the share pointing at a file elsewhere in the home folder could not be opened; one pointing at `/etc/passwd` showed the *container's* file. Another account on the machine could reach neither the socket nor the container's port. Without `HOME=/tmp` the connection failed.

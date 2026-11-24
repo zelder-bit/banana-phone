@@ -41,7 +41,7 @@ xrdp is not Windows. Before relying on the feature, connect to a real Windows ho
    - [ ] saving, renaming and deleting work in both directions, and a file made on this computer shows up in Explorer after a refresh
    - [ ] no `Download` folder appears in the folder
    - [ ] a file of a gigabyte or so copies both ways
-5. With a session open, in a terminal: `docker ps` shows `banana-phone-guacd-<uid>-…` with nothing under PORTS. Quit banana-phone: it is gone.
+5. With a session open, in a terminal: `docker ps` shows `banana-phone-guacd-<uid>-<pid>-…` with nothing under PORTS. Quit banana-phone: it is gone.
 6. If you use them: an NLA server, an admin session (`mstsc /admin`), and signing out of Windows with a file from the drive open.
 
 ## Not checked, and not expected to work without changes

@@ -106,17 +106,19 @@ test("a share's container sees only that folder, read-only by default, as you, w
   }
   assert.throws(() => shareRunArgs('n', undefined), /cannot be shared/);
   // One container per folder and mode, named for this user.
-  assert.match(shareName({ path: '/a' }), new RegExp(`^banana-phone-guacd-${process.getuid()}-[0-9a-f]{12}$`));
+  assert.match(shareName({ path: '/a' }), new RegExp(`^banana-phone-guacd-${process.getuid()}-${process.pid}-[0-9a-f]{12}$`));
   assert.strictEqual(shareName({ path: '/a' }), shareName({ path: '/a', writable: false }));
   assert.notStrictEqual(shareName({ path: '/a' }), shareName({ path: '/a', writable: true }));
   assert.notStrictEqual(shareName({ path: '/a' }), shareName({ path: '/b' }));
 });
 
-// A stand-in for the docker program: writes down what it was asked, and `exec -i` (the relay's way in) echoes.
-function fakeDocker(t) {
+// A stand-in for the docker program: writes down what it was asked, `exec -i` (the relay's way in) echoes,
+// and `ps` lists the container names in `existing`.
+function fakeDocker(t, existing = []) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bp-docker-'));
   const log = path.join(dir, 'log');
-  fs.writeFileSync(path.join(dir, 'docker'), `#!/bin/sh\necho "$*" >> "${log}"\n[ "$1 $2" = "exec -i" ] && exec cat\n[ "$1" = inspect ] && echo true\nexit 0\n`, { mode: 0o755 });
+  fs.writeFileSync(path.join(dir, 'docker'), `#!/bin/sh\necho "$*" >> "${log}"\n[ "$1 $2" = "exec -i" ] && exec cat\n[ "$1" = inspect ] && echo true\n[ "$1" = ps ] && cat "${dir}/ps"\nexit 0\n`, { mode: 0o755 });
+  fs.writeFileSync(path.join(dir, 'ps'), existing.map((n) => n + '\n').join(''));
   const before = { PATH: process.env.PATH, XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR };
   Object.assign(process.env, { PATH: `${dir}:${before.PATH}`, XDG_RUNTIME_DIR: dir });
   t.after(() => {
@@ -128,7 +130,12 @@ function fakeDocker(t) {
 }
 
 test('a share starts its container once, is reached through a private socket, and is stopped on quit', async (t) => {
-  const calls = fakeDocker(t);
+  // Containers already there: one left by a launch that has ended, one of a launch still running (this
+  // process stands in for it), one of another user, and one that only looks similar.
+  const uid = process.getuid();
+  const ended = require('child_process').spawnSync(process.execPath, ['-e', '']).pid;
+  const left = `banana-phone-guacd-${uid}-${ended}-aaaaaaaaaaaa`;
+  const calls = fakeDocker(t, [left, `banana-phone-guacd-${uid}-${process.pid}-bbbbbbbbbbbb`, `banana-phone-guacd-${uid + 1}-${ended}-cccccccccccc`, `banana-phone-guacd-${uid}-${ended}-not-ours`]);
   const { ensureShare, shareName, stopGuacd } = require('./guacd');
   const share = { path: fs.mkdtempSync(path.join(os.tmpdir(), 'bp-share-')) };
   const name = shareName(share);
@@ -137,7 +144,7 @@ test('a share starts its container once, is reached through a private socket, an
   const runs = calls().filter((c) => c.startsWith('run '));
   assert.strictEqual(runs.length, 1);
   assert.match(runs[0], new RegExp(`--name ${name} .*--mount type=bind,source=${share.path},target=/drive,readonly `));
-  assert.ok(calls().some((c) => c.startsWith('ps -a --filter name=banana-phone-guacd-'))); // leftovers of a crashed launch were looked for
+  assert.deepStrictEqual(calls().filter((c) => c.startsWith('rm -f ') && c !== `rm -f ${name}`), [`rm -f ${left}`]); // only the crashed launch's
   // Only this user may connect: the socket and the folder around it.
   assert.strictEqual(fs.statSync(sock).mode & 0o777, 0o600);
   assert.strictEqual(fs.statSync(path.dirname(sock)).mode & 0o777, 0o700);

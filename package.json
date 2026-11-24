@@ -12,7 +12,7 @@
     "dist": "electron-builder --linux AppImage --publish never",
     "check:walkthrough": "node scripts/check-walkthrough.js",
     "test:ui": "node --test scripts/ui.e2e.js",
-    "test:share": "node --test scripts/share.itest.js",
+    "test:share": "node --test --test-force-exit scripts/share.itest.js",
     "test:electron": "ELECTRON_RUN_AS_NODE=1 electron guacd.test.js"
   },
   "build": {

@@ -71,9 +71,9 @@ jobs:
       - run: npm run test:share
         env:
           BP_RDP_USER: bp-rdp
-      - name: What guacd and xrdp said, if it failed
+      - name: What xrdp said, if it failed
         if: failure()
         run: |
-          for c in $(docker ps -aq); do docker logs "$c" 2>&1 | tail -40; done
           sudo journalctl -u xrdp -u xrdp-sesman --no-pager | tail -60
+          sudo tail -40 /var/log/xrdp.log /var/log/xrdp-sesman.log || true
           sudo -u bp-rdp sh -c 'tail -40 ~/.local/share/xrdp/*.log' || true

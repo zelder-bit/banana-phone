@@ -79,7 +79,8 @@ const shares = new Map(); // container name -> { starting: Promise of its relay'
 const me = () => `${process.getuid()}:${process.getgid()}`;
 
 // share: { path: an absolute folder on this computer, writable: boolean }. The caller has checked the folder.
-const shareName = (share) => `${NAME}-${process.getuid()}-`
+// The name says whose it is: your user number, then this launch (its process id), then the folder and mode.
+const shareName = (share) => `${NAME}-${process.getuid()}-${process.pid}-`
   + crypto.createHash('sha256').update(`${share.path}\n${!!share.writable}`).digest('hex').slice(0, 12);
 
 function shareRunArgs(name, share) {
@@ -118,12 +119,15 @@ function relay(name) {
   });
 }
 
-// Containers of this kind still around when this launch first shares a folder were left by a launch
-// that crashed: only one banana-phone runs per user, and a normal quit stops them (stopGuacd).
+// A normal quit stops this launch's containers (stopGuacd). Ones whose launch is no longer running were
+// left by a crash: remove them the first time a folder is shared. A second banana-phone that is still
+// running (another profile, a test run) keeps its own.
 let swept;
 const sweep = () => (swept ||= (async () => {
-  const prefix = `${NAME}-${process.getuid()}-`;
-  const old = (await docker(['ps', '-a', '--filter', `name=${prefix}`, '--format', '{{.Names}}'])).split('\n').filter((n) => n.startsWith(prefix));
+  const ours = new RegExp(`^${NAME}-${process.getuid()}-(\\d+)-[0-9a-f]{12}$`);
+  const running = (pid) => { try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; } }; // signal 0 only asks
+  const old = (await docker(['ps', '-a', '--filter', `name=${NAME}-${process.getuid()}-`, '--format', '{{.Names}}']))
+    .split('\n').filter((n) => ours.test(n) && !running(Number(ours.exec(n)[1])));
   if (old.length) await docker(['rm', '-f', ...old]);
 })().catch(() => {}));
 
