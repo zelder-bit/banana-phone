@@ -120,6 +120,7 @@ test('a shared folder, end to end', { skip: !USER && 'set BP_RDP_USER and BP_RDP
       assert.deepStrictEqual(facts.Mounts.map((m) => [m.Source, m.Destination, m.RW]), [[folder, '/drive', false]]);
       assert.strictEqual(facts.Config.User, `${process.getuid()}:${process.getgid()}`);
       assert.deepStrictEqual(facts.HostConfig.CapDrop, ['ALL']);
+      assert.strictEqual(facts.HostConfig.ReadonlyRootfs, true, 'guacd can write to the folder and its own /tmp, nowhere else');
       // The image declares port 4822 (EXPOSE), which shows up here with nothing bound to it; published would list an address.
       assert.deepStrictEqual(Object.values(facts.NetworkSettings.Ports || {}).filter((bound) => bound && bound.length), []);
       assert.strictEqual(facts.HostConfig.PortBindings && Object.keys(facts.HostConfig.PortBindings).length || 0, 0);
@@ -151,6 +152,33 @@ test('a shared folder, end to end', { skip: !USER && 'set BP_RDP_USER and BP_RDP
     } finally {
       fs.unlinkSync(folder);
       fs.renameSync(aside, folder);
+    }
+  });
+
+  await t.test('read-only goes all the way down: a drive mounted inside the folder cannot be changed either', async () => {
+    // The way a USB stick sits under /run/media/<you>: a mount of its own, inside the folder that is shared.
+    // Docker brings such mounts along, and before Engine 25 left them writable in a read-only share.
+    const outer = path.join(base, 'with-drive');
+    const stick = path.join(outer, 'stick');
+    fs.mkdirSync(stick, { recursive: true });
+    assert.ok(sh('sudo', ['-n', 'mount', '-t', 'tmpfs', '-o', 'mode=777', 'none', stick]).ok, 'a drive is mounted inside the folder');
+    try {
+      fs.writeFileSync(path.join(stick, 'on-the-stick.txt'), 'kept');
+      const share = { ...pin(outer, { home: os.homedir() }), writable: false, id: 'conn-drive' };
+      await guacd.ensureShare(share);
+      // Asked of the container itself, as guacd's user: the limit is the kernel's, whatever guacd is told to do.
+      const inside = (cmd) => docker('exec', guacd.shareName(share), 'sh', '-c', cmd);
+      assert.strictEqual(inside('cat /drive/stick/on-the-stick.txt').out, 'kept');
+      for (const cmd of ['echo x > /drive/stick/planted', 'echo x >> /drive/stick/on-the-stick.txt', 'rm /drive/stick/on-the-stick.txt', 'echo x > /drive/planted']) {
+        assert.ok(!inside(cmd).ok, `refused: ${cmd}`);
+      }
+      assert.deepStrictEqual(fs.readdirSync(stick), ['on-the-stick.txt']);
+      assert.strictEqual(fs.readFileSync(path.join(stick, 'on-the-stick.txt'), 'utf8'), 'kept');
+      // And guacd has nowhere of its own to write but the /tmp that is its home.
+      assert.ok(!inside('echo x > /opt/planted').ok, "the container's own files are read-only");
+      assert.ok(inside('echo x > /tmp/scratch').ok, 'its /tmp is writable');
+    } finally {
+      sh('sudo', ['-n', 'umount', stick]);
     }
   });
 

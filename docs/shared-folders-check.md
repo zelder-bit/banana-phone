@@ -15,7 +15,9 @@ RDP shared folders ([README](../README.md#features), [walkthrough §8](../WALKTH
 | A link in the folder to `/etc/hostname` | shows the container's, not this computer's | |
 | The remote side making a symlink | | refused |
 | A "Download" folder appearing in the shared folder | no | no |
+| A drive mounted inside the folder (as a USB stick is under `/run/media`) | can be read, cannot be changed | |
 | The container: one mount, your user, no capabilities, no published port | yes | |
+| The container's own files | read-only; only its `/tmp` can be written | |
 | guacd reachable on the container's address | no | |
 | Another account reaching the socket | no | |
 | Using a session's token a second time | refused | |
@@ -27,6 +29,14 @@ To run it yourself you need Docker, an xrdp server on port 3389 with an account 
 The same checks were first run on a hand-built rig (Ubuntu 24.04, Docker 29, xrdp 0.9.24, and guacd 1.3 in a stand-in image with the official image's entrypoint). Two things were learned there and are now in the code: guacd needs a writable `HOME` when it does not run as the image's own user (without `-e HOME=/tmp` the connection fails with "Security negotiation failed"), and with guacd's own file transfer left on, a `Download` folder appears in a writable share.
 
 A separate security review of the whole feature found, among smaller things, that a token for one share could be used on another share's bridge, that another account able to write above the shared folder could redirect the mount, and that an old agreement could come back after a change was undone. All three are fixed and tested; walkthrough §8 and §12 describe the result.
+
+A second review, of the pull requests themselves, added these:
+
+- **Read-only at every level.** Docker mounts a folder together with whatever is mounted inside it, and before Engine 25 (or Linux 5.12) left those inner mounts writable in a read-only share. Read-only is now asked for all the way down, and a read-only share is refused on an older Engine. Checked against a real Docker: a file could be written to a drive mounted inside a "read-only" share the old way, and not the new way.
+- **A home folder under another name.** The folder rules compared paths only. A home folder mounted in a second place is now recognised by which folder it is on disk, and a folder that holds `.ssh`, `.gnupg` or the like is refused as a copy of one (a snapshot, a backup).
+- **The question says more.** It names the server with its port when that is not 3389, says when the server's certificate was first seen on this very connect and shows it, says when a writable share holds a git repository or programs, and writes out invisible and direction-changing characters in the folder's path.
+- **Agreements are signed.** They were a plain hash of things written in the app's own files; they are now signed with a key kept behind the system keyring.
+- **The container is tighter**: its own files read-only, `/tmp` in memory, a limit on processes. It also runs in the groups you are in, so a folder you reach through a group is not empty on the remote side.
 
 `npm run test:ui` covers the edit dialog (the box is there for RDP only, the home folder is refused, read-only unless ticked, the page cannot write an agreement), and `npm test` covers the folder rules, the agreement, the `docker run` arguments and the relay.
 
@@ -53,7 +63,14 @@ xrdp is not Windows. Before relying on the feature, connect to a real Windows ho
 - The page (the app's own window) can ask guacd for the names of the files in a folder you shared, though not their contents.
 - An ordinary folder that holds secrets is not recognised: only the home folder itself, hidden folders, `~/snap`, system folders and the app's own folder are refused.
 - A share's container runs until banana-phone quits. It cannot be reached in between without a new session being opened and checked.
-- Shared team folders work, but think about who else can write there: what a share shows is whatever is in the folder at the time.
+- Shared team folders work, but think about who else can write there: what a share shows is whatever is in the folder at the time. Files the remote side creates are readable by you alone (mode 600), so teammates will not see them until you change that.
+- A read-only share needs Docker Engine 25 or newer and Linux 5.12 or newer. On anything older it does not start, and the message says why.
+- A drive plugged in, or anything else mounted inside the shared folder, *after* the first session to a server does not show up until banana-phone is restarted: the container keeps the mounts it started with.
+- Windows is not told when a file changes on this computer. Press F5 in Explorer to see it.
+- Writing to a read-only share fails on the remote side with an unhelpful message (guacd reports it as an invalid parameter), not with "access denied".
+- Many organisations set their Windows servers to refuse redirected drives (the CIS and DISA baselines both say to). The session then opens without the drive, and nothing on this side can tell.
+- The page can find out whether a folder exists by trying to save it as a share, since saving has to say whether it worked. It learns nothing of what is in it.
+- The guacd image is named by its tag (`guacamole/guacd:1.6.0`), not by a digest, so it is whatever Docker Hub serves under that name. Pinning the digest needs a machine that can ask Docker Hub for it: `docker buildx imagetools inspect guacamole/guacd:1.6.0`.
 
 ## Not checked, and not expected to work without changes
 

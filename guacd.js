@@ -89,12 +89,14 @@ function verifyClient(info) {
 // A connection that shares a folder gets a guacd of its own, in a container that can see that one
 // folder and nothing else of this computer. guacd follows symlinks and trusts whoever connects to it,
 // so the limits are set by the container, not by guacd:
-//  - only the shared folder is mounted, read-only unless the share is writable. A link inside it that
-//    points elsewhere on this computer leads nowhere. Each connection has its own container, so two
-//    servers never meet in one.
+//  - only the shared folder is mounted, read-only unless the share is writable, and read-only all the
+//    way down: a drive mounted inside the folder is read-only too (READ_ONLY, below). A link inside it
+//    that points elsewhere on this computer leads nowhere. Each connection has its own container, so
+//    two servers never meet in one.
 //  - which container a session reaches is written inside its encrypted token (guacdPort), with the
 //    settings you agreed to. The page cannot pair one share's settings with another share's folder.
-//  - guacd runs as you (--user), so it can open only what you can, and what the remote side writes is yours.
+//  - guacd runs as you (--user, with the groups you are in), so it can open only what you can, and what
+//    the remote side writes is yours. It can write nowhere but the folder and a /tmp kept in memory.
 //  - guacd listens on the container's own loopback (-b 127.0.0.1) and no port is published. The plain
 //    guacd's port on localhost is harmless; this one would hand the folder to any program or user on
 //    this computer that connected to it. The only way in is `docker exec`, through relay() below.
@@ -106,6 +108,24 @@ const DRIVE = '/drive'; // where the folder appears inside the container
 const NO_TRANSFER = { 'disable-download': 'true', 'disable-upload': 'true' };
 const shares = new Map(); // container name -> { starting: Promise of its relay's socket path, up: it has started }
 const me = () => `${process.getuid()}:${process.getgid()}`;
+// The other groups you are in. --user alone leaves them out, and a folder you reach through one of
+// them (a team's folder) would then look empty from the remote side.
+const myGroups = () => process.getgroups().filter((g) => g !== process.getgid()).flatMap((g) => ['--group-add', String(g)]);
+
+// Docker mounts a folder together with whatever is mounted inside it: a USB drive, a network share.
+// On its own, `readonly` reaches those inner mounts only on Docker Engine 25 and later with Linux
+// 5.12 and later; before that they stay writable, without a word. bind-recursive=readonly asks for
+// read-only all the way down and makes Docker refuse to start the container where it cannot be had
+// (it must be said together with bind-propagation=rprivate, Docker's default).
+const READ_ONLY = ',readonly,bind-recursive=readonly,bind-propagation=rprivate';
+// An Engine older than 25 does not know that option. Asked first, so the refusal says what to do.
+const READ_ONLY_SINCE = 25;
+async function readOnlyOrRefuse() {
+  const version = await docker(['version', '--format', '{{.Server.Version}}']); // asked each time: a share's container starts rarely, and Docker can be updated meanwhile
+  if (!(parseInt(version, 10) >= READ_ONLY_SINCE)) {
+    throw new Error(`A read-only shared folder needs Docker Engine ${READ_ONLY_SINCE} or newer, and this is ${version || 'not known'}. Older ones leave a drive mounted inside the folder open to changes. Update Docker, then connect again.`);
+  }
+}
 
 // share: what share.js's pin() found, for one connection:
 //   { path: the folder, writable: boolean, dev, ino: which folder that was on disk, id: the connection, server: its host and port }
@@ -120,10 +140,14 @@ function shareRunArgs(name, share) {
     throw new Error('This folder cannot be shared: its path must be absolute, without commas, quotes or control characters');
   }
   return ['run', '-d', '--rm', '--name', name,
-    '--user', me(), '-e', 'HOME=/tmp', // FreeRDP wants a home it can write to; yours does not exist in there
+    '--user', me(), ...myGroups(), '-e', 'HOME=/tmp', // FreeRDP wants a home it can write to; yours does not exist in there
     '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges',
+    // guacd reads whatever the server sends. Should that ever turn it against you, it finds nothing to
+    // change but the folder: its own files are read-only, /tmp is memory that is yours alone (said outright:
+    // left to itself Docker gives it the owner the image's /tmp has), and it cannot multiply without end.
+    '--read-only', '--tmpfs', `/tmp:uid=${process.getuid()},gid=${process.getgid()},mode=700`, '--pids-limit', '512',
     // Unlike -v, --mount fails if the folder is missing instead of creating it as root.
-    '--mount', `type=bind,source=${share.path},target=${DRIVE}${share.writable === true ? '' : ',readonly'}`,
+    '--mount', `type=bind,source=${share.path},target=${DRIVE}${share.writable === true ? '' : READ_ONLY}`,
     IMAGE, '-b', '127.0.0.1']; // the image's entrypoint passes extra arguments to guacd; the last -b wins
 }
 
@@ -169,6 +193,7 @@ function startShare(share) {
   const s = shares.get(name) || shares.set(name, {}).get(name);
   return (s.starting ||= (async () => {
     const args = shareRunArgs(name, share); // refuses a bad path before anything is started
+    if (share.writable !== true) await readOnlyOrRefuse();
     await sweep();
     await docker(['rm', '-f', name]).catch(() => {});
     await docker(args);
