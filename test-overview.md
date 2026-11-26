@@ -76,6 +76,7 @@ All steps use local terminals only. No SSH, RDP or VNC session is opened. The SS
 | stacked gutter drag makes the first pane taller | In stacked layout, dragging the divider makes the first pane taller by about the distance dragged. |
 | Tab all, then Split all | "Tab all" gives each session its own tab, and "Split all" gathers them back into one tab. |
 | Full screen current fills the window, Back to tab restores the split | The Full screen button pins the selected pane over the whole window and shows the banana; hovering the banana and clicking "Back to tab" puts the four-pane split back with all terminals still there. |
+| full screen repeats the header's shared-folder label under the banana | A pane whose header carries the "shared folder" label shows the same words and tooltip next to the buttons under the banana in full screen, and a pane without the label shows none. The label is placed on a terminal's header by the test, since no RDP server is available. |
 | the pane button pops a session into its own tab | The "Own tab" button on a pane header moves that session into a new tab. |
 | edit dialog: Esc cancels, Enter saves, Esc after a save still cancels | In the New connection dialog, Esc saves nothing, Enter saves, a quick save then reopen neither loses nor repeats the save, and Esc after that still saves nothing. |
 | folder prompt: Esc cancels, Enter creates the folder | In the New folder prompt, Esc creates nothing, and Enter creates the folder and shows it in the sidebar. |
@@ -184,7 +185,7 @@ It says nothing about whether the code works.
 - Leaving full screen when the session ends or the pane closes: not tested at all.
 - Leaving full screen when the window manager takes the window out of full screen: not tested at all.
 - Leaving full screen when you switch to another tab: not tested at all.
-- A remote-desktop pane in full screen: not tested at all. This includes its Ctrl+Alt+Del button; the test only checks that a terminal does not get one.
+- A remote-desktop pane in full screen: not tested at all. This includes its Ctrl+Alt+Del button; the test only checks that a terminal does not get one. The shared-folder label under the banana is tested only with a label the test puts on a terminal's header, not with a real shared session, and not for a pane that goes full screen while still connecting.
 - Send Ctrl+Alt+Del in a remote desktop's pane menu, the keys it sends, and that Windows shows its security screen: not tested at all (the pane-menu step only checks that a terminal's menu does not offer it).
 - That the real window goes full screen (not just the pane covering the page): not tested at all.
 
