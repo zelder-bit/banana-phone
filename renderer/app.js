@@ -2,7 +2,7 @@ import { Terminal } from '../node_modules/@xterm/xterm/lib/xterm.mjs';
 import { FitAddon } from '../node_modules/@xterm/addon-fit/lib/addon-fit.mjs';
 import Guacamole from '../node_modules/guacamole-common-js/dist/esm/guacamole-common.js';
 import { shareClipboard, clean } from './clipboard.js';
-import { FRUITS, ICONS, inFolder, parentOf, matches, sharingText } from './shared.mjs';
+import { FRUITS, ICONS, inFolder, parentOf, matches, sharingText, account } from './shared.mjs';
 
 const $ = (s) => document.querySelector(s);
 const el = (tag, props = {}, ...kids) => {
@@ -297,7 +297,14 @@ function editConn(c = { protocol: 'ssh' }) {
   $('#edit-title').textContent = c.id ? 'Edit connection' : 'New connection';
   for (const k of ['name', 'protocol', 'folder', 'host', 'port', 'username', 'domain', 'keyPath']) form.elements[k].value = c[k] ?? '';
   form.elements.tags.value = (c.tags || []).join(', ');
-  form.elements.password.placeholder = c.hasPassword ? (c.copyPasswordFrom ? '•••••• (copied)' : '•••••• (unchanged)') : '';
+  // Main keeps (or copies) a saved password only for the server and account it was saved for: say so while typing.
+  const pwHint = () => {
+    const f = form.elements;
+    const same = account(c) === account({ protocol: f.protocol.value, host: f.host.value.trim(), port: Number(f.port.value), username: f.username.value.trim() });
+    f.password.placeholder = !c.hasPassword ? '' : !same ? 'Enter it again: the server or account changed' : c.copyPasswordFrom ? '•••••• (copied)' : '•••••• (unchanged)';
+  };
+  pwHint();
+  form.oninput = pwHint;
   $('#clear-pw').hidden = !c.hasPassword;
   form.elements.password.disabled = false;
   form.elements.clearPassword.onchange = (e) => { form.elements.password.disabled = e.target.checked; };
@@ -333,10 +340,10 @@ function editConn(c = { protocol: 'ssh' }) {
       host: f.host.value.trim(), port: f.port.value ? Number(f.port.value) : undefined, username: f.username.value.trim(),
       domain: f.domain.value.trim(), keyPath: f.keyPath.value.trim(),
       tags: f.tags.value.split(',').map((t) => t.trim()).filter(Boolean),
-      copyPasswordFrom: c.copyPasswordFrom, // main copies the encrypted password unless a new one is given
+      copyPasswordFrom: c.copyPasswordFrom, // main copies the encrypted password unless a new one is given or the server or account differs
     };
     if (f.clearPassword.checked) conn.password = ''; // '' = remove the saved one
-    else if (f.password.value) conn.password = f.password.value; // empty = keep existing
+    else if (f.password.value) conn.password = f.password.value; // empty = keep existing (main drops it if the server or account changed)
     if (!conn.id) delete conn.id;
     if (conn.folder) { openFolders.add(conn.folder); saveOpen(); }
     conn.adminSession = conn.protocol === 'rdp' && f.adminSession.checked;

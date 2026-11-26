@@ -521,6 +521,45 @@ test('tabs, splits, gutter and dialogs', { timeout: 120000 }, async (t) => {
     assert.ok(!('shares' in onDisk()));
   });
 
+  await t.test('saved password: kept on an edit, asked for again when the server changes, copied by Duplicate only to the same server', async () => {
+    const menuOf = (item) => app.eval(`(() => { [...document.querySelectorAll('#tree .conn')].find((n) => n.textContent.startsWith('pwbox')).dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 50, clientY: 50 }));
+      [...document.querySelectorAll('#menu button')].find((b) => b.textContent === '${item}').click(); })()`);
+    const hint = 'document.querySelector("#edit-form").elements.password.placeholder';
+    const setHost = (h) => app.eval(`(() => { const i = document.querySelector('#edit-form').elements.host; i.value = '${h}'; i.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+    const has = (name) => `(async () => (await window.bp.get()).connections.find((c) => c.name === '${name}')?.hasPassword)()`;
+    const submit = async () => { await app.eval('document.querySelector("#edit-form").requestSubmit()'); await app.waitFor('!document.querySelector("#edit-dlg").open'); };
+    // CI has no keyring, so safeStorage cannot encrypt there: a stand-in that only marks the text is enough to test what is kept.
+    await app.main(`Object.assign(require('electron').safeStorage, { encryptString: (t) => Buffer.from('x' + t), decryptString: (b) => b.toString().slice(1) })`);
+    await app.click('#new-conn');
+    await app.waitFor('document.querySelector("#edit-dlg").open');
+    await app.eval(`(() => { const f = document.querySelector('#edit-form').elements; f.name.value = 'pwbox'; f.host.value = 'one.test'; f.username.value = 'u'; f.password.value = 'not-a-real-one'; })()`);
+    await submit();
+    await app.waitFor(`(async () => (await ${has('pwbox')}) === true)()`);
+
+    await menuOf('Duplicate');
+    await app.waitFor('document.querySelector("#edit-dlg").open');
+    assert.match(await app.eval(hint), /copied/);
+    await setHost('two.test');
+    assert.match(await app.eval(hint), /Enter it again/);
+    await submit();
+    await app.waitFor(`(async () => (await ${has('pwbox copy')}) === false)()`); // another server: not copied
+
+    await menuOf('Edit…');
+    await app.waitFor('document.querySelector("#edit-dlg").open');
+    assert.match(await app.eval(hint), /unchanged/);
+    await submit();
+    assert.strictEqual(await app.eval(has('pwbox')), true); // nothing about the server changed: kept
+    await menuOf('Edit…');
+    await app.waitFor('document.querySelector("#edit-dlg").open');
+    await setHost('three.test');
+    assert.match(await app.eval(hint), /Enter it again/);
+    await submit();
+    await app.waitFor(`(async () => (await ${has('pwbox')}) === false)()`);
+    // Tidy up: the next step drags the sidebar's grip, and a row at the height it grabs would be dragged instead.
+    await app.eval('window.confirm = () => true');
+    for (const left of [1, 0]) { await menuOf('Delete'); await app.waitFor(`[...document.querySelectorAll('#tree .conn')].filter((n) => n.textContent.startsWith('pwbox')).length === ${left}`); }
+  });
+
   await t.test('the sidebar grip widens the list, collapse still hides it, and the width survives a reload', async () => {
     const sideW = 'document.querySelector("#side").getBoundingClientRect().width';
     const before = await app.eval(sideW);

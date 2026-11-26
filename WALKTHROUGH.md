@@ -118,7 +118,7 @@ electron .  ──▶ main.js ──require──▶ store.js ──require─�
                                                         clipboard.js, shared.mjs
 ```
 
-`shared.mjs` is the one file both sides load. It holds small pure helpers, `FRUITS` (the fruit pictures), `ICONS` (what a folder icon may be: `crate` plus `FRUITS`), `inFolder` and `parentOf` (the folder-path rules), `matches` (the search rule) and `sharingText` (what the page says when a session shares a folder, [§8](#shared-folders-which-folders-and-who-agrees)), so there is one copy of each instead of one in the store and another in the page that could quietly drift apart. The page imports it as an ES module; `store.js` loads it with plain `require()`, which recent Node and Electron allow for an ES module with no top-level `await`.
+`shared.mjs` is the one file both sides load. It holds small pure helpers, `FRUITS` (the fruit pictures), `ICONS` (what a folder icon may be: `crate` plus `FRUITS`), `inFolder` and `parentOf` (the folder-path rules), `account` (which server and account a saved password is for), `matches` (the search rule) and `sharingText` (what the page says when a session shares a folder, [§8](#shared-folders-which-folders-and-who-agrees)), so there is one copy of each instead of one in the store and another in the page that could quietly drift apart. The page imports it as an ES module; `store.js` loads it with plain `require()`, which recent Node and Electron allow for an ES module with no top-level `await`.
 
 ---
 
@@ -381,12 +381,16 @@ function upsert(data, input) {
   }
   if (copyPasswordFrom && !conn.id && conn.password === undefined) { // new connections only
     const src = data.connections.find((c) => c.id === copyPasswordFrom);
-    if (src?.password) conn.password = src.password; // copied still encrypted: never decrypted on the way
+    // Copied still encrypted, never decrypted on the way, and only to the server and account it was saved for.
+    if (src?.password && account(src) === account(conn)) conn.password = src.password;
   }
   if (!conn.id) conn.id = crypto.randomUUID();
   const i = data.connections.findIndex((c) => c.id === conn.id);
-  if (i >= 0) data.connections[i] = { ...data.connections[i], ...conn };
+  const old = i >= 0 ? data.connections[i] : undefined;
+  if (old) data.connections[i] = { ...old, ...conn };
   else data.connections.push(conn);
+  const saved = data.connections[old ? i : data.connections.length - 1];
+  if (old && conn.password === undefined && account(saved) !== account(old)) delete saved.password;
   fillFolders(data);
   return conn;
 }
@@ -397,6 +401,16 @@ function upsert(data, input) {
 The `commands` block cleans up a terminal connection's **saved commands** (a list of `{ name, cmd, onStart }`). The page is our own code, but it is still the other side of the IPC bridge, so the store does not take its word: anything that is not a list becomes an empty list, entries without a text name and command are dropped, and `onStart` is only true when it is exactly `true`. If the page does not send `commands` at all (an RDP edit, a drag into another folder), the merge below leaves the saved ones alone.
 
 The `copyPasswordFrom` lines handle **Duplicate**. The page never sees passwords, so it cannot copy one into the duplicate. It sends `copyPasswordFrom: <id of the original>` instead, and `upsert` copies the original's stored value, which is still encrypted. The same keyring key encrypted it, so the copy decrypts just like the original. The rest pattern `{ copyPasswordFrom, ...conn }` keeps the helper field out of the saved file. `src?.password` is **optional chaining**: if no connection has that id, `src` is `undefined` and the expression gives `undefined` instead of throwing. A password typed in the dialog (or `''` from "Remove the saved password") always wins, because the copy only happens while `conn.password` is still `undefined`, and only for a new connection (no `id` yet), so an existing connection can never have its password swapped this way.
+
+**A saved password stays with its server and account.** The page never sees a password, but it saves connections freely, and whatever is saved is what the next connect dials. If a page that had been taken over could point a saved connection at a server of its own, or duplicate it there, the next connect would hand that server the password. So the store ties a password to what `account` in `shared.mjs` lists:
+
+```js
+export const account = (c) => JSON.stringify([c.protocol, c.host, c.port || null, c.username || '']);
+```
+
+Two lines of `upsert` use it. Duplicate copies the password only when the copy names the same type, host, port and username as the original (`account(src) === account(conn)`). And a save that changes any of the four on an existing connection without bringing a password (`conn.password === undefined`) deletes the saved one. A password that comes with the save is kept: the user typed it for the new server. Changing the host back does not bring the old password back, because it is gone from the file. Anything else (name, folder, tags, domain, commands) leaves it alone. The line right after it in `upsert` applies the same idea to a shared folder's agreement, with `agreedTo` instead of `account` ([§8](#shared-folders-which-folders-and-who-agrees)); both compare the same `old` and `saved`. An empty port and the type's usual port written out (22 for SSH) count as different, so writing the port out asks for the password again; that errs on the safe side. Bulk edit can still change the username of many connections and keep their passwords: it never changes where they connect to.
+
+The edit dialog says what will happen. Its password box shows `(unchanged)` or `(copied)` while the four fields are as saved, and "Enter it again: the server or account changed" as soon as one differs. That is a courtesy from the page, which uses the same `account` helper; the rule itself is the store's, in the main process, where a page that misbehaves cannot skip it.
 
 ---
 
@@ -486,7 +500,7 @@ The handlers themselves are then one line each:
 
 ```js
 change('store:save', ({ password, shareOk, ...conn }) => {
-  if (password !== undefined) conn.password = enc(password); // undefined = keep existing
+  if (password !== undefined) conn.password = enc(password); // undefined = keep existing, while it is for the same server and account
   const list = Array.isArray(conn.shares) ? conn.shares : [];
   if (list.some((s) => !mayShare(s?.path))) throw new Error('Not saved: choose the shared folder with the Choose… button.');
   if (list.length) share.together(list);
@@ -503,13 +517,13 @@ change('store:move', (kind, id, to, before) => (kind === 'conn' ? store.moveConn
 
 `shareOk` is taken out of what the page sent and thrown away, and a list of shared folders is saved only if you chose every folder in it in the system's folder dialog (or it is already saved); both are explained in [§8](#shared-folders-which-folders-and-who-agrees).
 
-When you edit a connection and leave the password field empty, the page does not send `password` at all, so `upsert`'s merge keeps the old encrypted one. `store:save`'s function has a body in braces and no `return`, so its `result` is `undefined`: `upsert` returns the saved connection, encrypted password included, and that must not travel back to the page. `(kind === 'conn' ? store.moveConn : store.moveFolder)(…)` picks one of two functions with the ternary operator and calls it straight away.
+When you edit a connection and leave the password field empty, the page does not send `password` at all, so `upsert`'s merge keeps the old encrypted one, unless the host, port, type or username changed ([§5](#5-storejs-saving-connections-and-bulk-edits): a saved password stays with its server and account). `store:save`'s function has a body in braces and no `return`, so its `result` is `undefined`: `upsert` returns the saved connection, encrypted password included, and that must not travel back to the page. `(kind === 'conn' ? store.moveConn : store.moveFolder)(…)` picks one of two functions with the ternary operator and calls it straight away.
 
 Removing a saved password needs a third state besides "new password" and "keep it". The edit dialog shows a **Remove the saved password** checkbox when the connection has one, and the page then sends an empty string:
 
 ```js
     if (f.clearPassword.checked) conn.password = ''; // '' = remove the saved one
-    else if (f.password.value) conn.password = f.password.value; // empty = keep existing
+    else if (f.password.value) conn.password = f.password.value; // empty = keep existing (main drops it if the server or account changed)
 ```
 
 `''` is not `undefined`, so main does write it, and `enc('')` returns `''` without touching the keyring. JavaScript treats `''` as **falsy**, so `hasPassword: !!password` becomes `false` and the SSH and RDP code see "no password". This matters when a server moves from password login to a key or ssh-agent: an old password would otherwise still be offered.
@@ -1977,7 +1991,7 @@ import { Terminal } from '../node_modules/@xterm/xterm/lib/xterm.mjs';
 import { FitAddon } from '../node_modules/@xterm/addon-fit/lib/addon-fit.mjs';
 import Guacamole from '../node_modules/guacamole-common-js/dist/esm/guacamole-common.js';
 import { shareClipboard, clean } from './clipboard.js';
-import { FRUITS, ICONS, inFolder, parentOf, matches, sharingText } from './shared.mjs';
+import { FRUITS, ICONS, inFolder, parentOf, matches, sharingText, account } from './shared.mjs';
 
 const $ = (s) => document.querySelector(s);
 const el = (tag, props = {}, ...kids) => {
@@ -2766,7 +2780,7 @@ keywords = ["/home/", "/users/"]
 
 The rules were tested by committing throwaway fakes (a random AWS-style key, a random GitHub-style token, a freshly generated private key, an email address and a `/home/<name>/` path) to a scratch copy: each was reported and the push was blocked, while the allowed addresses and paths passed. For a genuine false positive, `git push --no-verify` skips the hook, and the pattern belongs in an allowlist.
 
-Covered: multi-word search, that an empty password removes the saved one while a missing one keeps it, that Duplicate's `copyPasswordFrom` copies the encrypted password unless a new one is given, bulk update by username, by folder (including subfolders but not `Production` when asking for `Prod`), respecting unticked ids, backup and round-trip of the file, and (in `guacd.test.js`) that a token with a non-ASCII password decrypts correctly with guacamole-lite's own code, that `rdpFingerprint` returns the right fingerprint from a fake RDP server using a throwaway certificate made with `openssl`, and that it refuses a server offering only legacy RDP security, and that it fails quickly when the server hangs up or is not an RDP server at all, and that the bridge drops the page's requests for files while passing everything else on.
+Covered: multi-word search, that an empty password removes the saved one while a missing one keeps it, that Duplicate's `copyPasswordFrom` copies the encrypted password unless a new one is given, that a saved password is neither copied to nor kept for another host, port, type or username, bulk update by username, by folder (including subfolders but not `Production` when asking for `Prod`), respecting unticked ids, backup and round-trip of the file, and (in `guacd.test.js`) that a token with a non-ASCII password decrypts correctly with guacamole-lite's own code, that `rdpFingerprint` returns the right fingerprint from a fake RDP server using a throwaway certificate made with `openssl`, and that it refuses a server offering only legacy RDP security, and that it fails quickly when the server hangs up or is not an RDP server at all, and that the bridge drops the page's requests for files while passing everything else on.
 
 `share.test.js` builds a pretend home folder in a temporary directory and checks the folder rules against it: an ordinary folder passes and comes back as its real path with its device and inode numbers, the same through a link; the home folder (either of two), anything above it, hidden folders, `~/snap`, system folders, the app's own folder, a file, a missing folder and a path with a comma are refused, and so is a link leading to any of them. A folder holding `.ssh` is refused as a copy of a home folder, and, where the test may mount (as root, or through `sudo` in CI), the home folder mounted in a second place is refused under that name too. It checks the words of the question (`question`: the port, the first-time notice with the certificate, what a writable share could change, odd characters written out, and for several folders each one's line, name and mode) and that `approvalOf` changes when a folder, a mode, the list (one added, two swapped), the host, the port, the account, the certificate or the key does, and gives nothing without a key. For lists it checks `pinAll` (every folder held to the rules, none twice even through a link, none inside another, eight at most) and `driveNames`. `store.test.js` checks that `upsert` keeps only well-formed shares, only on RDP, that a file from when a connection shared one folder loads as a list of one, that an agreement ends with any change to what was agreed and does not return when the change is undone, that none can be saved in, and that a bulk edit of the account ends it too.
 
