@@ -1,4 +1,4 @@
-// Runs guacd in Docker and a guacamole-lite websocket bridge on localhost, for RDP/VNC panes.
+// Runs guacd (in Docker, or the one installed on this computer) and a guacamole-lite websocket bridge on localhost, for RDP/VNC panes.
 const { execFile, execFileSync, spawn } = require('child_process');
 const fs = require('fs');
 const os = require('os');
@@ -21,32 +21,94 @@ const key = crypto.randomBytes(32); // per-launch: tokens die with the app
 
 const docker = (args) => new Promise((resolve, reject) =>
   execFile('docker', args, { timeout: 300000 }, (err, stdout, stderr) =>
-    err ? reject(new Error(err.code === 'ENOENT' ? 'Docker is not installed. RDP and VNC need Docker to run guacd.' : (stderr || err.message).trim()))
+    err ? reject(err.code === 'ENOENT' ? Object.assign(new Error('Docker is not installed'), { code: 'NO_DOCKER' }) : new Error((stderr || err.message).trim()))
         : resolve(stdout.trim())));
 
-const portOpen = () => new Promise((resolve) => {
-  const s = net.connect(GUACD_PORT, '127.0.0.1');
+const portOpen = (port) => new Promise((resolve) => {
+  const s = net.connect(port, '127.0.0.1');
   s.once('connect', () => { s.destroy(); resolve(true); });
   s.once('error', () => resolve(false));
 });
 
-let starting;
+async function startDockerGuacd() {
+  // Reuse a running container only if it is the image this version expects.
+  const running = await docker(['inspect', '-f', '{{.State.Running}} {{.Config.Image}}', NAME]).catch(() => '');
+  if (running !== `true ${IMAGE}`) {
+    await docker(['rm', '-f', NAME]).catch(() => {});
+    await docker(['run', '-d', '--rm', '--name', NAME, '-p', `127.0.0.1:${GUACD_PORT}:4822`, IMAGE]);
+    startedHere = true;
+  }
+  for (let i = 0; i < 50; i++) {
+    if (await portOpen(GUACD_PORT)) return GUACD_PORT;
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  throw new Error('guacd did not start listening on 127.0.0.1:4822');
+}
+
+// ---- without Docker: the guacd installed on this computer -----------------------
+// Older guacds ignore settings they do not know. One that ignored cert-fingerprints would connect to a
+// server whose certificate nobody checked, so anything older than the version tested here is not used.
+const MIN_GUACD = [1, 6, 0];
+// out: what `guacd -v` printed, e.g. "Guacamole proxy daemon (guacd) version 1.6.0". Returns '' if it will do, or why not.
+function guacdTooOld(out) {
+  const m = /version (\d+)\.(\d+)\.(\d+)/.exec(out);
+  if (!m) return 'guacd is not installed on this computer';
+  const older = MIN_GUACD.map((n, i) => Number(m[i + 1]) - n).find((d) => d !== 0) < 0;
+  return older ? `the guacd installed on this computer is ${m.slice(1).join('.')}, and ${MIN_GUACD.join('.')} or newer is needed (an older one would not check the RDP server's certificate)` : '';
+}
+// -f: stay in the foreground, so it is our child and can be stopped. -b: reachable from this computer only.
+const localGuacdArgs = (port) => ['-f', '-b', '127.0.0.1', '-l', String(port)];
+// A port nothing is using, so a guacd service already on 4822 (Debian's package starts one) is not in the way.
+const freePort = () => new Promise((resolve, reject) => {
+  const s = net.createServer().once('error', reject);
+  s.listen(0, '127.0.0.1', () => { const { port } = s.address(); s.close(() => resolve(port)); });
+});
+
+let local; // the guacd process this launch started, if Docker is not installed
+let quit = new AbortController(); // stopGuacd aborts it: that ends the guacd started here, and stops a start still under way
+// shortcut: if banana-phone is killed outright (kill -9, a crash) this guacd stays on its localhost
+// port until you log out; add a sweep like the shares' if that turns out to happen.
+async function startLocalGuacd(signal) {
+  const version = await new Promise((resolve) => execFile('guacd', ['-v'], { timeout: 10000 }, (err, stdout, stderr) => resolve(err ? '' : stdout + stderr)));
+  const why = guacdTooOld(version);
+  if (why) throw new Error(why);
+  const port = await freePort();
+  if (signal.aborted) throw new Error('banana-phone is quitting'); // stopGuacd ran meanwhile: do not start what nothing would stop
+  const child = local = spawn('guacd', localGuacdArgs(port), { signal, stdio: ['ignore', 'ignore', 'pipe'] });
+  let said = '', gone = false, up = false;
+  child.stderr.on('data', (d) => { said = (said + d).slice(-500); }); // read always, so guacd never waits on a full pipe
+  child.on('error', (e) => { said = e.message; gone = true; });
+  // Once it has ended its port is free for any program to take, so the port is forgotten with it.
+  child.on('exit', () => { gone = true; if (local === child) { local = null; if (up) starting = null; } });
+  for (let i = 0; i < 50 && !gone; i++) {
+    if (await portOpen(port)) { up = true; return port; }
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  child.kill();
+  throw new Error(`guacd did not start listening on 127.0.0.1:${port}${said.trim() && `: ${said.trim()}`}`);
+}
+
+let starting; // a Promise of the port the plain guacd listens on
 let startedHere = false; // only stop a guacd this launch created
+// Docker first: there guacd is shut in a container, and that is the way that has been run for real.
+// The guacd of this computer runs as you, so it is used only where Docker is not installed.
 function ensureGuacd() {
-  return (starting ||= (async () => {
-    // Reuse a running container only if it is the image this version expects.
-    const running = await docker(['inspect', '-f', '{{.State.Running}} {{.Config.Image}}', NAME]).catch(() => '');
-    if (running !== `true ${IMAGE}`) {
-      await docker(['rm', '-f', NAME]).catch(() => {});
-      await docker(['run', '-d', '--rm', '--name', NAME, '-p', `127.0.0.1:${GUACD_PORT}:4822`, IMAGE]);
-      startedHere = true;
-    }
-    for (let i = 0; i < 50; i++) {
-      if (await portOpen()) return;
-      await new Promise((r) => setTimeout(r, 200));
-    }
-    throw new Error('guacd did not start listening on 127.0.0.1:4822');
-  })().catch((e) => { starting = null; throw e; }));
+  const { signal } = quit; // this launch's, taken now: a quit while Docker is still being tried must reach the guacd started after it
+  return (starting ||= startDockerGuacd().catch((viaDocker) => {
+    // A Docker that is installed and failed (not running, no permission, no image) is to be put right, not quietly swapped for the weaker way.
+    if (viaDocker.code !== 'NO_DOCKER') throw new Error(`${viaDocker.message}\nThe guacd installed on this computer is used only when Docker is not installed.`);
+    return startLocalGuacd(signal).catch((viaLocal) => {
+      throw new Error(`RDP and VNC need Docker, or guacd ${MIN_GUACD.join('.')} or newer installed on this computer.\nDocker: ${viaDocker.message}\nguacd: ${viaLocal.message}`);
+    });
+  }).catch((e) => { starting = null; throw e; }));
+}
+
+// Forgets a guacd that was started and no longer answers (it died, or Docker restarted), so that the next call starts one.
+async function forgetDeadGuacd() {
+  const was = starting;
+  if (!was) return;
+  const port = await was.catch(() => null); // a start that failed has already cleared `starting` itself
+  if (port && !(await portOpen(port)) && starting === was) starting = null; // unless someone else already started the next one
 }
 
 let bridge, bridgeServer;
@@ -394,10 +456,14 @@ async function openRemote(conn, password, cert, share) {
   let guacdPort; // guacamole-lite reads this from the token and calls net.connect(guacdPort, host), which takes a socket path too
   const release = share && hold(share); // before the first await: from here on the share's container is not stopped as idle
   try {
-    if (share) guacdPort = await ensureShare(share);
-    else {
-      if (starting && !(await portOpen())) starting = null; // container died or Docker restarted: start again
-      await ensureGuacd();
+    if (share) {
+      // Never the guacd of this computer: it runs as you and follows links, so nothing would keep the server inside the folder.
+      guacdPort = await ensureShare(share).catch((e) => {
+        throw e.code === 'NO_DOCKER' ? new Error('A shared folder needs Docker, which is not installed: its container is what keeps the remote computer inside that one folder. Install Docker, or take the shared folder off this connection.') : e;
+      });
+    } else {
+      await forgetDeadGuacd();
+      guacdPort = await ensureGuacd();
     }
     const port = await ensureBridge();
     const host = await resolveHost(conn.host);
@@ -409,7 +475,7 @@ async function openRemote(conn, password, cert, share) {
   }
 }
 
-// guacd runs in Docker, whose DNS is only a copy of /etc/resolv.conf: no /etc/hosts, mDNS or VPN
+// guacd usually runs in Docker, whose DNS is only a copy of /etc/resolv.conf: no /etc/hosts, mDNS or VPN
 // split DNS. So look the name up here, the way the rest of the system (and other RDP apps) does,
 // and give guacd the address. IPv4 first: Docker's default bridge network has no IPv6.
 async function resolveHost(host) {
@@ -447,6 +513,9 @@ function stopGuacd() {
   // the stop below blocks: a session left open at quit held the stop up until it timed out.
   for (const p of execs) p.kill();
   execs.clear();
+  quit.abort(); // Node ends the guacd process spawned with this signal
+  quit = new AbortController();
+  local = starting = null;
   if (names.length) try { execFileSync('docker', ['stop', '-t', '1', ...names], { timeout: 10000, stdio: 'ignore' }); } catch {}
   if (shares.size) try { execFileSync('docker', ['network', 'rm', shareNet()], { timeout: 10000, stdio: 'ignore' }); } catch {}
   bridgeServer?.close();
@@ -459,4 +528,4 @@ function stopGuacd() {
 }
 
 // ensureBridge is here for guacd.test.js alone, which sends a page's messages through the real bridge to see what comes out.
-module.exports = { openRemote, remoteSettings, resolveHost, rdpFingerprint, stopGuacd, encryptToken, key, shareRunArgs, shareName, shareNet, shareBlocker, ensureShare, sweep, verifyClient, ticket, ensureBridge };
+module.exports = { openRemote, remoteSettings, resolveHost, rdpFingerprint, stopGuacd, encryptToken, key, guacdTooOld, localGuacdArgs, shareRunArgs, shareName, shareNet, shareBlocker, ensureShare, sweep, verifyClient, ticket, ensureBridge };

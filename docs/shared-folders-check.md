@@ -85,4 +85,4 @@ Only the recognising is tested, against sample answers; the plain-Docker sample 
 
 ## Not checked, and not expected to work without changes
 
-- **A guacd that is not in Docker** (issue #6). guacd follows symlinks and the container is what stops them leading out of the folder; a system guacd has no such wall. Shared folders should stay Docker-only unless that is solved another way.
+- **A guacd that is not in Docker** (issue #6). guacd follows symlinks and the container is what stops them leading out of the folder; a system guacd has no such wall. RDP and VNC can now run on a guacd installed on the computer where Docker is not installed, but shared folders stay Docker-only: without Docker a connection with a shared folder is refused, and the message says why.

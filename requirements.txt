@@ -13,12 +13,31 @@ Always
       without it, run:  APPIMAGE_EXTRACT_AND_RUN=1 ./banana-phone-*.AppImage
 
 For RDP and VNC connections
+  Either
   - Docker, with your user in the "docker" group
   - Internet access on the first RDP/VNC connection, to download the
     guacamole/guacd:1.6.0 image (about 100 MB); it is cached afterwards
-  (SSH and local terminals work without Docker)
+  or, only where Docker is not installed at all (a Docker that is
+  installed but not working is not replaced: its error is shown)
+  - guacd 1.6.0 or newer installed, with "guacd" on the PATH
+      check with:  guacd -v
+    An older one is not used: it would not check the RDP server's
+    certificate. A distribution's own package is often older than that.
+    banana-phone starts a guacd of its own on a free localhost port and
+    stops it on quit; a guacd service already running is left alone.
+  - SECURITY: use this only on a computer where you are the only user.
+    This guacd runs as you, on a localhost port that needs no password.
+    Any other account on the computer can connect to it while it runs
+    and have it show your home folder as a drive to an RDP server of its
+    choosing. guacd has no login of its own and cannot listen on a unix
+    socket, so banana-phone cannot close the port to others. With Docker,
+    guacd runs in a container that holds none of your files.
+  - Not yet run against a real guacd 1.6 package, only against a stand-in.
+  (SSH and local terminals need neither)
 
 For shared folders on RDP connections
+  - Docker, always: an installed guacd is never used for a shared
+    folder, and the connection is refused if Docker is missing.
   - Each shared folder gets a small guacd container of its own, which
     is stopped when banana-phone quits.
   - Docker Engine 25 or newer, and Linux 5.12 or newer, for a read-only
