@@ -126,6 +126,12 @@ function upsert(data, input) {
       .filter((x) => typeof x?.name === 'string' && typeof x.cmd === 'string' && x.name.trim() && x.cmd.trim())
       .map((x) => ({ name: x.name.trim(), cmd: x.cmd.trim(), onStart: x.onStart === true }));
   }
+  // A shared folder comes from the page too: keep a well-formed one, and anything else (null, '') removes it.
+  // Whether that folder may be shared at all is main.js's question (share.js); `writable` must be said outright.
+  if (conn.share !== undefined) {
+    const s = conn.share;
+    conn.share = typeof s?.path === 'string' && s.path.trim() ? { path: s.path.trim(), writable: s.writable === true } : undefined;
+  }
   if (copyPasswordFrom && !conn.id && conn.password === undefined) { // new connections only
     const src = data.connections.find((c) => c.id === copyPasswordFrom);
     if (src?.password) conn.password = src.password; // copied still encrypted: never decrypted on the way
@@ -134,6 +140,9 @@ function upsert(data, input) {
   const i = data.connections.findIndex((c) => c.id === conn.id);
   if (i >= 0) data.connections[i] = { ...data.connections[i], ...conn };
   else data.connections.push(conn);
+  const saved = data.connections[i >= 0 ? i : data.connections.length - 1];
+  // Only RDP has drives. A connection changed to another type loses its share, and the user's agreement with it.
+  if (saved.protocol !== 'rdp' || !saved.share) { delete saved.share; delete saved.shareOk; }
   fillFolders(data);
   return conn;
 }

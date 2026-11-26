@@ -7,6 +7,7 @@ const { Client } = require('ssh2');
 const pty = require('node-pty');
 const store = require('./store');
 const guacd = require('./guacd');
+const share = require('./share');
 
 const dir = app.getPath('userData'); // ~/.config/banana-phone
 const FILE = path.join(dir, 'connections.json');
@@ -31,7 +32,7 @@ const dec = (s) => {
 const publicView = () => ({
   folders: data.folders,
   folderIcons: data.folderIcons,
-  connections: data.connections.map(({ password, ...c }) => ({ ...c, hasPassword: !!password })),
+  connections: data.connections.map(({ password, shareOk, ...c }) => ({ ...c, hasPassword: !!password })),
   keyring: safeStorage.getSelectedStorageBackend?.() || 'unknown',
 });
 const persist = (backup) => store.save(FILE, data, { backup });
@@ -49,8 +50,11 @@ const change = (channel, fn, backup = false) => ipcMain.handle(channel, (_e, ...
   return { ...publicView(), result };
 });
 
-change('store:save', ({ password, ...conn }) => {
+// shareOk is dropped: the page may ask for a shared folder, but only the user agrees to one (shareFor, below).
+change('store:save', ({ password, shareOk, ...conn }) => {
   if (password !== undefined) conn.password = enc(password); // undefined = keep existing
+  // Saved as its real path, so what is shown, agreed to and mounted are the same folder.
+  if (conn.share?.path) conn.share = { ...conn.share, path: share.checkFolder(String(conn.share.path).trim(), shareRules()) };
   store.upsert(data, conn); // its return value holds the encrypted password, so it is not passed on
 });
 change('store:delete', (id) => store.remove(data, id), true);
@@ -95,14 +99,14 @@ function trust(id, fp) {
 }
 // A known server now shows a different key or certificate. Ask, with Cancel as the default (Enter and
 // Esc both refuse); Trust replaces the saved fingerprint. Resolves true when trusted.
-async function confirmChanged(id, what, host, saved, fp) {
+async function confirmChanged(id, what, host, saved, fp, also = '') {
   const { response } = await dialog.showMessageBox(win, {
     type: 'warning',
     title: `${host}: ${what} changed`,
     message: `The ${what} of ${host} has changed since you last connected.`,
     detail: 'This is expected after the server is reinstalled or its certificate is renewed. It can also mean '
       + 'someone is impersonating the server to capture your password. Only trust it if you expected the change.'
-      + `\n\nSaved fingerprint (SHA256):\n${saved}\n\nNew fingerprint (SHA256):\n${fp}`,
+      + also + `\n\nSaved fingerprint (SHA256):\n${saved}\n\nNew fingerprint (SHA256):\n${fp}`,
     buttons: ['Cancel', `Trust the new ${what}`],
     defaultId: 0,
     cancelId: 0,
@@ -129,6 +133,52 @@ ipcMain.handle('store:forgetHost', (_e, connId) => {
   saveHosts(hosts);
   return true;
 });
+
+// ---- shared folders (RDP) -----------------------------------------------------
+
+// No share may hold or lie in the app's own folder: the connections, their encrypted passwords, the trusted fingerprints.
+const shareRules = () => ({ home: os.homedir(), keep: [dir] });
+
+// The edit dialog's "Choose…" button. The page is sandboxed and cannot browse folders itself.
+ipcMain.handle('share:pick', async (_e, from) => {
+  const { canceled, filePaths } = await dialog.showOpenDialog(win, {
+    title: 'Folder to share with the remote computer',
+    defaultPath: typeof from === 'string' && path.isAbsolute(from) ? from : os.homedir(),
+    properties: ['openDirectory', 'createDirectory'],
+  });
+  return canceled || !filePaths[0] ? null : share.checkFolder(filePaths[0], shareRules());
+});
+
+// The folder an RDP connection shares, as guacd.openRemote wants it, or null. The folder is checked again
+// (it may have moved or been replaced since it was saved), and the user must have agreed to exactly
+// this: this folder, read-only or not, with this server showing this certificate. The agreement is
+// asked here, in a system dialog, because a saved connection is not proof of it: the page writes those.
+async function shareFor(conn, fp) {
+  if (!conn.share) return null;
+  const folder = share.checkFolder(conn.share.path, shareRules());
+  if (folder !== conn.share.path) throw new Error(`The shared folder ${conn.share.path} now leads to ${folder}. Edit the connection and choose the folder again.`);
+  const writable = conn.share.writable === true;
+  const ok = share.approvalOf(conn, fp);
+  if (conn.shareOk !== ok) {
+    const { response } = await dialog.showMessageBox(win, {
+      type: 'question',
+      title: `Share a folder with ${conn.host}`,
+      message: `Share this folder with ${conn.host}?`,
+      detail: `${folder}\n\n`
+        + (writable ? `${conn.host} will be able to read, change and delete everything in this folder.`
+          : `${conn.host} will be able to read everything in this folder, but not change it.`)
+        + ' So will any program running there.\n\nYou are asked once for this folder and this server, and again if either changes.',
+      buttons: ['Cancel', 'Share and connect'],
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true,
+    });
+    if (response !== 1) throw new Error('Did not connect: the folder was not shared. To connect without it, edit the connection and empty its shared folder.');
+    conn.shareOk = ok;
+    persist();
+  }
+  return { path: folder, writable };
+}
 
 function openSsh(id, conn, cols, rows, start) {
   const client = new Client();
@@ -211,12 +261,14 @@ ipcMain.handle('session:open', async (_e, connId, cols = 80, rows = 24, run) => 
     const cert = await guacd.rdpFingerprint(conn.host, conn.port || 3389);
     const fp = cert.fingerprint;
     const saved = trust(rdpId(conn), fp);
-    if (saved && saved !== fp && !(await confirmChanged(rdpId(conn), 'certificate', `${conn.host}:${conn.port || 3389}`, saved, fp))) {
+    const also = conn.share ? `\n\nThis connection shares the folder ${conn.share.path} with the server.` : '';
+    if (saved && saved !== fp && !(await confirmChanged(rdpId(conn), 'certificate', `${conn.host}:${conn.port || 3389}`, saved, fp, also))) {
       throw new Error(`The certificate of ${conn.host} has changed and was not trusted, so banana-phone did not connect. Expected SHA256 ${saved}, got ${fp}.`);
     }
     const notice = !saved ? `Saved the certificate of ${conn.host}: SHA256 ${fp}`
       : saved !== fp ? `Trusted the new certificate of ${conn.host}: SHA256 ${fp}` : undefined;
-    return { kind: 'remote', url: await guacd.openRemote(conn, dec(conn.password), cert), notice };
+    const shared = await shareFor(conn, fp); // after the identity check: the agreement is with that server
+    return { kind: 'remote', url: await guacd.openRemote(conn, dec(conn.password), cert, shared), notice, shared };
   }
   if (conn.protocol === 'vnc') {
     return { kind: 'remote', url: await guacd.openRemote(conn, dec(conn.password)) };

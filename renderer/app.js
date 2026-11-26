@@ -303,6 +303,10 @@ function editConn(c = { protocol: 'ssh' }) {
   form.elements.clearPassword.onchange = (e) => { form.elements.password.disabled = e.target.checked; };
   d.dataset.proto = c.protocol || 'ssh';
   form.elements.adminSession.checked = !!c.adminSession;
+  form.elements.sharePath.value = c.share?.path || '';
+  form.elements.shareWritable.checked = c.share?.writable === true;
+  // Main shows the folder dialog and answers with the folder's real path, or rejects (toasted) if it may not be shared.
+  $('#share-pick').onclick = async () => { const p = await window.bp.pickFolder(form.elements.sharePath.value.trim()); if (p) form.elements.sharePath.value = p; };
   form.elements.port.placeholder = DEFAULT_PORT[d.dataset.proto] || '';
   form.elements.protocol.onchange = () => { d.dataset.proto = form.elements.protocol.value; form.elements.port.placeholder = DEFAULT_PORT[d.dataset.proto] || ''; };
   const cmds = editCmds(c.commands);
@@ -323,6 +327,7 @@ function editConn(c = { protocol: 'ssh' }) {
     if (!conn.id) delete conn.id;
     if (conn.folder) { openFolders.add(conn.folder); saveOpen(); }
     conn.adminSession = conn.protocol === 'rdp' && f.adminSession.checked;
+    conn.share = conn.protocol === 'rdp' && f.sharePath.value.trim() ? { path: f.sharePath.value.trim(), writable: f.shareWritable.checked } : null; // null = not shared
     if (conn.protocol === 'ssh' || conn.protocol === 'local') {
       conn.commands = cmds.map((x) => ({ ...x, name: x.name.trim() || x.cmd.trim() })); // the store drops empty ones
       const empty = cmds.filter((x) => x.name.trim() && !x.cmd.trim()).length;
@@ -792,8 +797,14 @@ window.bp.onExit((id) => {
 
 async function openRemote(p, c) {
   status(p, `Connecting to ${c.host}…`);
-  const { url, notice } = await window.bp.open(c.id);
-  if (notice) toast(notice, 12000); // long enough to compare the fingerprint
+  const { url, notice, shared } = await window.bp.open(c.id);
+  // What this session can reach on this computer is said out loud and stays on the pane's header.
+  const sharing = shared && `Sharing ${shared.path} with ${c.host} (${shared.writable ? 'it can change files' : 'read-only'})`;
+  if (notice || sharing) toast([notice, sharing].filter(Boolean).join(' · '), 12000); // long enough to compare the fingerprint
+  if (sharing) {
+    p.root.classList.add('sharing'); // keeps the header, and so the label, even when the pane has the tab to itself
+    p.root.querySelector('.pane-head .t').after(el('span', { className: 'shared', textContent: shared.writable ? 'shared folder: writable' : 'shared folder: read-only', title: sharing }));
+  }
   if (p.closed) return; // pane closed while guacd was starting
   const [base, query] = url.split('?');
   const client = new Guacamole.Client(new Guacamole.WebSocketTunnel(base));
