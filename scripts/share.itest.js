@@ -202,6 +202,16 @@ test('a shared folder, end to end', { skip: !USER && 'set BP_RDP_USER and BP_RDP
     });
   });
 
+  await t.test('closing the last session stops its container, and the next session starts it again', async () => {
+    const share = shareOf('conn-1', true); // the writable session above has just closed
+    const running = () => docker('inspect', '-f', '{{.State.Running}}', guacd.shareName(share)).out === 'true';
+    await until('the idle container to stop', () => !running(), 30000);
+    await session(host, share, async () => {
+      assert.ok(running());
+      assert.strictEqual(remote(`cat ${DRIVE}/hello.txt`).out, 'hello from this computer');
+    });
+  });
+
   await t.test('quitting stops the containers and removes their network and the socket', () => {
     const names = () => docker('ps', '-a', '--filter', `name=banana-phone-guacd-${process.getuid()}-`, '--format', '{{.Names}}').out;
     assert.notStrictEqual(names(), '');

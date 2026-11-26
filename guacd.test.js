@@ -344,6 +344,48 @@ test('the bridge drops the page\'s requests for files, however they are cut up, 
   assert.strictEqual(got, '4.sync,1.1;3.key,2.65,1.1;');
 });
 
+test("a share's container is removed a while after its last session ends, never under a session or a token that is still good", async (t) => {
+  const calls = fakeDocker(t);
+  const { openRemote, verifyClient, shareName, stopGuacd } = require('./guacd');
+  t.after(stopGuacd);
+  const share = { id: 'c1', path: fs.mkdtempSync(path.join(os.tmpdir(), 'bp-share-')), dev: '64', ino: '1' };
+  t.after(() => fs.rmSync(share.path, { recursive: true, force: true }));
+  calls.mounted('64:1');
+  const name = shareName(share);
+  const count = (line) => calls().filter((c) => c.startsWith(line)).length;
+  const removals = () => count(`rm -f ${name}`); // one comes before every start; the others are the idle container going
+  const conn = { id: 'c1', protocol: 'rdp', host: '127.0.0.1', username: 'u' };
+  const open = (c = conn) => openRemote(c, 'pw', { fingerprint: 'AA:BB', nla: false }, share);
+  // What the websocket server asks when the page connects; `socket` stands in for the connection under the websocket.
+  const connect = (url) => { const socket = new (require('events'))(); assert.ok(verifyClient({ req: { url: url.slice(url.indexOf('/?')), socket } })); return socket; };
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+
+  const session = connect(await open());
+  await open(); // a second pane's token, never used
+  t.mock.timers.tick(61000); // the unused token has run out
+  t.mock.timers.tick(60000);
+  assert.deepStrictEqual([count('run '), removals()], [1, 1], 'an open session keeps the container');
+  session.emit('close');
+  t.mock.timers.tick(9000);
+  const again = await open(); // a new session within the wait: the same container
+  t.mock.timers.tick(59000);
+  assert.deepStrictEqual([count('run '), removals()], [1, 1], 'a token that is still good keeps the container');
+  connect(again).emit('close');
+  t.mock.timers.tick(9999);
+  assert.strictEqual(removals(), 1);
+  t.mock.timers.tick(1); // the wait is over, and the removal has begun
+  await open(); // a session that arrives now waits for the removal, then starts a container of its own
+  assert.deepStrictEqual([count('run '), removals()], [2, 3]);
+  assert.deepStrictEqual(calls().filter((c) => /^(run|rm) /.test(c)).map((c) => c.split(' ')[0]).slice(-3), ['rm', 'rm', 'run']);
+
+  // A connect that fails after the container was held lets go of it again.
+  await assert.rejects(open({ ...conn, host: 'no-such-host.invalid' }), /Could not look up/);
+  t.mock.timers.tick(61000); // the last good token runs out
+  t.mock.timers.tick(10000);
+  while (removals() < 4) await new Promise(setImmediate);
+  assert.strictEqual(count('run '), 2);
+});
+
 test('resolveHost looks names up with the system resolver (including /etc/hosts)', async () => {
   const { resolveHost } = require('./guacd');
   assert.strictEqual(await resolveHost('localhost'), '127.0.0.1'); // from /etc/hosts, which guacd's container never sees
