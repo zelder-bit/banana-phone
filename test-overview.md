@@ -1,19 +1,19 @@
 # What banana-phone tests, and what it does not
 
 This page lists every automated test and check in the repository, in plain words, so you can see the gaps.
-Counts are from `npm test` on 2026-11-22 (26 passed) and from reading `scripts/ui.e2e.js`, as of the Send Ctrl+Alt+Del change.
+Counts are from `npm test` on 2026-11-25 (42 passed, with `share.test.js`) and from reading `scripts/ui.e2e.js`, as of the Send Ctrl+Alt+Del change.
 
 | Suite | File | Tests |
 |---|---|---|
 | Store | `store.test.js` | 19 |
-| Remote desktop | `guacd.test.js` | 7 |
+| Remote desktop | `guacd.test.js` | 13 |
 | UI end-to-end | `scripts/ui.e2e.js` | 1 test with 17 steps |
 
 ## How to run
 
 | Command | What it runs | Needs | Run by CI? |
 |---|---|---|---|
-| `npm test` | `node --test`: `store.test.js` and `guacd.test.js` (26 tests). It does not pick up `scripts/ui.e2e.js`. | Node only, plus `openssl` on the PATH (the fake RDP server makes a certificate with it). No display, no Electron, no Docker. | Yes: CI `test` job, and the Release `build` job before the AppImage is built. |
+| `npm test` | `node --test`: `store.test.js` and `guacd.test.js` (42 tests). It does not pick up `scripts/ui.e2e.js`. | Node only, plus `openssl` on the PATH (the fake RDP server makes a certificate with it). No display, no Electron, no Docker. | Yes: CI `test` job, and the Release `build` job before the AppImage is built. |
 | `npm run test:electron` | `guacd.test.js` again, inside Electron's own Node (`ELECTRON_RUN_AS_NODE=1`). This matters because Electron's TLS library is stricter than Node's. | The Electron binary, and `openssl`. No display. | Yes: CI `ui` job. |
 | `npm run test:ui` | `scripts/ui.e2e.js`: starts the real app with a throwaway profile and drives it. | Electron, node-pty built for Electron (`npm ci` without `--ignore-scripts`), and a display (CI uses `xvfb-run -a`). No Docker. | Yes: CI `ui` job, with a 10 minute limit. Not run by the Release job. |
 | `npm run check:walkthrough` (or `node scripts/check-walkthrough.js`) | Checks that `WALKTHROUGH.md` still matches the code. | Node only. | Yes: CI `test` job and Release `build` job. |
@@ -47,7 +47,7 @@ These test `store.js` directly on plain data and temporary files. No Electron, n
 | a folder moved by drag keeps its icon, and so do its subfolders | Moving a folder keeps the icons of the folder and its subfolders. |
 | upsert keeps only well-formed saved commands | Saved commands from the page are cleaned up: entries without a name and a command are dropped, "Run on start" is only on when it is really `true`, a value that is not a list becomes no commands, and leaving the field out keeps the saved ones. |
 
-## Remote desktop suite (`guacd.test.js`, 7 tests)
+## Remote desktop suite (`guacd.test.js`, 13 tests)
 
 These test the pieces of `guacd.js` that do not need Docker. The RDP tests use a small fake RDP server on localhost with a throwaway certificate made by `openssl`. No real RDP or VNC server, and no guacd, is involved.
 
@@ -59,6 +59,7 @@ These test the pieces of `guacd.js` that do not need Docker. The RDP tests use a
 | rdpFingerprint fails fast when the server hangs up or is not RDP | Pointing an RDP connection at a server that hangs up, or at an SSH port, gives a clear error instead of hanging. |
 | rdpFingerprint refuses servers that only offer legacy RDP security | A server that offers only old RDP security (no certificate to check) is refused with a clear message. |
 | RDP settings: pinned certificate, and the admin (console) session only when asked | guacd is told to accept only the pinned certificate and the security the server chose, uses port 3389 by default, and joins the admin (console) session only when you ticked it, never for VNC. |
+| the bridge drops the page's requests for files, however they are cut up, and passes the rest | The page cannot ask guacd for the files in a shared folder or their names: those requests are removed between the page and guacd, also when split across messages, while keys, mouse and clipboard pass unchanged. Checked through the real bridge with a stand-in guacd. |
 | resolveHost looks names up with the system resolver (including /etc/hosts) | Host names are looked up the way the rest of the system does (so `/etc/hosts` entries work for RDP and VNC), and an unknown name gives a clear error. |
 
 ## UI end-to-end suite (`scripts/ui.e2e.js`, 1 test, 17 steps)

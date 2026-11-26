@@ -10,6 +10,7 @@ const dns = require('dns');
 const url = require('url');
 const GuacamoleLite = require('guacamole-lite');
 const Crypt = require('guacamole-lite/lib/Crypt');
+require('./pagefilter'); // before any session: the page's requests for files never reach guacd
 
 const NAME = 'banana-phone-guacd';
 // 1.6 adds cert-fingerprints; still serves guacamole-common-js 1.5 clients. The digest is the one of the multi-platform
@@ -348,4 +349,5 @@ function stopGuacd() {
   runDir = null;
 }
 
-module.exports = { openRemote, remoteSettings, resolveHost, rdpFingerprint, stopGuacd, encryptToken, key, shareRunArgs, shareName, ensureShare, sweep, verifyClient, ticket };
+// ensureBridge is here for guacd.test.js alone, which sends a page's messages through the real bridge to see what comes out.
+module.exports = { openRemote, remoteSettings, resolveHost, rdpFingerprint, stopGuacd, encryptToken, key, shareRunArgs, shareName, ensureShare, sweep, verifyClient, ticket, ensureBridge };
