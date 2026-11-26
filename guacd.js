@@ -164,6 +164,24 @@ const dockerSays = (what) => docker([what, '--format', '{{json .}}']);
 const shareName = (share) => `${NAME}-${process.getuid()}-${process.pid}-`
   + crypto.createHash('sha256').update(JSON.stringify([share.id, share.server, share.path, share.writable === true])).digest('hex').slice(0, 12);
 
+// Measured with one session and a busy screen: 54 MB at 1920x1080, 128 MB at 3840x2160, 189 MB at 7680x2160.
+// A limit, not a reservation; /tmp counts towards it. The same figure for --memory-swap means no swap on top.
+const MEMORY = '1g';
+// Share containers get a network of their own, one per launch, where containers cannot talk to each
+// other (enable_icc=false). On Docker's default bridge a guacd turned against you could reach the plain
+// guacd's port and every other container there. It still reaches the servers you connect to.
+const shareNet = () => `${NAME}-${process.getuid()}-${process.pid}`;
+const NO_ICC = 'com.docker.network.bridge.enable_icc';
+let networking;
+// Asked each time a share's container starts: the network may have been pruned while no share was up.
+const ensureNet = () => (networking ||= (async () => {
+  const closed = () => docker(['network', 'inspect', '-f', `{{index .Options "${NO_ICC}"}}`, shareNet()]).then((icc) => icc === 'false', () => false);
+  if (await closed()) return;
+  // Docker may only have been too busy to answer the first time: a network that is there and closed after all is fine.
+  // One of that name that is not closed was not made here (the name carries our process id), and nothing is started on it.
+  await docker(['network', 'create', '-o', `${NO_ICC}=false`, shareNet()]).catch(async (e) => { if (!(await closed())) throw e; });
+})().finally(() => { networking = null; }));
+
 function shareRunArgs(name, share) {
   // --mount takes comma-separated fields, so a path with a comma or quote could add fields of its own.
   if (typeof share?.path !== 'string' || !path.isAbsolute(share.path) || /[,"\x00-\x1f\x7f]/.test(share.path)) {
@@ -176,6 +194,7 @@ function shareRunArgs(name, share) {
     // change but the folder: its own files are read-only, /tmp is memory that is yours alone (said outright:
     // left to itself Docker gives it the owner the image's /tmp has), and it cannot multiply without end.
     '--read-only', '--tmpfs', `/tmp:uid=${process.getuid()},gid=${process.getgid()},mode=700`, '--pids-limit', '512',
+    '--network', shareNet(), '--memory', MEMORY, '--memory-swap', MEMORY,
     // Unlike -v, --mount fails if the folder is missing instead of creating it as root.
     '--mount', `type=bind,source=${share.path},target=${DRIVE}${share.writable === true ? '' : READ_ONLY}`,
     IMAGE, '-b', '127.0.0.1']; // the image's entrypoint passes extra arguments to guacd; the last -b wins
@@ -185,12 +204,14 @@ function shareRunArgs(name, share) {
 // guacd inside container `name`. Resolves to the socket's path.
 let runDir;
 const relays = [];
+const execs = new Set(); // the `docker exec`s of sessions that are open
 function relay(name) {
   runDir ||= fs.mkdtempSync(path.join(process.env.XDG_RUNTIME_DIR || os.tmpdir(), 'bp-')); // mkdtemp makes it mode 700
   const sock = path.join(runDir, `${name.slice(-12)}.sock`); // short: socket paths end at 107 bytes
   const server = net.createServer((c) => {
     const p = spawn('docker', ['exec', '-i', name, 'nc', '127.0.0.1', String(GUACD_PORT)], { stdio: ['pipe', 'pipe', 'ignore'] });
-    const end = () => { c.destroy(); p.kill(); };
+    execs.add(p);
+    const end = () => { c.destroy(); p.kill(); execs.delete(p); };
     for (const x of [c, p, p.stdin, p.stdout]) x.on('error', end);
     c.on('close', end);
     p.on('close', end); // 'close', not 'exit': by then everything guacd sent has been passed on
@@ -209,11 +230,14 @@ function relay(name) {
 // running (another profile, a test run) keeps its own.
 let swept;
 const sweep = () => (swept ||= (async () => {
-  const ours = new RegExp(`^${NAME}-${process.getuid()}-(\\d+)-[0-9a-f]{12}$`);
   const running = (pid) => { try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; } }; // signal 0 only asks
-  const old = (await docker(['ps', '-a', '--filter', `name=${NAME}-${process.getuid()}-`, '--format', '{{.Names}}']))
-    .split('\n').filter((n) => ours.test(n) && !running(Number(ours.exec(n)[1])));
-  if (old.length) await docker(['rm', '-f', ...old]);
+  // Containers first: Docker does not remove a network that still has one on it.
+  for (const [list, format, hash, rm] of [[['ps', '-a'], '{{.Names}}', '-[0-9a-f]{12}', ['rm', '-f']], [['network', 'ls'], '{{.Name}}', '', ['network', 'rm']]]) {
+    const ours = new RegExp(`^${NAME}-${process.getuid()}-(\\d+)${hash}$`);
+    const old = (await docker([...list, '--filter', `name=${NAME}-${process.getuid()}-`, '--format', format]))
+      .split('\n').filter((n) => ours.test(n) && !running(Number(ours.exec(n)[1])));
+    if (old.length) await docker([...rm, ...old]);
+  }
 })().catch(() => {}));
 
 const shareRunning = (name) => docker(['inspect', '-f', '{{.State.Running}}', name]).then((out) => out === 'true', () => false);
@@ -227,6 +251,7 @@ function startShare(share) {
     if (blocked) throw new Error(blocked);
     await sweep();
     await docker(['rm', '-f', name]).catch(() => {});
+    await ensureNet();
     await docker(args);
     for (let i = 0; i < 50; i++) {
       const up = await docker(['exec', name, 'nc', '-z', '127.0.0.1', String(GUACD_PORT)]).then(() => true, () => false);
@@ -367,7 +392,12 @@ function remoteSettings(conn, password, cert, share) {
 // Sync so it finishes before the process exits. Shared folders' containers always go: nothing else uses them.
 function stopGuacd() {
   const names = [...(startedHere ? [NAME] : []), ...shares.keys()];
+  // `docker stop` waits for a `docker exec` that is still attached, and nothing here can read from one while
+  // the stop below blocks: a session left open at quit held the stop up until it timed out.
+  for (const p of execs) p.kill();
+  execs.clear();
   if (names.length) try { execFileSync('docker', ['stop', '-t', '1', ...names], { timeout: 10000, stdio: 'ignore' }); } catch {}
+  if (shares.size) try { execFileSync('docker', ['network', 'rm', shareNet()], { timeout: 10000, stdio: 'ignore' }); } catch {}
   bridgeServer?.close();
   bridge = bridgeServer = null;
   for (const r of relays.splice(0)) r.close();
@@ -378,4 +408,4 @@ function stopGuacd() {
 }
 
 // ensureBridge is here for guacd.test.js alone, which sends a page's messages through the real bridge to see what comes out.
-module.exports = { openRemote, remoteSettings, resolveHost, rdpFingerprint, stopGuacd, encryptToken, key, shareRunArgs, shareName, shareBlocker, ensureShare, sweep, verifyClient, ticket, ensureBridge };
+module.exports = { openRemote, remoteSettings, resolveHost, rdpFingerprint, stopGuacd, encryptToken, key, shareRunArgs, shareName, shareNet, shareBlocker, ensureShare, sweep, verifyClient, ticket, ensureBridge };

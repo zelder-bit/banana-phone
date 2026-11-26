@@ -124,6 +124,10 @@ test('a shared folder, end to end', { skip: !USER && 'set BP_RDP_USER and BP_RDP
       // The image declares port 4822 (EXPOSE), which shows up here with nothing bound to it; published would list an address.
       assert.deepStrictEqual(Object.values(facts.NetworkSettings.Ports || {}).filter((bound) => bound && bound.length), []);
       assert.strictEqual(facts.HostConfig.PortBindings && Object.keys(facts.HostConfig.PortBindings).length || 0, 0);
+      // On this launch's own network, away from other containers, and with a limit on memory.
+      assert.deepStrictEqual(Object.keys(facts.NetworkSettings.Networks), [guacd.shareNet()]);
+      assert.strictEqual(docker('network', 'inspect', '-f', '{{index .Options "com.docker.network.bridge.enable_icc"}}', guacd.shareNet()).out, 'false');
+      assert.ok(facts.HostConfig.Memory > 0 && facts.HostConfig.MemorySwap === facts.HostConfig.Memory);
       const ip = Object.values(facts.NetworkSettings.Networks)[0].IPAddress;
       const reached = await new Promise((resolve) => {
         const s = net.connect(4822, ip);
@@ -198,10 +202,11 @@ test('a shared folder, end to end', { skip: !USER && 'set BP_RDP_USER and BP_RDP
     });
   });
 
-  await t.test('quitting stops the containers and removes the socket', () => {
+  await t.test('quitting stops the containers and removes their network and the socket', () => {
     const names = () => docker('ps', '-a', '--filter', `name=banana-phone-guacd-${process.getuid()}-`, '--format', '{{.Names}}').out;
     assert.notStrictEqual(names(), '');
     guacd.stopGuacd();
     assert.strictEqual(names(), '');
+    assert.strictEqual(docker('network', 'ls', '--filter', `name=${guacd.shareNet()}`, '--format', '{{.Name}}').out, '');
   });
 });
