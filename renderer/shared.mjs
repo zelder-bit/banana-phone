@@ -26,3 +26,9 @@ export function matches(conn, q) {
 // The last sentence is there because a server that refuses redirected drives looks, from here, like any other.
 // folders: every folder the session shares, [{ path, writable }], each said with what the server may do to it.
 export const sharingText = (folders, host) => `Sharing ${folders.map((s) => `${s.path} (${s.writable ? 'it can change files' : 'read-only'})`).join(', ')} with ${host}. If no drive appears there, the server may be set to refuse shared drives.`;
+// Clipboard sharing with a remote desktop (RDP, VNC): each word a connection may hold, as [to the remote side, from it].
+// The one place the words are given a meaning: store.js saves by it, guacd.js enforces it, clipboard.js follows it.
+const CLIPBOARD = { both: [true, true], toRemote: [true, false], fromRemote: [false, true], off: [false, false] };
+// The word to go by. Never set (a connection saved before the choice existed): both ways. Anything else unknown: off.
+export const clipboardWord = (mode) => (mode === undefined ? 'both' : typeof mode === 'string' && Object.hasOwn(CLIPBOARD, mode) ? mode : 'off');
+export const clipboardWays = (mode) => { const [toRemote, fromRemote] = CLIPBOARD[clipboardWord(mode)]; return { toRemote, fromRemote }; };

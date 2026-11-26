@@ -98,7 +98,7 @@ banana-phone/
     ├── fruit.css       theme (light "orchard" and dark "night grove")
     ├── app.js          all interface behaviour
     ├── clipboard.js    copy/paste between this computer and remote desktops
-    ├── shared.mjs      pure helpers both sides use: fruit list, folder paths, search rule
+    ├── shared.mjs      pure helpers both sides use: fruit list, folder paths, search rule, clipboard words
     ├── layout.mjs      the split tree: how a tab's panes are arranged (pure logic)
     ├── icon.png        window icon
     ├── fonts/          Fredoka (headings) and Nunito (text)
@@ -120,7 +120,7 @@ electron .  ──▶ main.js ──require──▶ store.js ──require─�
                                                         clipboard.js, shared.mjs, layout.mjs
 ```
 
-`shared.mjs` is the one file both sides load. It holds small pure helpers, `FRUITS` (the fruit pictures), `ICONS` (what a folder icon may be: `crate` plus `FRUITS`), `inFolder` and `parentOf` (the folder-path rules), `account` (which server and account a saved password is for), `matches` (the search rule) and `sharingText` (what the page says when a session shares a folder, [§8](#shared-folders-which-folders-and-who-agrees)), so there is one copy of each instead of one in the store and another in the page that could quietly drift apart. The page imports it as an ES module; `store.js` loads it with plain `require()`, which recent Node and Electron allow for an ES module with no top-level `await`.
+`shared.mjs` is the one file both sides load. It holds small pure helpers, `FRUITS` (the fruit pictures), `ICONS` (what a folder icon may be: `crate` plus `FRUITS`), `inFolder` and `parentOf` (the folder-path rules), `account` (which server and account a saved password is for), `matches` (the search rule), `clipboardWord` and `clipboardWays` (what a connection's clipboard choice allows, which `guacd.js` loads too) and `sharingText` (what the page says when a session shares a folder, [§8](#shared-folders-which-folders-and-who-agrees)), so there is one copy of each instead of one in the store and another in the page that could quietly drift apart. The page imports it as an ES module; `store.js` loads it with plain `require()`, which recent Node and Electron allow for an ES module with no top-level `await`.
 
 ---
 
@@ -1227,6 +1227,9 @@ function remoteSettings(conn, password, cert, share) {
     if (conn.adminSession) settings.console = 'true'; // the server's console / admin session, like mstsc /admin
     if (share) Object.assign(settings, { 'enable-drive': 'true', 'drive-path': DRIVE, 'drive-name': 'Shared', 'client-name': 'banana-phone', ...NO_TRANSFER });
   } else if (conn.username) settings.username = conn.username;
+  const { toRemote, fromRemote } = clipboardWays(conn.clipboard);
+  if (!fromRemote) settings['disable-copy'] = 'true';
+  if (!toRemote) settings['disable-paste'] = 'true';
   return settings;
 }
 ```
@@ -1248,6 +1251,7 @@ The settings are built by their own function, `remoteSettings`, which only compu
 * `resize-method: display-update` lets the remote desktop change resolution live when you resize a pane or switch from one pane to a 2×2 grid.
 * With a `share`, `enable-drive` turns on RDP **drive redirection**: the server sees one more drive, backed by the folder `drive-path` on the machine guacd runs on. Windows lists it as "Shared on banana-phone" (`drive-name` on `client-name`) and as `\\tsclient\Shared`.
 
+* `disable-copy` and `disable-paste` close one direction of the clipboard each, for RDP and VNC alike, according to the connection's **Clipboard** choice (`clipboardWays`, from `shared.mjs`, says which). guacd names them from the remote side's point of view: "copy" is text leaving the remote desktop, "paste" is text going to it. Only the four known words open anything: a word that is not one of them closes both. See [the clipboard section](#clipboard-clipboardjs-and-terminal-shortcuts).
 * `...NO_TRANSFER` spreads in two more settings, explained next.
 
 ```js
@@ -2500,12 +2504,14 @@ ipcMain.on('clipboard:write', (_e, text) => { if (typeof text === 'string') clip
 ```js
 export const clean = (text) => text.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '');
 
-export function shareClipboard(client, target, bp) {
+export function shareClipboard(client, target, bp, mode) {
+  const { toRemote, fromRemote } = clipboardWays(mode);
   let last = null; // last text seen on either side, so it is never echoed back
   let received = 0; // bumped on every remote copy, so a slow push can tell it is out of date
   let connected = false;
 
   client.onclipboard = (stream, mimetype) => {
+    if (!fromRemote) return stream.sendAck('Clipboard sharing is off', 0x0100);
     if (!mimetype.startsWith('text/')) return stream.sendAck('Unsupported clipboard type', 0x0100);
     const reader = new Guacamole.StringReader(stream);
     let text = '';
@@ -2520,7 +2526,7 @@ export function shareClipboard(client, target, bp) {
   };
 
   const push = async () => {
-    if (!connected) return;
+    if (!connected || !toRemote) return;
     const before = received;
     const text = await bp.clipboardRead();
     if (!text || text === last || received !== before) return;
@@ -2543,12 +2549,47 @@ export function shareClipboard(client, target, bp) {
 * `connected` holds pushes until the session is up; Guacamole drops data sent before then. `app.js` calls `onConnected()` from its state handler:
 
 ```js
-  const clip = shareClipboard(client, p.body, window.bp);
+  const clip = shareClipboard(client, p.body, window.bp, c.clipboard);
   client.onstatechange = (s) => {
     if (s === 3) { status(p, null); clip.onConnected(); } // CONNECTED
 ```
 
 Each remote pane has its own `shareClipboard`, so with two desktops in a split, text goes to the one you click into.
+
+**Which way, per connection.** A remote computer can read what you copy here, passwords included, and can put text on your clipboard for you to paste here. So the edit dialog has a **Clipboard** choice for RDP and VNC connections, next to the password: shared both ways (as it always was, and what a connection saved before the choice existed gets), only to the remote computer, only from it, or not shared. It is saved on the connection as `clipboard`: `'both'`, `'toRemote'`, `'fromRemote'` or `'off'`.
+
+```html
+        <label class="field remote-only" title="Which way copied text may go between this computer and the remote one. Text only.">Clipboard
+          <select name="clipboard">
+            <option value="both">Shared both ways</option>
+            <option value="toRemote">Only to the remote computer</option>
+            <option value="fromRemote">Only from the remote computer</option>
+            <option value="off">Not shared</option>
+          </select>
+        </label>
+```
+
+The class `remote-only` hides it for SSH and local terminals, the way `rdp-only` hides the domain (one more selector in the same rule of `fruit.css`). The dialog sends the value for every type of connection, so a limit is not lost when a connection is changed to SSH and back.
+
+Three places act on the word, and the page is the least of them:
+
+```js
+const CLIPBOARD = { both: [true, true], toRemote: [true, false], fromRemote: [false, true], off: [false, false] };
+export const clipboardWord = (mode) => (mode === undefined ? 'both' : typeof mode === 'string' && Object.hasOwn(CLIPBOARD, mode) ? mode : 'off');
+export const clipboardWays = (mode) => { const [toRemote, fromRemote] = CLIPBOARD[clipboardWord(mode)]; return { toRemote, fromRemote }; };
+```
+
+That is in `shared.mjs`, the file both sides load, and it is the only place the words mean anything. `clipboardWord` holds the two rules for a word that is not one of the four: never set at all (`undefined`, a connection from before the choice existed) counts as `'both'`, and everything else (`''`, `null`, a made-up word, something that is not a string) counts as `'off'`. `Object.hasOwn` asks about the table's own keys only, so `'constructor'`, which every object inherits, is not a word. `clipboardWays` turns the word into the two directions.
+
+```js
+  if (conn.clipboard !== undefined) conn.clipboard = clipboardWord(conn.clipboard); // undefined = keep what is saved
+```
+
+* **`store.js`** (`upsert`, in main) takes the word from the page and saves what `clipboardWord` makes of it: one of the four, and `'off'` for anything else. A page that sends nonsense gets less sharing, never more. `undefined` (the page said nothing about it) leaves the saved word alone.
+* **`guacd.js`** (`remoteSettings`, [§8](#8-guacdjs-remote-desktops-through-guacamole)) asks `clipboardWays` about the saved word and turns the answer into guacd's `disable-copy` and `disable-paste`. This is what enforces the choice: the settings travel inside the encrypted token, which the page cannot read or change, and guacd itself then drops clipboard data in a closed direction. It does not matter what the page does.
+* **`clipboard.js`** asks `clipboardWays` about the same word (`mode`) only so that the page does not offer what guacd would drop: with the way to the remote side closed, `push` sends nothing; with the way from it closed, an incoming clipboard stream is refused with an ack and your clipboard is left alone.
+
+The choice is about remote desktops only. Terminals copy and paste on your keystroke, below.
 
 Terminals get the usual Linux shortcuts, because plain Ctrl+C must stay "interrupt" in a shell:
 
@@ -2649,7 +2690,7 @@ You hold **Shift** and double-click `dc01` (RDP, `admin` / `CORP`) while an SSH 
 | The page reusing a session it was once given | A token opens one websocket within a minute, and carries inside its encryption which guacd it is for, so an agreed share cannot be reopened later or pointed at another share's folder. |
 | Sharing your keys or settings by accident | The home folder itself, hidden folders in it, `~/snap`, system folders and the app's own folder are refused, judged by the folder's real path and by which folder it is on disk (so not by another name either, where it is mounted twice). A folder that holds `.ssh`, `.gnupg` or the like is refused as a copy of a home folder. |
 | Shell injection | `docker` is called with `execFile` and an argument array, never a shell string. |
-| Clipboard leaking to remote hosts | Only text, and only to the remote pane you click into; the page can read the clipboard through `clipboard:read`, but the CSP leaves it nowhere to send it except localhost. |
+| Clipboard leaking to remote hosts | Only text, and only to the remote pane you click into; each RDP or VNC connection can share it one way only or not at all, which guacd enforces (`disable-copy`, `disable-paste` in the token); the page can read the clipboard through `clipboard:read`, but the CSP leaves it nowhere to send it except localhost. |
 | A bad bulk edit | Preview with checkboxes, a confirmation, and `connections.json.bak` before every bulk edit or delete. |
 | Half-written file after a crash | Write to `.tmp`, then atomic rename. |
 
@@ -2736,6 +2777,8 @@ Page updates are not instant, so instead of sleeping for a guessed time the test
 Two subtests are about the split tree. One fills a tab with eight terminals, checks the grid's rows are 3 + 3 + 2, and that a ninth opens a new tab. The other starts from a 2×2 grid and uses a pane header's **Split down** and **Split right**. It measures every pane to see that the new one took half of the split pane's space and nothing else moved, drags the gutter three levels down, splits again with Shift+Terminal, checks that **Duplicate** gives a tab with the same measurements, and closes the extra panes to see the splits collapse back to the 2×2. The tree's own rules (`preset`, `insert`, `map`) are checked without a window in `layout.test.js`, which `npm test` runs.
 
 One subtest is about shared folders. It fills in the edit dialog and checks that the box is shown for RDP only, that the path cannot be typed, that choosing the home folder is refused with the reason in a toast, that a chosen folder is saved by its real path and read-only unless the checkbox is ticked, that **Add a folder** gives a second folder a row and a mode of its own while a row left empty is ignored, that the same folder chosen twice is refused, that ✕ takes a folder out, and that ✕ on the last row removes the share. The system's folder dialog cannot be clicked from DevTools, so the test replaces it: `app.main(expr)` runs an expression in the main process through Node's inspector (`launch` waits for the inspector's address to be printed before it returns), and the test uses it to swap `dialog.showOpenDialog` for a function that answers with the folder the test wants "chosen". It also plays a misbehaving page. It sends `store:save` paths nobody chose (a folder that exists, one that does not, the home folder, `/etc`), alone and in a list beside a folder that was chosen, and checks that all get the very same refusal and nothing is saved; and it sends a made-up `shareOk` and then reads this run's `connections.json` (`app.profile` is the throwaway profile's folder) to see that it never reached the file. A second, short test starts the app with a `connections.json` that already holds a share in the old single-folder form (`launch(saved)` writes it into the profile first) and checks that editing and duplicating that connection save without any choosing, while a path that is not saved is still refused, alone or in a list. The question before sharing is a system dialog too, and is covered by `share.js`'s unit tests and the hand check in `docs/shared-folders-check.md`.
+
+Another is about the clipboard choice. It checks that the box is shown for RDP and VNC only, that the choice is saved and shown again, and that a made-up word sent to `store:save` reaches the file as `'off'`. It then loads `clipboard.js` in the page (`import()`) and runs `shareClipboard` with a stand-in for the Guacamole client, once per word, to see which directions it serves. No remote desktop is involved, so that guacd really drops the clipboard is not tested here.
 
 The dialog step caught a real bug. The edit dialog used to save from its `close` event, with a new listener added each time it opened. Chromium can deliver a `close` event late. Under the test's fast input, the Esc that cancelled one opening only "arrived" together with the next opening's Save. Both listeners then read `returnValue` as `ok`, and the connection was saved twice. In the opposite order (Save, then reopen at once), a Save could be lost. The dialogs now save on `submit` instead (see [§9](#9-rendererindexhtml-and-fruitcss-the-look)), and the test covers both orders: Esc then Save, and Save then an immediate reopen.
 
@@ -2855,7 +2898,7 @@ Covered: multi-word search, that an empty password removes the saved one while a
 
 `scripts/share.itest.js` (`npm run test:share`) is the one test that touches the real things, so it is not part of `npm test`. It needs Docker, an RDP server on this machine (xrdp, standing in for Windows) and a second account to log in as; CI's `share` job installs all three on a fresh machine. The test calls `rdpFingerprint` and `openRemote` exactly as `main.js` does, opens the websocket the page would open, and then looks at the redirected drive *as the logged-in account*: what a program on the remote computer could do. It checks that a read-only share can be read and not changed, not even on a drive mounted inside the folder, that guacd can write nowhere in its container but `/tmp`, that a writable one can be changed and that the new files are yours, that links pointing out of the folder lead nowhere, that the container has one mount, no port and no way in from the network, that a token cannot be used twice, that a folder swapped for a link to another one is not shared, that two folders of the same name sit side by side in `/drive` with a mode each and nothing can be written next to them, that closing the last session stops its container and the next session starts it again, and that quitting stops the containers. `docs/shared-folders-check.md` lists the results and what is left to check by hand on a real Windows host.
 
-`guacd.test.js` also checks `remoteSettings`: the RDP settings pin the certificate, ask for the admin session only when it is ticked, and turn the drive on (and guacd's own file transfer off) only for an RDP connection that was given a share. For shared folders it checks the `docker run` arguments (read-only at every level unless `writable` is exactly `true`, your user and groups, a read-only container with a `/tmp` of its own, this launch's network and a memory limit, no published port, bad paths refused; for several folders one mount each under `/drive` and names that could lead out of it refused), that a read-only share is not started on a Docker Engine older than 25 while a writable one is, that `shareBlocker` names rootless Docker, Podman, SELinux and Docker Desktop from sample `docker info` and `docker version` answers (nothing for an ordinary Docker, and a refusal for an answer that cannot be read) and that no container is started when it does, and, with a stand-in `docker` program on the `PATH`, that `ensureShare` starts the container once, creates its network first, sweeps only a crashed launch's leftover containers and network, refuses a container whose mounted folder is not the one that was examined (with several folders, if any one of them is not, or they are not in their places), that its socket is private and carries bytes both ways through `docker exec`, and that `stopGuacd` stops the container, then removes the network and the socket. Two tests cover the guacd installed on the computer: the version rule and the command line, and then, with a stand-in `guacd` on a `PATH` that has no `docker`, that a Docker which is installed but failing is not replaced by it, that a too-old one is not started, that what a failing one printed reaches the error, that two panes share one guacd on a port of its own, that a shared folder is refused, that a guacd which died is replaced and another program answering on its old port is not used, that `stopGuacd` ends the process, and that a quit while guacd is still being started leaves none running. Another covers tokens: one use, one minute, and each share's token naming its own guacd on the one bridge. The last one covers the idle container, with the clock mocked (`t.mock.timers`) so that minutes pass at once: an open session or a token that is still good keeps it, it is removed ten seconds after the last of them, a session within those ten seconds keeps it, a session arriving during the removal starts a new one after it, and a connect that fails lets go.
+`guacd.test.js` also checks `remoteSettings`: the RDP settings pin the certificate, ask for the admin session only when it is ticked, close the clipboard's directions as the connection says for RDP and VNC (and both for a word it does not know; `store.test.js` checks that such a word is saved as `'off'`), and turn the drive on (and guacd's own file transfer off) only for an RDP connection that was given a share. For shared folders it checks the `docker run` arguments (read-only at every level unless `writable` is exactly `true`, your user and groups, a read-only container with a `/tmp` of its own, this launch's network and a memory limit, no published port, bad paths refused; for several folders one mount each under `/drive` and names that could lead out of it refused), that a read-only share is not started on a Docker Engine older than 25 while a writable one is, that `shareBlocker` names rootless Docker, Podman, SELinux and Docker Desktop from sample `docker info` and `docker version` answers (nothing for an ordinary Docker, and a refusal for an answer that cannot be read) and that no container is started when it does, and, with a stand-in `docker` program on the `PATH`, that `ensureShare` starts the container once, creates its network first, sweeps only a crashed launch's leftover containers and network, refuses a container whose mounted folder is not the one that was examined (with several folders, if any one of them is not, or they are not in their places), that its socket is private and carries bytes both ways through `docker exec`, and that `stopGuacd` stops the container, then removes the network and the socket. Two tests cover the guacd installed on the computer: the version rule and the command line, and then, with a stand-in `guacd` on a `PATH` that has no `docker`, that a Docker which is installed but failing is not replaced by it, that a too-old one is not started, that what a failing one printed reaches the error, that two panes share one guacd on a port of its own, that a shared folder is refused, that a guacd which died is replaced and another program answering on its old port is not used, that `stopGuacd` ends the process, and that a quit while guacd is still being started leaves none running. Another covers tokens: one use, one minute, and each share's token naming its own guacd on the one bridge. The last one covers the idle container, with the clock mocked (`t.mock.timers`) so that minutes pass at once: an open session or a token that is still good keeps it, it is removed ten seconds after the last of them, a session within those ten seconds keeps it, a session arriving during the removal starts a new one after it, and a connect that fails lets go.
 
 ---
 

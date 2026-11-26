@@ -103,7 +103,18 @@
         <div id="share-rows"></div>
         <p class="muted small">Shows up there as the drive “Shared on banana-phone”; several folders are folders in it. Read-only unless “Can change files” is ticked. You are asked to agree the first time you connect. Files changed here show there after a refresh (F5). Some servers are set to refuse shared drives.</p>
       </fieldset>
-      <label class="field net">Password <input name="password" type="password" autocomplete="new-password"></label>
+      <div class="row net">
+        <label class="field grow">Password <input name="password" type="password" autocomplete="new-password"></label>
+        <!-- beside the password, not on a line of its own: the RDP dialog is as tall as the window already -->
+        <label class="field remote-only" title="Which way copied text may go between this computer and the remote one. Text only.">Clipboard
+          <select name="clipboard">
+            <option value="both">Shared both ways</option>
+            <option value="toRemote">Only to the remote computer</option>
+            <option value="fromRemote">Only from the remote computer</option>
+            <option value="off">Not shared</option>
+          </select>
+        </label>
+      </div>
       <label class="check net" id="clear-pw"><input name="clearPassword" type="checkbox"> Remove the saved password</label>
       <label class="field ssh-only">Private key file <input name="keyPath" type="text" placeholder="~/.ssh/id_ed25519"></label>
       <fieldset class="cmds term-only">

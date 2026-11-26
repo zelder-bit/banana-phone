@@ -11,6 +11,7 @@ const url = require('url');
 const GuacamoleLite = require('guacamole-lite');
 const Crypt = require('guacamole-lite/lib/Crypt');
 require('./pagefilter'); // before any session: the page's requests for files never reach guacd
+const { clipboardWays } = require('./renderer/shared.mjs');
 
 const NAME = 'banana-phone-guacd';
 // 1.6 adds cert-fingerprints; still serves guacamole-common-js 1.5 clients. The digest is the one of the multi-platform
@@ -518,6 +519,11 @@ function remoteSettings(conn, password, cert, share) {
     // The shared folder as a drive: "Shared on banana-phone" in Explorer, \\tsclient\Shared in a path. Several folders are folders in that one drive.
     if (share) Object.assign(settings, { 'enable-drive': 'true', 'drive-path': DRIVE, 'drive-name': 'Shared', 'client-name': 'banana-phone', ...NO_TRANSFER });
   } else if (conn.username) settings.username = conn.username;
+  // The clipboard, RDP and VNC alike. guacd names the directions from the remote side's point of view: "copy" is
+  // text leaving the remote desktop, "paste" is text going to it. What each word allows: clipboardWays in shared.mjs.
+  const { toRemote, fromRemote } = clipboardWays(conn.clipboard);
+  if (!fromRemote) settings['disable-copy'] = 'true';
+  if (!toRemote) settings['disable-paste'] = 'true';
   return settings;
 }
 

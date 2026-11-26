@@ -271,6 +271,23 @@ test('a file saved when a connection shared one folder loads as a list of one, t
   assert.ok(!('share' in d.connections[1]) && !('shares' in d.connections[1]));
 });
 
+test('clipboard sharing: a known word is kept, anything else from the page shares nothing, unsaid leaves it alone', () => {
+  const d = sample();
+  const c = () => d.connections[0];
+  for (const word of ['both', 'toRemote', 'fromRemote', 'off']) {
+    store.upsert(d, { id: 'a', clipboard: word });
+    assert.strictEqual(c().clipboard, word);
+  }
+  store.upsert(d, { id: 'a', clipboard: 'fromRemote' });
+  store.upsert(d, { id: 'a', name: 'renamed' });
+  assert.strictEqual(c().clipboard, 'fromRemote');
+  for (const bad of ['BOTH', '', null, true, 'constructor', ['both'], { toString: () => 'both' }]) {
+    store.upsert(d, { id: 'a', clipboard: 'both' });
+    store.upsert(d, { id: 'a', clipboard: bad });
+    assert.strictEqual(c().clipboard, 'off', JSON.stringify(bad));
+  }
+});
+
 test("an agreement ends with any change to what was agreed, and cannot be saved in or brought back", () => {
   const d = sample();
   const c = () => d.connections[0];
