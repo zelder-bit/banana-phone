@@ -26,9 +26,9 @@ For shared folders on RDP connections
     drive mounted inside the folder read-only, so banana-phone refuses
     to start the share. Writable shares work on older Engines.
   - The folder's path must not contain a comma or a double quote.
-  - Not checked yet: rootless Docker, Podman, and systems where Docker
-    enforces SELinux (Fedora, RHEL). The folder may show up empty or
-    read-only there.
+  - Not supported yet: rootless Docker, Podman, Docker Desktop, and
+    systems where Docker enforces SELinux (Fedora, RHEL). banana-phone
+    refuses to start the share there and says which of them it found.
 
 For saved passwords
   - A system keyring: GNOME Keyring or KWallet
