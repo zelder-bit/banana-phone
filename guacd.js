@@ -123,12 +123,39 @@ const myGroups = () => process.getgroups().filter((g) => g !== process.getgid())
 const READ_ONLY = ',readonly,bind-recursive=readonly,bind-propagation=rprivate';
 // An Engine older than 25 does not know that option. Asked first, so the refusal says what to do.
 const READ_ONLY_SINCE = 25;
-async function readOnlyOrRefuse() {
-  const version = await docker(['version', '--format', '{{.Server.Version}}']); // asked each time: a share's container starts rarely, and Docker can be updated meanwhile
-  if (!(parseInt(version, 10) >= READ_ONLY_SINCE)) {
-    throw new Error(`A read-only shared folder needs Docker Engine ${READ_ONLY_SINCE} or newer, and this is ${version || 'not known'}. Older ones leave a drive mounted inside the folder open to changes. Update Docker, then connect again.`);
+
+// Ways of running containers where a share is known not to work. Left to fail on its own, the folder
+// shows up empty, refuses writes, or is said to have "changed".
+// Each row: how one is recognised (i: docker info, v: docker version, options: info's security options
+// as one string), and what is said about it. The first row that fits is the answer.
+const OTHER_USER = 'the container as another user on this computer, so the folder would be unreadable or files would arrive with the wrong owner';
+const BLOCKERS = [
+  // Podman's own `docker` command answers in Podman's shape (host, store). Reached through its socket by the real docker, it names itself as a component.
+  [(i, v) => (i.host && !i.ServerVersion) || /podman/i.test(JSON.stringify(v.Server?.Components || '')), `with Podman yet: it can run ${OTHER_USER}`],
+  [(i) => i.OperatingSystem === 'Docker Desktop', 'with Docker Desktop yet: its containers run in a virtual machine, where banana-phone cannot confirm that the folder mounted is the one you chose'],
+  [(i, v, options) => /\bname=rootless\b/.test(options), `with rootless Docker yet: it runs ${OTHER_USER}`],
+  [(i, v, options) => /\bname=selinux\b/.test(options), 'where Docker enforces SELinux (Fedora, RHEL) yet: the folder has no label that lets a container in, and banana-phone will not relabel a folder you also use elsewhere'],
+];
+
+// Why this Docker cannot serve a share, said before anything is started, or nothing where it can.
+// info, version: what `docker info` and `docker version` print with --format '{{json .}}'. writable: the share's mode.
+function shareBlocker(info, version, writable) {
+  const json = (s) => { try { const o = JSON.parse(s); return o && typeof o === 'object' && !Array.isArray(o) ? o : null; } catch { return null; } };
+  const i = json(info), v = json(version);
+  // An answer that is no JSON object could hide any of the rows above, so it is not taken for "none of them".
+  if (!i || !v) return "Docker's answer about how it runs could not be read, so nothing was shared.";
+  // Searched as one string, not compared entry by entry: an entry can say more than its name ("name=seccomp,profile=builtin").
+  const options = [].concat(i.SecurityOptions || []).join(' ');
+  const why = BLOCKERS.find(([fits]) => fits(i, v, options))?.[1];
+  if (why) return `Shared folders do not work ${why}. Nothing was shared.`;
+  // Only now the Engine's number: Podman's is its own (5.x) and would read as an Engine that is too old.
+  const engine = v.Server?.Version;
+  if (writable !== true && !(parseInt(engine, 10) >= READ_ONLY_SINCE)) {
+    return `A read-only shared folder needs Docker Engine ${READ_ONLY_SINCE} or newer, and this is ${engine || 'not known'}. Older ones leave a drive mounted inside the folder open to changes. Update Docker, then connect again.`;
   }
+  return null;
 }
+const dockerSays = (what) => docker([what, '--format', '{{json .}}']);
 
 // share: what share.js's pin() found, for one connection:
 //   { path: the folder, writable: boolean, dev, ino: which folder that was on disk, id: the connection, server: its host and port }
@@ -196,7 +223,8 @@ function startShare(share) {
   const s = shares.get(name) || shares.set(name, {}).get(name);
   return (s.starting ||= (async () => {
     const args = shareRunArgs(name, share); // refuses a bad path before anything is started
-    if (share.writable !== true) await readOnlyOrRefuse();
+    const blocked = shareBlocker(...await Promise.all([dockerSays('info'), dockerSays('version')]), share.writable); // asked each time: a share's container starts rarely, and Docker can be updated meanwhile
+    if (blocked) throw new Error(blocked);
     await sweep();
     await docker(['rm', '-f', name]).catch(() => {});
     await docker(args);
@@ -350,4 +378,4 @@ function stopGuacd() {
 }
 
 // ensureBridge is here for guacd.test.js alone, which sends a page's messages through the real bridge to see what comes out.
-module.exports = { openRemote, remoteSettings, resolveHost, rdpFingerprint, stopGuacd, encryptToken, key, shareRunArgs, shareName, ensureShare, sweep, verifyClient, ticket, ensureBridge };
+module.exports = { openRemote, remoteSettings, resolveHost, rdpFingerprint, stopGuacd, encryptToken, key, shareRunArgs, shareName, shareBlocker, ensureShare, sweep, verifyClient, ticket, ensureBridge };

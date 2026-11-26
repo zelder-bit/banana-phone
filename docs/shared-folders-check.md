@@ -72,8 +72,16 @@ xrdp is not Windows. Before relying on the feature, connect to a real Windows ho
 - Many organisations set their Windows servers to refuse redirected drives (the CIS and DISA baselines both say to). The session then opens without the drive, and nothing on this side can tell, so the toast shown on connecting (and the tooltip of the pane's *shared folder* label) always adds: "If no drive appears there, the server may be set to refuse shared drives."
 - The page can find out whether a folder exists by trying to save it as a share, since saving has to say whether it worked. It learns nothing of what is in it.
 
+## Refused, with the reason
+
+A share does not start on these, and the message names which one it is. banana-phone tells them apart from what `docker info` and `docker version` report (`shareBlocker` in `guacd.js`). Which of them to support properly is still to be decided.
+
+- **Rootless Docker** (`name=rootless` among the security options) and **Podman** (its own `docker` command, or the real one talking to Podman's socket). The container runs with `--user <your uid>`, which those map to a different user on the host, so the folder would be unreadable or files would arrive with the wrong owner.
+- **Docker that enforces SELinux** (`name=selinux`; Fedora, RHEL). The folder is mounted without relabelling it, so the container is denied. Relabelling a folder you also use elsewhere is not something to do silently. Docker lists SELinux whenever it was started with it, so a system set to permissive is refused too.
+- **Docker Desktop for Linux.** Containers run in a virtual machine and files cross through a file-sharing layer, so the folder the container sees cannot be matched with the one that was checked.
+
+Only the recognising is tested, against sample answers; the plain-Docker sample is real, the others follow each program's documented output. None of the four has been run: not the refusal on a real one, and not what happened there before it.
+
 ## Not checked, and not expected to work without changes
 
-- **Rootless Docker and Podman.** The container runs with `--user <your uid>`, which those map to a different user on the host, so the folder is likely to appear empty or refuse writes.
-- **SELinux-enforcing Docker (Fedora, RHEL).** The folder is mounted without relabelling it, so the container may be denied. Relabelling a folder you also use elsewhere is not something to do silently.
 - **A guacd that is not in Docker** (issue #6). guacd follows symlinks and the container is what stops them leading out of the folder; a system guacd has no such wall. Shared folders should stay Docker-only unless that is solved another way.

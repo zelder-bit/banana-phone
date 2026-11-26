@@ -125,9 +125,11 @@ test("a share's container sees only that folder, read-only by default, as you, w
 function fakeDocker(t, existing = []) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bp-docker-'));
   const log = path.join(dir, 'log');
-  fs.writeFileSync(path.join(dir, 'docker'), `#!/bin/sh\necho "$*" >> "${log}"\n[ "$1 $2" = "exec -i" ] && exec cat\n[ "$1" = inspect ] && echo true\n[ "$1" = version ] && cat "${dir}/version"\n[ "$1" = ps ] && cat "${dir}/ps"\n[ "$1 $3" = "exec stat" ] && cat "${dir}/mounted"\nexit 0\n`, { mode: 0o755 });
+  fs.writeFileSync(path.join(dir, 'docker'), `#!/bin/sh\necho "$*" >> "${log}"\n[ "$1 $2" = "exec -i" ] && exec cat\n[ "$1" = inspect ] && echo true\n[ "$1" = version ] && cat "${dir}/version"\n[ "$1" = info ] && cat "${dir}/info"\n[ "$1" = ps ] && cat "${dir}/ps"\n[ "$1 $3" = "exec stat" ] && cat "${dir}/mounted"\nexit 0\n`, { mode: 0o755 });
   fs.writeFileSync(path.join(dir, 'ps'), existing.map((n) => n + '\n').join(''));
-  fs.writeFileSync(path.join(dir, 'version'), '29.1.0\n');
+  const engine = (v) => fs.writeFileSync(path.join(dir, 'version'), JSON.stringify({ Server: { Version: v } }) + '\n');
+  engine('29.1.0');
+  fs.writeFileSync(path.join(dir, 'info'), '{}\n');
   const before = { PATH: process.env.PATH, XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR };
   Object.assign(process.env, { PATH: `${dir}:${before.PATH}`, XDG_RUNTIME_DIR: dir });
   t.after(() => {
@@ -136,7 +138,7 @@ function fakeDocker(t, existing = []) {
     fs.rmSync(dir, { recursive: true, force: true });
   });
   const calls = () => (fs.existsSync(log) ? fs.readFileSync(log, 'utf8').trim().split('\n') : []);
-  return Object.assign(calls, { mounted: (id) => fs.writeFileSync(path.join(dir, 'mounted'), id + '\n'), engine: (v) => fs.writeFileSync(path.join(dir, 'version'), v + '\n') });
+  return Object.assign(calls, { mounted: (id) => fs.writeFileSync(path.join(dir, 'mounted'), id + '\n'), engine, info: (o) => fs.writeFileSync(path.join(dir, 'info'), JSON.stringify(o) + '\n') });
 }
 
 test('a share starts its container once, is reached through a private socket, and is stopped on quit', async (t) => {
@@ -201,6 +203,61 @@ test('a read-only share is not started where Docker cannot keep all of it read-o
   calls.engine('25.0.0');
   await ensureShare({ id: 'old', path: folder, dev: '64', ino: '1234' });
   assert.strictEqual(calls().filter((c) => c.startsWith('run ')).length, 2);
+});
+
+// Sample answers, cut down to the fields that are read. The plain Docker one is from Debian 13 (Engine 26.1);
+// the others follow what each program is documented to print and were not captured from a real one.
+test('shareBlocker names rootless Docker, Podman, SELinux, Docker Desktop and an Engine too old, and nothing else', () => {
+  const { shareBlocker } = require('./guacd');
+  const info = (o) => JSON.stringify({ ServerVersion: '26.1.5', OperatingSystem: 'Debian GNU/Linux 13 (trixie)', SecurityOptions: ['name=apparmor', 'name=seccomp,profile=builtin', 'name=cgroupns'], ...o });
+  const version = JSON.stringify({ Client: { Version: '26.1.5' }, Server: { Version: '26.1.5', Components: [{ Name: 'Engine', Version: '26.1.5' }, { Name: 'containerd' }] } });
+  assert.strictEqual(shareBlocker(info(), version), null);
+  assert.match(shareBlocker(info({ SecurityOptions: ['name=seccomp,profile=builtin', 'name=rootless', 'name=cgroupns'] }), version), /^Shared folders do not work with rootless Docker yet: .*Nothing was shared\.$/);
+  assert.match(shareBlocker(info({ OperatingSystem: 'Fedora Linux 42 (Workstation Edition)', SecurityOptions: ['name=seccomp,profile=builtin', 'name=selinux'] }), version), /where Docker enforces SELinux/);
+  assert.match(shareBlocker(info({ OperatingSystem: 'Docker Desktop' }), version), /with Docker Desktop yet/);
+  // Podman's own `docker` command: info in Podman's shape, and a version with no Server at all.
+  const podmanInfo = JSON.stringify({ host: { security: { rootless: true, selinuxEnabled: false } }, store: {}, version: { Version: '5.4.2' } });
+  assert.match(shareBlocker(podmanInfo, JSON.stringify({ Client: { Version: '5.4.2' } })), /with Podman yet/);
+  // The real docker talking to Podman's socket: Docker-shaped info, and Podman named among the components.
+  assert.match(shareBlocker(info({ SecurityOptions: ['name=rootless'] }), JSON.stringify({ Server: { Version: '5.4.2', Components: [{ Name: 'Podman Engine', Version: '5.4.2' }] } })), /with Podman yet/);
+  // A read-only share also needs Engine 25; a writable one starts on any. Podman's 5.x is called Podman, not an old Engine.
+  const engine = (v) => JSON.stringify({ Server: { Version: v } });
+  for (const old of ['24.0.7', '20.10.24', '', 'what', undefined]) {
+    assert.match(shareBlocker(info(), engine(old)), /needs Docker Engine 25 or newer/, old);
+    assert.strictEqual(shareBlocker(info(), engine(old), true), null, old);
+  }
+  assert.match(shareBlocker(info(), engine('')), /and this is not known\./);
+  assert.strictEqual(shareBlocker(info(), engine('25.0.0')), null);
+  assert.match(shareBlocker(podmanInfo, engine('5.4.2')), /with Podman yet/);
+  // An answer that cannot be read could hide any of them, so it shares nothing, writable or not.
+  for (const odd of ['', 'what', 'null', '42', '[]', '"name=rootless"', '{"SecurityOptions":']) {
+    for (const [i, v] of [[odd, version], [info(), odd], [odd, odd]]) {
+      for (const writable of [true, false]) assert.match(shareBlocker(i, v, writable), /^Docker's answer about how it runs could not be read, so nothing was shared\.$/, odd);
+    }
+  }
+  // One that can be read but says something unexpected names none of the four.
+  assert.strictEqual(shareBlocker('{"SecurityOptions":"name=other"}', version), null);
+});
+
+test('a share is not started where it is known not to work, and the message says why', async (t) => {
+  const calls = fakeDocker(t);
+  const { ensureShare, stopGuacd } = require('./guacd');
+  t.after(stopGuacd);
+  const folder = fs.mkdtempSync(path.join(os.tmpdir(), 'bp-share-'));
+  t.after(() => fs.rmSync(folder, { recursive: true, force: true }));
+  calls.mounted('64:1234');
+  calls.info({ ServerVersion: '27.0.3', SecurityOptions: ['name=seccomp,profile=builtin', 'name=rootless'] });
+  for (const writable of [false, true]) await assert.rejects(ensureShare({ id: 'r', path: folder, writable, dev: '64', ino: '1234' }), /do not work with rootless Docker/);
+  // Podman gives its own version number (5.x). The reason given is Podman, not an Engine that is too old.
+  calls.engine('5.4.2');
+  calls.info({ host: { security: { rootless: true } }, version: { Version: '5.4.2' } });
+  await assert.rejects(ensureShare({ id: 'r', path: folder, dev: '64', ino: '1234' }), /do not work with Podman/);
+  assert.deepStrictEqual(calls().filter((c) => c.startsWith('run ')), []);
+  // Asked again on the next connect: with an ordinary Docker the same share starts.
+  calls.engine('27.0.3');
+  calls.info({ ServerVersion: '27.0.3', SecurityOptions: ['name=seccomp,profile=builtin'] });
+  await ensureShare({ id: 'r', path: folder, dev: '64', ino: '1234' });
+  assert.strictEqual(calls().filter((c) => c.startsWith('run ')).length, 1);
 });
 
 test('a token opens one websocket, soon, and says itself which guacd it is for', async (t) => {
