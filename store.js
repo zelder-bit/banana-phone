@@ -12,7 +12,7 @@ function load(file) {
   try {
     const data = JSON.parse(fs.readFileSync(file, 'utf8'));
     if (!data || typeof data !== 'object') throw new Error('connections file is not a JSON object');
-    const d = { ...empty(), folders: data.folders || [], folderIcons: data.folderIcons || {}, connections: data.connections || [] };
+    const d = { ...empty(), folders: data.folders || [], folderIcons: data.folderIcons || {}, connections: (data.connections || []).map(manyShares) };
     fillFolders(d);
     if (!data.ordered) { // an old file: start from the alphabetical order the sidebar used to show
       d.folders.sort((a, b) => a.localeCompare(b));
@@ -24,6 +24,15 @@ function load(file) {
     throw e; // a corrupt file must not be silently replaced with an empty one
   }
 }
+
+// Shared folders as they are kept: only well-formed entries, `writable` only when said outright.
+const tidyShares = (list) => (Array.isArray(list) ? list : [])
+  .filter((s) => typeof s?.path === 'string' && s.path.trim())
+  .map((s) => ({ path: s.path, writable: s.writable === true }));
+// A connection used to share one folder (`share`) and now shares a list (`shares`): an old one becomes a list of one.
+// Its agreement was for the old form and is not carried over, so the user is asked once more.
+// The file can be edited by hand, so a list read from it is tidied like one the page sends, and an empty one is no list.
+const manyShares = ({ share, shares = share ? [share] : [], ...c }) => { const list = tidyShares(shares); return list.length ? { ...c, shares: list } : c; };
 
 // backup: true writes file.bak, a string writes to that path.
 function save(file, data, { backup = false } = {}) {
@@ -109,10 +118,10 @@ function select(data, filter) {
   });
 }
 
-// What the user's agreement to a shared folder (shareOk) was about, as far as the store can see: change
+// What the user's agreement to shared folders (shareOk) was about, as far as the store can see: change
 // any of it and the agreement is gone for good, so changing it back does not bring an old one back.
 // (main.js's share.approvalOf adds the server's certificate.)
-const agreedTo = (c) => JSON.stringify([c.share?.path, c.share?.writable === true, c.protocol, c.host, c.port || null, c.username || '', c.domain || '', c.adminSession === true]);
+const agreedTo = (c) => JSON.stringify([(c.shares || []).map((s) => [s.path, s.writable === true]), c.protocol, c.host, c.port || null, c.username || '', c.domain || '', c.adminSession === true]);
 
 // patch keys: username, domain, password (already encrypted). Undefined keys are left alone.
 function bulkUpdate(data, filter, patch) {
@@ -120,25 +129,25 @@ function bulkUpdate(data, filter, patch) {
   for (const c of hits) {
     const was = agreedTo(c);
     for (const k of ['username', 'domain', 'password']) if (patch[k] !== undefined) c[k] = patch[k];
-    if (agreedTo(c) !== was) delete c.shareOk; // the folder would now go to another account
+    if (agreedTo(c) !== was) delete c.shareOk; // the folders would now go to another account
   }
   return hits.length;
 }
 
 function upsert(data, input) {
   // shareOk is never taken from what is being saved: only main.js records an agreement, on the saved connection itself.
-  const { copyPasswordFrom, shareOk, ...conn } = input;
+  const { copyPasswordFrom, shareOk, share, ...conn } = input; // `share` is the old single-folder form: only load() reads it
   // Saved commands come from the page: keep only well-formed ones.
   if (conn.commands !== undefined) {
     conn.commands = (Array.isArray(conn.commands) ? conn.commands : [])
       .filter((x) => typeof x?.name === 'string' && typeof x.cmd === 'string' && x.name.trim() && x.cmd.trim())
       .map((x) => ({ name: x.name.trim(), cmd: x.cmd.trim(), onStart: x.onStart === true }));
   }
-  // A shared folder comes from the page too: keep a well-formed one, and anything else (null, '') removes it.
-  // Whether that folder may be shared at all is main.js's question (share.js); `writable` must be said outright.
-  if (conn.share !== undefined) {
-    const s = conn.share;
-    conn.share = typeof s?.path === 'string' && s.path.trim() ? { path: s.path, writable: s.writable === true } : undefined; // the path as main.js let it through
+  // Shared folders come from the page too: keep the well-formed ones, and none left (or null, '') removes the list.
+  // Whether those folders may be shared at all is main.js's question (share.js); `writable` must be said outright.
+  if (conn.shares !== undefined) {
+    conn.shares = tidyShares(conn.shares); // each path as main.js let it through
+    if (!conn.shares.length) conn.shares = undefined;
   }
   if (copyPasswordFrom && !conn.id && conn.password === undefined) { // new connections only
     const src = data.connections.find((c) => c.id === copyPasswordFrom);
@@ -150,9 +159,9 @@ function upsert(data, input) {
   if (i >= 0) data.connections[i] = { ...data.connections[i], ...conn };
   else data.connections.push(conn);
   const saved = data.connections[i >= 0 ? i : data.connections.length - 1];
-  // Only RDP has drives. A connection changed to another type loses its share, and the user's agreement with it.
-  if (saved.protocol !== 'rdp' || !saved.share) delete saved.share;
-  if (!saved.share || agreedTo(saved) !== was) delete saved.shareOk;
+  // Only RDP has drives. A connection changed to another type loses its shares, and the user's agreement with them.
+  if (saved.protocol !== 'rdp' || !saved.shares) delete saved.shares;
+  if (!saved.shares || agreedTo(saved) !== was) delete saved.shareOk;
   fillFolders(data);
   return conn;
 }

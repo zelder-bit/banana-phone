@@ -158,13 +158,16 @@ function verifyClient(info) {
 }
 
 // ---- shared folders -----------------------------------------------------------
-// A connection that shares a folder gets a guacd of its own, in a container that can see that one
-// folder and nothing else of this computer. guacd follows symlinks and trusts whoever connects to it,
+// A connection that shares folders gets a guacd of its own, in a container that can see those
+// folders and nothing else of this computer. guacd follows symlinks and trusts whoever connects to it,
 // so the limits are set by the container, not by guacd:
 //  - only the shared folder is mounted, read-only unless the share is writable, and read-only all the
 //    way down: a drive mounted inside the folder is read-only too (READ_ONLY, below). A link inside it
 //    that points elsewhere on this computer leads nowhere. Each connection has its own container, so
 //    two servers never meet in one.
+//  - several folders are several mounts, each read-only or not on its own, side by side under /drive
+//    (mountAt, below). /drive is then one of the container's own folders: root's, and read-only like
+//    the rest of them (--read-only), so nothing can be written beside the folders.
 //  - which container a session reaches is written inside its encrypted token (guacdPort), with the
 //    settings you agreed to. The page cannot pair one share's settings with another share's folder.
 //  - guacd runs as you (--user, with the groups you are in), so it can open only what you can, and what
@@ -173,6 +176,8 @@ function verifyClient(info) {
 //    guacd's port on localhost is harmless; this one would hand the folder to any program or user on
 //    this computer that connected to it. The only way in is `docker exec`, through relay() below.
 const DRIVE = '/drive'; // where the folder appears inside the container
+// One folder is the drive itself. Several are folders in it, each under the name share.js gave it.
+const mountAt = (share, f) => (share.folders.length === 1 ? DRIVE : `${DRIVE}/${f.name}`);
 // guacd has a second way to move files: through the Guacamole connection itself, to and from the page.
 // The folder is the whole feature here, so that way is closed. Left open, guacd makes a "Download"
 // folder in your folder, and a file the remote side moves into it is sent to the page instead of
@@ -241,12 +246,13 @@ function shareBlocker(info, version, writable) {
 }
 const dockerSays = (what) => docker([what, '--format', '{{json .}}']);
 
-// share: what share.js's pin() found, for one connection:
-//   { path: the folder, writable: boolean, dev, ino: which folder that was on disk, id: the connection, server: its host and port }
-// The name says whose it is: your user number, then this launch (its process id), then the connection, server, folder and mode.
+// share: what share.js's pinAll() found, for one connection:
+//   { id: the connection, server: its host and port,
+//     folders: [{ path: the folder, writable: boolean, dev, ino: which folder that was on disk, name: what it is called in the drive }] }
+// The name says whose it is: your user number, then this launch (its process id), then the connection, server, folders and modes.
 // The server is in it so that a connection pointed at another server does not join the first one's container.
 const shareName = (share) => `${NAME}-${process.getuid()}-${process.pid}-`
-  + crypto.createHash('sha256').update(JSON.stringify([share.id, share.server, share.path, share.writable === true])).digest('hex').slice(0, 12);
+  + crypto.createHash('sha256').update(JSON.stringify([share.id, share.server, share.folders.map((f) => [f.path, f.writable === true])])).digest('hex').slice(0, 12);
 
 // Measured with one session and a busy screen: 54 MB at 1920x1080, 128 MB at 3840x2160, 189 MB at 7680x2160.
 // A limit, not a reservation; /tmp counts towards it. The same figure for --memory-swap means no swap on top.
@@ -267,9 +273,16 @@ const ensureNet = () => (networking ||= (async () => {
 })().finally(() => { networking = null; }));
 
 function shareRunArgs(name, share) {
-  // --mount takes comma-separated fields, so a path with a comma or quote could add fields of its own.
-  if (typeof share?.path !== 'string' || !path.isAbsolute(share.path) || /[,"\x00-\x1f\x7f]/.test(share.path)) {
-    throw new Error('This folder cannot be shared: its path must be absolute, without commas, quotes or control characters');
+  if (!Array.isArray(share?.folders) || !share.folders.length) throw new Error('This folder cannot be shared: no folder was named');
+  for (const f of share.folders) {
+    // --mount takes comma-separated fields, so a path with a comma or quote could add fields of its own.
+    if (typeof f?.path !== 'string' || !path.isAbsolute(f.path) || /[,"\x00-\x1f\x7f]/.test(f.path)) {
+      throw new Error('This folder cannot be shared: its path must be absolute, without commas, quotes or control characters');
+    }
+    // So could a name, which is also one step of a path: a slash or ".." in it would mount the folder somewhere else.
+    if (share.folders.length > 1 && (typeof f.name !== 'string' || !/^(?!\.{1,2}$)[^/,"\x00-\x1f\x7f]+$/.test(f.name))) {
+      throw new Error(`${f.path} cannot be shared: its name in the drive must be plain, without slashes, commas, quotes or control characters`);
+    }
   }
   return ['run', '-d', '--rm', '--name', name,
     '--user', me(), ...myGroups(), '-e', 'HOME=/tmp', // FreeRDP wants a home it can write to; yours does not exist in there
@@ -280,7 +293,7 @@ function shareRunArgs(name, share) {
     '--read-only', '--tmpfs', `/tmp:uid=${process.getuid()},gid=${process.getgid()},mode=700`, '--pids-limit', '512',
     '--network', shareNet(), '--memory', MEMORY, '--memory-swap', MEMORY,
     // Unlike -v, --mount fails if the folder is missing instead of creating it as root.
-    '--mount', `type=bind,source=${share.path},target=${DRIVE}${share.writable === true ? '' : READ_ONLY}`,
+    ...share.folders.flatMap((f) => ['--mount', `type=bind,source=${f.path},target=${mountAt(share, f)}${f.writable === true ? '' : READ_ONLY}`]),
     IMAGE, '-b', '127.0.0.1']; // the image's entrypoint passes extra arguments to guacd; the last -b wins
 }
 
@@ -354,7 +367,8 @@ function startShare(share) {
   return (s.starting ||= (async () => {
     await s.stopping; // a session that arrives while the container is being removed starts a new one after it
     const args = shareRunArgs(name, share); // refuses a bad path before anything is started
-    const blocked = shareBlocker(...await Promise.all([dockerSays('info'), dockerSays('version')]), share.writable); // asked each time: a share's container starts rarely, and Docker can be updated meanwhile
+    // One read-only folder in the list is enough for the read-only question to be asked.
+    const blocked = shareBlocker(...await Promise.all([dockerSays('info'), dockerSays('version')]), share.folders.every((f) => f.writable === true)); // asked each time: a share's container starts rarely, and Docker can be updated meanwhile
     if (blocked) throw new Error(blocked);
     await sweep();
     await docker(['rm', '-f', name]).catch(() => {});
@@ -373,19 +387,20 @@ function startShare(share) {
 // Docker mounts by path, and a path can be made to lead elsewhere between the moment the folder was
 // checked and the moment it is mounted (someone who can write to a folder above it swaps in a link).
 // So the folder is identified the way the kernel does, by device and inode number: what the container
-// has at /drive must be the very folder share.js looked at. Asked on every connect, as the folder at
-// that path may have been replaced since the container started.
+// has at /drive must be the very folder share.js looked at, and with several folders each of them
+// where it is mounted. Asked on every connect, as the folder at that path may have been replaced
+// since the container started.
 async function ensureShare(share) {
   const name = shareName(share);
   const s = shares.get(name);
   // Only a container that had started can have died: one still starting is not "gone".
   if (s?.up && !(await shareRunning(name))) Object.assign(s, { starting: null, up: false }); // Docker restarted, or it crashed
   const sock = await startShare(share);
-  const mounted = await docker(['exec', name, 'stat', '-c', '%d:%i', DRIVE]).catch(() => '');
-  if (!share.dev || !share.ino || mounted !== `${share.dev}:${share.ino}`) {
+  const mounted = await docker(['exec', name, 'stat', '-c', '%d:%i', ...share.folders.map((f) => mountAt(share, f))]).catch(() => ''); // one line for each
+  if (share.folders.some((f) => !f.dev || !f.ino) || mounted !== share.folders.map((f) => `${f.dev}:${f.ino}`).join('\n')) {
     // Deliberate, even while other sessions hold it: a swapped folder is served to nobody, so open sessions lose their drive.
     await removeShare(shares.get(name), name);
-    throw new Error(`${share.path} changed while it was being shared, so nothing was shared. Connect again.`);
+    throw new Error(`${share.folders.length > 1 ? 'One of ' : ''}${share.folders.map((f) => f.path).join(', ')} changed while it was being shared, so nothing was shared. Connect again.`);
   }
   return sock;
 }
@@ -449,7 +464,7 @@ function probeRdp(host, port, tlsOptions) {
 }
 
 // cert: required for RDP (the result of rdpFingerprint), ignored for VNC.
-// share: a folder to show the RDP server as a drive (see shareName), already checked and agreed to. VNC has no drives.
+// share: the folders to show the RDP server as a drive (see shareName), already checked and agreed to. VNC has no drives.
 async function openRemote(conn, password, cert, share) {
   if (conn.protocol !== 'rdp') share = null;
   conn = { ...conn }; // as it is now: a change made while Docker starts must not reach a session already agreed to
@@ -500,7 +515,7 @@ function remoteSettings(conn, password, cert, share) {
       'resize-method': 'display-update',
     });
     if (conn.adminSession) settings.console = 'true'; // the server's console / admin session, like mstsc /admin
-    // The shared folder as a drive: "Shared on banana-phone" in Explorer, \\tsclient\Shared in a path.
+    // The shared folder as a drive: "Shared on banana-phone" in Explorer, \\tsclient\Shared in a path. Several folders are folders in that one drive.
     if (share) Object.assign(settings, { 'enable-drive': 'true', 'drive-path': DRIVE, 'drive-name': 'Shared', 'client-name': 'banana-phone', ...NO_TRANSFER });
   } else if (conn.username) settings.username = conn.username;
   return settings;

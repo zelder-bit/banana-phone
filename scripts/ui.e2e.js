@@ -417,17 +417,17 @@ test('tabs, splits, gutter and dialogs', { timeout: 120000 }, async (t) => {
     await app.waitFor(`${answers} === 2 && document.querySelector('.tab.active .t').textContent === 'cmdbox'`);
   });
 
-  await t.test('shared folder: RDP only, chosen in the folder dialog only, read-only unless ticked, refused for the home folder, emptied to stop sharing', async () => {
+  await t.test('shared folders: RDP only, chosen in the folder dialog only, read-only unless ticked, refused for the home folder, several with a mode each, emptied to stop sharing', async () => {
     // Somewhere that may be shared: outside the home folder, and not the app's own folder (this run's profile).
     const folder = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'bp-ui-share-')));
     t.after(() => fs.rmSync(folder, { recursive: true, force: true }));
     const fill = (fields) => app.eval(`(() => { const f = document.querySelector('#edit-form').elements;
       for (const [k, v] of Object.entries(${JSON.stringify(fields)})) f[k].value = v;
       f.protocol.dispatchEvent(new Event('change')); })()`);
-    // Stands in for the user choosing `dir` in the system's folder dialog, then clicks Choose….
-    const choose = async (dir) => {
+    // Stands in for the user choosing `dir` in the system's folder dialog, then clicks Choose… in that row.
+    const choose = async (dir, row = 0) => {
       await app.main(`require('electron').dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [${JSON.stringify(dir)}] })`);
-      await app.click('#share-pick');
+      await app.click(`#share-rows .share-row:nth-child(${row + 1}) .share-pick`);
     };
     const sharePath = 'document.querySelector("#edit-form").elements.sharePath.value';
     const boxShown = 'document.querySelector("#edit-dlg .share-box").offsetParent !== null';
@@ -451,7 +451,7 @@ test('tabs, splits, gutter and dialogs', { timeout: 120000 }, async (t) => {
     assert.strictEqual(await app.eval(sharePath), '', 'the home folder is not taken');
 
     // A page that sends a path of its own gets one answer, whether the folder is there or not, and nothing is saved.
-    const refused = (dir) => app.eval(`window.bp.save({ name: 'sneak', protocol: 'rdp', host: 'win.test', share: { path: ${JSON.stringify(dir)}, writable: false } }).then(() => 'saved', (e) => e.message)`);
+    const refused = (dir, known = null) => app.eval(`window.bp.save({ name: 'sneak', protocol: 'rdp', host: 'win.test', shares: [${JSON.stringify(known)}, { path: ${JSON.stringify(dir)}, writable: false }].filter(Boolean) }).then(() => 'saved', (e) => e.message)`);
     const answer = await refused(folder);
     assert.match(answer, /choose the shared folder with the Choose… button/);
     for (const dir of [path.join(folder, 'not-there'), os.homedir(), '/etc']) assert.strictEqual(await refused(dir), answer);
@@ -461,27 +461,64 @@ test('tabs, splits, gutter and dialogs', { timeout: 120000 }, async (t) => {
     await app.waitFor(`${sharePath} === ${JSON.stringify(folder)}`); // shown by its real path
     await app.click('#edit-dlg .btn.primary');
     await app.waitFor(`(async () => (await ${winbox}) !== 'null')()`);
-    assert.deepStrictEqual(JSON.parse(await app.eval(winbox)).share, { path: folder, writable: false }); // tidied to its real path, read-only
+    assert.deepStrictEqual(JSON.parse(await app.eval(winbox)).shares, [{ path: folder, writable: false }]); // tidied to its real path, read-only
 
     await editWinbox();
     assert.deepStrictEqual(await app.eval(`(() => { const f = document.querySelector('#edit-form').elements; return [f.sharePath.value, f.shareWritable.checked]; })()`), [folder, false]);
     await app.click('#edit-form [name=shareWritable]');
     await app.click('#edit-dlg .btn.primary');
-    await app.waitFor(`(async () => JSON.parse(await ${winbox}).share.writable === true)()`);
+    await app.waitFor(`(async () => JSON.parse(await ${winbox}).shares[0].writable === true)()`);
 
     // The page can ask for a share but cannot agree to one: an agreement it sends is not kept, and it is never shown one.
     const id = onDisk().id;
     await app.eval(`window.bp.save({ id: ${JSON.stringify(id)}, shareOk: 'f'.repeat(64) })`);
     assert.ok(!('shareOk' in onDisk()), 'a page-made agreement does not reach the file');
     assert.ok(!('shareOk' in JSON.parse(await app.eval(winbox))));
-    assert.deepStrictEqual(onDisk().share, { path: folder, writable: true });
+    assert.deepStrictEqual(onDisk().shares, [{ path: folder, writable: true }]);
 
+    // Nor does a path of the page's own get in beside a folder that was chosen: the answer is the same one, whatever is on disk.
+    for (const dir of [path.join(folder, 'not-there'), os.homedir(), '/etc']) assert.strictEqual(await refused(dir, { path: folder, writable: false }), answer);
+
+    // A second folder gets a row of its own, read-only until ticked. A row left empty is not a folder.
+    const second = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'bp-ui-share-')));
+    t.after(() => fs.rmSync(second, { recursive: true, force: true }));
+    const rows = `[...document.querySelectorAll('#share-rows .share-row')]`;
+    const shown = () => app.eval(`JSON.stringify(${rows}.map((r) => [r.querySelector('[name=sharePath]').value, r.querySelector('[name=shareWritable]').checked]))`).then(JSON.parse);
+    // More rows make the dialog taller than the window, and it scrolls: Save is brought into view as a person would.
+    const save = async () => { await app.eval(`document.querySelector('#edit-dlg .btn.primary').scrollIntoView()`); await app.click('#edit-dlg .btn.primary'); };
     await editWinbox();
-    await app.click('#share-none');
+    await app.click('#share-add');
+    await app.click('#share-add');
+    assert.deepStrictEqual(await shown(), [[folder, true], ['', false], ['', false]]);
+    assert.ok(await app.eval(`${rows}.every((r) => r.querySelector('[name=sharePath]').readOnly)`), 'no row can be typed in');
+    await choose(second, 2);
+    await app.waitFor(`${rows}[2].querySelector('[name=sharePath]').value === ${JSON.stringify(second)}`);
+    await save();
+    await app.waitFor(`(async () => JSON.parse(await ${winbox}).shares.length === 2)()`);
+    assert.deepStrictEqual(onDisk().shares, [{ path: folder, writable: true }, { path: second, writable: false }]);
+    // What a list must be is asked on saving: the same folder chosen twice is refused by the main process, and nothing is saved.
+    await editWinbox();
+    assert.deepStrictEqual(await shown(), [[folder, true], [second, false]]);
+    await choose(folder, 1);
+    await app.waitFor(`${rows}[1].querySelector('[name=sharePath]').value === ${JSON.stringify(folder)}`);
+    await save();
+    await app.waitFor(`/is in the list of shared folders twice/.test(document.querySelector('#toast').textContent)`);
+    assert.deepStrictEqual(onDisk().shares, [{ path: folder, writable: true }, { path: second, writable: false }]);
+    // ✕ takes a folder out of the list.
+    await editWinbox();
+    await app.click('#share-rows .share-row .share-drop');
+    assert.deepStrictEqual(await shown(), [[second, false]]);
+    await app.click('#edit-dlg .btn.primary');
+    await app.waitFor(`(async () => JSON.parse(await ${winbox}).shares.length === 1)()`);
+    assert.deepStrictEqual(onDisk().shares, [{ path: second, writable: false }]);
+
+    // ✕ on the only row leaves an empty one: nothing is shared.
+    await editWinbox();
+    await app.click('#share-rows .share-row .share-drop');
     assert.deepStrictEqual(await app.eval(`(() => { const f = document.querySelector('#edit-form').elements; return [f.sharePath.value, f.shareWritable.checked]; })()`), ['', false]);
     await app.click('#edit-dlg .btn.primary');
-    await app.waitFor(`(async () => !('share' in JSON.parse(await ${winbox})))()`);
-    assert.ok(!('share' in onDisk()));
+    await app.waitFor(`(async () => !('shares' in JSON.parse(await ${winbox})))()`);
+    assert.ok(!('shares' in onDisk()));
   });
 
   await t.test('the sidebar grip widens the list, collapse still hides it, and the width survives a reload', async () => {
@@ -504,8 +541,13 @@ test('a share saved earlier is kept on edit and on Duplicate, with no choosing a
   const folder = '/bp-ui/not-there'; // saving does not look at the folder, so it need not exist
   const app = await launch({ ordered: true, connections: [{ id: 'old', name: 'old', protocol: 'rdp', host: 'win.test', share: { path: folder, writable: false } }] });
   t.after(() => app.close());
-  const save = (conn) => app.eval(`window.bp.save(${JSON.stringify(conn)}).then((v) => v.connections.filter((c) => c.share?.path === ${JSON.stringify(folder)}).length, (e) => e.message)`);
-  assert.strictEqual(await save({ id: 'old', name: 'old', protocol: 'rdp', host: 'win.test', share: { path: folder, writable: true } }), 1);
-  assert.strictEqual(await save({ name: 'old copy', protocol: 'rdp', host: 'win.test', share: { path: folder, writable: true } }), 2);
-  assert.match(await save({ name: 'other', protocol: 'rdp', host: 'win.test', share: { path: folder + '2', writable: false } }), /choose the shared folder/);
+  const save = (conn) => app.eval(`window.bp.save(${JSON.stringify(conn)}).then((v) => v.connections.filter((c) => c.shares?.some((s) => s.path === ${JSON.stringify(folder)})).length, (e) => e.message)`);
+  // The file has the old single-folder form (`share`); it was read as a list of one.
+  assert.strictEqual(await save({ id: 'old', name: 'old', protocol: 'rdp', host: 'win.test', shares: [{ path: folder, writable: true }] }), 1);
+  assert.strictEqual(await save({ name: 'old copy', protocol: 'rdp', host: 'win.test', shares: [{ path: folder, writable: true }] }), 2);
+  assert.match(await save({ name: 'other', protocol: 'rdp', host: 'win.test', shares: [{ path: folder + '2', writable: false }] }), /choose the shared folder/);
+  assert.match(await save({ name: 'other', protocol: 'rdp', host: 'win.test', shares: [{ path: folder, writable: false }, { path: folder + '2', writable: false }] }), /choose the shared folder/);
+  // What a list must be needs no look at the disk either: a folder that is saved already, twice in one list, is refused by its path.
+  assert.strictEqual(await save({ name: 'inner', protocol: 'rdp', host: 'win.test', shares: [{ path: folder, writable: false }] }), 3);
+  assert.match(await save({ name: 'both', protocol: 'rdp', host: 'win.test', shares: [{ path: folder, writable: false }, { path: folder, writable: true }] }), /twice/);
 });
