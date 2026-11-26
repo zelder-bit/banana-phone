@@ -67,22 +67,29 @@ function ensureBridge() {
 // given, and a token decides what guacd is told (which server, which folder), so one that worked
 // twice would let the page open an agreed share again after you had taken it away.
 const TOKEN_LIFE = 60000;
-const tickets = new Map(); // a token's `once` -> when it stops being good
-function ticket() {
-  for (const [t, end] of tickets) if (end < Date.now()) tickets.delete(t);
+const tickets = new Map(); // a token's `once` -> { end: when it stops being good, release, timer: for a share's token (hold, below) }
+function ticket(release) {
+  for (const [t, { end }] of tickets) if (end < Date.now()) tickets.delete(t);
   const t = crypto.randomBytes(16).toString('hex');
-  tickets.set(t, Date.now() + TOKEN_LIFE);
+  // A share's container is held for its token: until the token runs out unused, or else until its websocket has closed.
+  const timer = release && setTimeout(() => { tickets.delete(t); release(); }, TOKEN_LIFE).unref();
+  tickets.set(t, { end: Date.now() + TOKEN_LIFE, release, timer });
   return t;
 }
 // Asked by the websocket server before it accepts a connection, so a spent token never reaches guacamole-lite.
+// It does two things: it checks the token, and for a share's token it hands the hold on the share's
+// container (hold, below) from the token to the connection, to be let go when that closes.
 function verifyClient(info) {
   try {
     const { token } = url.parse(info.req.url, true).query; // parsed the way guacamole-lite will parse it
     if (typeof token !== 'string') return false;
     const { once } = new Crypt('AES-256-CBC', key).decrypt(token);
-    const end = tickets.get(once);
+    const t = tickets.get(once);
     tickets.delete(once);
-    return end > Date.now();
+    if (!(t?.end > Date.now())) return false;
+    // The socket under the websocket, not guacamole-lite's 'close': that one is not sent for every way a connection can end.
+    if (t.release) { clearTimeout(t.timer); info.req.socket.once('close', t.release); }
+    return true;
   } catch {
     return false;
   }
@@ -109,7 +116,22 @@ const DRIVE = '/drive'; // where the folder appears inside the container
 // folder in your folder, and a file the remote side moves into it is sent to the page instead of
 // being moved; the page takes no files, so the move would seem to work and do nothing.
 const NO_TRANSFER = { 'disable-download': 'true', 'disable-upload': 'true' };
-const shares = new Map(); // container name -> { starting: Promise of its relay's socket path, up: it has started }
+// What is known of each share's container, by its name:
+//   starting: the Promise of its relay's socket path, once a start has begun (startShare)
+//   up:       it has started
+//   sock:     the Promise of its relay's socket path; the relay outlives the container (relay)
+//   held:     how many sessions and good tokens are using it (hold)
+//   idle:     the timer that removes it once nothing holds it (hold)
+//   stopping: the Promise of its removal, once one has begun (removeShare)
+const shares = new Map();
+const shareEntry = (name) => shares.get(name) || shares.set(name, { starting: null, up: false, sock: null, held: 0, idle: null, stopping: null }).get(name);
+// The one way a share's container goes while the app runs (its network stays: that is the launch's, removed on quit). It is marked as not started in the same
+// step in which the removal begins, so nobody takes it for running, and a start that comes meanwhile
+// waits for `stopping` (startShare).
+function removeShare(s, name) {
+  Object.assign(s, { starting: null, up: false });
+  return (s.stopping = docker(['rm', '-f', name]).catch(() => {}));
+}
 const me = () => `${process.getuid()}:${process.getgid()}`;
 // The other groups you are in. --user alone leaves them out, and a folder you reach through one of
 // them (a team's folder) would then look empty from the remote side.
@@ -242,10 +264,33 @@ const sweep = () => (swept ||= (async () => {
 
 const shareRunning = (name) => docker(['inspect', '-f', '{{.State.Running}}', name]).then((out) => out === 'true', () => false);
 
+// A share's container runs only while it is in use. Every session holds it, from before its token is
+// made until its websocket has closed, and a while after the last one lets go the container is removed:
+// a folder is not left mounted for hours, and the next session's container sees drives plugged in since.
+// The wait spares a quick reconnect the restart.
+const IDLE = 10000;
+function hold(share) {
+  const name = shareName(share);
+  const s = shareEntry(name);
+  s.held++;
+  clearTimeout(s.idle);
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    if (--s.held > 0) return;
+    s.idle = setTimeout(() => {
+      if (s.held || shares.get(name) !== s) return; // held again, or the app has quit
+      removeShare(s, name);
+    }, IDLE).unref();
+  };
+}
+
 function startShare(share) {
   const name = shareName(share);
-  const s = shares.get(name) || shares.set(name, {}).get(name);
+  const s = shareEntry(name);
   return (s.starting ||= (async () => {
+    await s.stopping; // a session that arrives while the container is being removed starts a new one after it
     const args = shareRunArgs(name, share); // refuses a bad path before anything is started
     const blocked = shareBlocker(...await Promise.all([dockerSays('info'), dockerSays('version')]), share.writable); // asked each time: a share's container starts rarely, and Docker can be updated meanwhile
     if (blocked) throw new Error(blocked);
@@ -276,8 +321,8 @@ async function ensureShare(share) {
   const sock = await startShare(share);
   const mounted = await docker(['exec', name, 'stat', '-c', '%d:%i', DRIVE]).catch(() => '');
   if (!share.dev || !share.ino || mounted !== `${share.dev}:${share.ino}`) {
-    Object.assign(shares.get(name), { starting: null, up: false });
-    await docker(['rm', '-f', name]).catch(() => {});
+    // Deliberate, even while other sessions hold it: a swapped folder is served to nobody, so open sessions lose their drive.
+    await removeShare(shares.get(name), name);
     throw new Error(`${share.path} changed while it was being shared, so nothing was shared. Connect again.`);
   }
   return sock;
@@ -347,15 +392,21 @@ async function openRemote(conn, password, cert, share) {
   if (conn.protocol !== 'rdp') share = null;
   conn = { ...conn }; // as it is now: a change made while Docker starts must not reach a session already agreed to
   let guacdPort; // guacamole-lite reads this from the token and calls net.connect(guacdPort, host), which takes a socket path too
-  if (share) guacdPort = await ensureShare(share);
-  else {
-    if (starting && !(await portOpen())) starting = null; // container died or Docker restarted: start again
-    await ensureGuacd();
+  const release = share && hold(share); // before the first await: from here on the share's container is not stopped as idle
+  try {
+    if (share) guacdPort = await ensureShare(share);
+    else {
+      if (starting && !(await portOpen())) starting = null; // container died or Docker restarted: start again
+      await ensureGuacd();
+    }
+    const port = await ensureBridge();
+    const host = await resolveHost(conn.host);
+    const token = encryptToken({ once: ticket(release), connection: { type: conn.protocol, settings: remoteSettings({ ...conn, host }, password, cert, share), ...(guacdPort && { guacdPort }) } });
+    return `ws://127.0.0.1:${port}/?token=${encodeURIComponent(token)}`;
+  } catch (e) {
+    release?.(); // no token was made, so nothing else would let go
+    throw e;
   }
-  const port = await ensureBridge();
-  const host = await resolveHost(conn.host);
-  const token = encryptToken({ once: ticket(), connection: { type: conn.protocol, settings: remoteSettings({ ...conn, host }, password, cert, share), ...(guacdPort && { guacdPort }) } });
-  return `ws://127.0.0.1:${port}/?token=${encodeURIComponent(token)}`;
 }
 
 // guacd runs in Docker, whose DNS is only a copy of /etc/resolv.conf: no /etc/hosts, mDNS or VPN

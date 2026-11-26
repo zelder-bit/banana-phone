@@ -939,7 +939,7 @@ function encryptToken(obj) {
 * **AES-256-CBC** is a standard cipher. The 32-byte `key` is generated fresh on every launch, so tokens are useless after you quit. The `iv` (initialisation vector) is 16 random bytes that make every token different even for the same input.
 * guacamole-lite's own decryption reads the plaintext as ASCII, which would garble a password like `pässword`. JSON allows any character to be written as `\uXXXX`, so we escape everything outside plain ASCII first. `[\u007f-\uffff]` is a regex character range; `charCodeAt(0).toString(16)` gives the character's number in hexadecimal; `padStart(4, '0')` pads it to 4 digits. `guacd.test.js` checks that `pässwörd€` survives the round trip.
 
-**A token works once.** The page keeps every URL it was given, and a token says what guacd is told: which server, which account, which shared folder. If a token could be used again, a page that had been taken over could reopen a share after you had removed it, for as long as the app stayed open. So each token carries a random `once`, remembered in the main process for a minute, and the bridge asks `verifyClient` before it accepts a websocket:
+**A token works once.** The page keeps every URL it was given, and a token says what guacd is told: which server, which account, which shared folder. If a token could be used again, a page that had been taken over could reopen a share after you had removed it, for as long as the app stayed open. So each token carries a random `once`, remembered in the main process for a minute, and the bridge asks `verifyClient` before it accepts a websocket. Besides checking, it does one more thing for a token that shares a folder: it passes the hold on that folder's container from the token to the connection (the `t.release` line, explained under "Shared folders: only while in use"):
 
 ```js
 function verifyClient(info) {
@@ -947,17 +947,21 @@ function verifyClient(info) {
     const { token } = url.parse(info.req.url, true).query; // parsed the way guacamole-lite will parse it
     if (typeof token !== 'string') return false;
     const { once } = new Crypt('AES-256-CBC', key).decrypt(token);
-    const end = tickets.get(once);
+    const t = tickets.get(once);
     tickets.delete(once);
-    return end > Date.now();
+    if (!(t?.end > Date.now())) return false;
+    // The socket under the websocket, not guacamole-lite's 'close': that one is not sent for every way a connection can end.
+    if (t.release) { clearTimeout(t.timer); info.req.socket.once('close', t.release); }
+    return true;
   } catch {
     return false;
   }
 }
 ```
 
-* `tickets` is a `Map` from each issued `once` to the time it expires. A token whose `once` is unknown, already used, or too old is refused, and so is anything that does not decrypt. `tickets.delete(once)` is what makes it single-use.
-* `undefined > Date.now()` is `false`, so a missing ticket needs no separate check.
+* `tickets` is a `Map` from each issued `once` to a small record whose `end` is the time it expires. A token whose `once` is unknown, already used, or too old is refused, and so is anything that does not decrypt. `tickets.delete(once)` is what makes it single-use.
+* `undefined > Date.now()` is `false`, so a missing ticket needs no separate check (`t?.end` is `undefined` when there is no ticket).
+* `release` and `timer` are there only for a token that shares a folder. They keep that folder's container running while the token or its session lives; see "Shared folders: only while in use" below.
 * Every new session therefore has to go through `session:open` in the main process, where the checks are.
 
 ### What the page may not ask guacd
@@ -1089,15 +1093,21 @@ async function openRemote(conn, password, cert, share) {
   if (conn.protocol !== 'rdp') share = null;
   conn = { ...conn }; // as it is now: a change made while Docker starts must not reach a session already agreed to
   let guacdPort; // guacamole-lite reads this from the token and calls net.connect(guacdPort, host), which takes a socket path too
-  if (share) guacdPort = await ensureShare(share);
-  else {
-    if (starting && !(await portOpen())) starting = null; // container died or Docker restarted: start again
-    await ensureGuacd();
+  const release = share && hold(share); // before the first await: from here on the share's container is not stopped as idle
+  try {
+    if (share) guacdPort = await ensureShare(share);
+    else {
+      if (starting && !(await portOpen())) starting = null; // container died or Docker restarted: start again
+      await ensureGuacd();
+    }
+    const port = await ensureBridge();
+    const host = await resolveHost(conn.host);
+    const token = encryptToken({ once: ticket(release), connection: { type: conn.protocol, settings: remoteSettings({ ...conn, host }, password, cert, share), ...(guacdPort && { guacdPort }) } });
+    return `ws://127.0.0.1:${port}/?token=${encodeURIComponent(token)}`;
+  } catch (e) {
+    release?.(); // no token was made, so nothing else would let go
+    throw e;
   }
-  const port = await ensureBridge();
-  const host = await resolveHost(conn.host);
-  const token = encryptToken({ once: ticket(), connection: { type: conn.protocol, settings: remoteSettings({ ...conn, host }, password, cert, share), ...(guacdPort && { guacdPort }) } });
-  return `ws://127.0.0.1:${port}/?token=${encodeURIComponent(token)}`;
 }
 
 async function resolveHost(host) {
@@ -1132,6 +1142,7 @@ function remoteSettings(conn, password, cert, share) {
 * `{ ...conn, host }` makes a copy of the connection with `host` replaced (the *spread* syntax), so the saved connection keeps its name.
 * `conn = { ...conn }` at the top copies the connection before the first `await`. Starting a container takes seconds, and the saved connection could be edited meanwhile; the session uses the values that were checked.
 * `...(guacdPort && { guacdPort })` adds the property only when there is one: spreading `undefined` adds nothing. For a shared folder it is the path of the unix socket that leads to that folder's guacd, and because it sits inside the encrypted token with the settings, the page cannot send one share's settings to another share's folder.
+* `hold(share)` and `release` keep a shared folder's container from being stopped while this session needs it ("Shared folders: only while in use", below). `release?.()` calls it only if there is one: `?.` skips the call when `release` is `null`, as it is for a connection without a share.
 * `order: 'ipv4first'` prefers an IPv4 address, because Docker's default network has no IPv6.
 * Connecting by address is safe for the certificate check: guacd accepts only the pinned fingerprint, whatever name or address it dialled.
 
@@ -1288,8 +1299,9 @@ function relay(name) {
 ```js
 function startShare(share) {
   const name = shareName(share);
-  const s = shares.get(name) || shares.set(name, {}).get(name);
+  const s = shareEntry(name);
   return (s.starting ||= (async () => {
+    await s.stopping; // a session that arrives while the container is being removed starts a new one after it
     const args = shareRunArgs(name, share); // refuses a bad path before anything is started
     const blocked = shareBlocker(...await Promise.all([dockerSays('info'), dockerSays('version')]), share.writable); // asked each time: a share's container starts rarely, and Docker can be updated meanwhile
     if (blocked) throw new Error(blocked);
@@ -1307,11 +1319,13 @@ function startShare(share) {
 }
 ```
 
+* `shareEntry(name)` gives the record the app keeps for that container, making it the first time: `{ starting: null, up: false, sock: null, held: 0, idle: null, stopping: null }`. Each field is explained once, in a comment above the `shares` Map in `guacd.js`.
 * The container's name comes from `shareName`: `banana-phone-guacd-<your user number>-<this launch's process id>-<12 hex digits>`, the digits being a SHA-256 hash of the connection's id, its server, the folder and whether it is writable. Sessions of the same connection to the same server use one container; another connection, another server, or the same folder shared read-only instead of writable, gets another.
 * The same `starting ||=` pattern as `ensureGuacd` makes four panes opened at once share one start-up.
 * `nc -z` only tests whether the port accepts connections. It is the same command the image's own health check runs.
 * `sweep` removes containers left over from a launch that crashed: ones with your user number whose process id is no longer running (`process.kill(pid, 0)` sends no signal, it only reports whether the process exists). It runs when the app starts and again before the first share. A second banana-phone that is still running, with another profile for instance, keeps its containers. Then it removes the networks of those same launches, in that order: Docker refuses to remove a network that still has a container on it.
 * `stopGuacd` stops every share's container on quit, then removes this launch's network and deletes the socket folder. Unlike the ordinary guacd, nothing else can be using them. Before the stop it kills the `docker exec` of every session still open (`execs`, filled in `relay`): `docker stop` waits for an attached `docker exec` to finish, and `stopGuacd` blocks until the stop returns, so nothing could have passed the bytes on. A session left open at quit used to hold the stop up until it gave up after ten seconds, with the container (and now the network) still there.
+* `await s.stopping` belongs to the next section: a container that is no longer used is removed, and a start that arrives during the removal waits for it. Awaiting `undefined` (no removal has ever happened) continues at once.
 
 **Is it the right folder?** Docker mounts a *path*, and `share.js` (below) checked a path a moment earlier. In between, the path can be made to lead somewhere else: anyone who can write to a folder above the shared one can swap it for a link to, say, your home folder, and Docker, running as root, would follow it. So the folder is not trusted by its path but by what the kernel uses to tell folders apart, its **device and inode numbers**:
 
@@ -1324,8 +1338,8 @@ async function ensureShare(share) {
   const sock = await startShare(share);
   const mounted = await docker(['exec', name, 'stat', '-c', '%d:%i', DRIVE]).catch(() => '');
   if (!share.dev || !share.ino || mounted !== `${share.dev}:${share.ino}`) {
-    Object.assign(shares.get(name), { starting: null, up: false });
-    await docker(['rm', '-f', name]).catch(() => {});
+    // Deliberate, even while other sessions hold it: a swapped folder is served to nobody, so open sessions lose their drive.
+    await removeShare(shares.get(name), name);
     throw new Error(`${share.path} changed while it was being shared, so nothing was shared. Connect again.`);
   }
   return sock;
@@ -1337,6 +1351,66 @@ async function ensureShare(share) {
 * A share that arrives without the numbers is refused too, so no caller can skip the check.
 
 This was run for real with a local Docker and an xrdp server standing in for Windows (and guacd 1.3 in a stand-in image with the official image's entrypoint, since the 1.6.0 image itself could not be downloaded there). Read-only: files could be read, and creating, changing and deleting were refused. Writable: files made by the remote side belonged to the local user, mode 600. A symlink in the share pointing at a file elsewhere in the home folder could not be opened; one pointing at `/etc/passwd` showed the *container's* file. Another account on the machine could reach neither the socket nor the container's port. Without `HOME=/tmp` the connection failed. A second account swapping the shared folder for a link to the first one's home folder, as fast as it could, got the wrong folder mounted before the inode check existed and never after.
+
+### Shared folders: only while in use
+
+A share's container is removed about ten seconds after its last session ends, and started again by the next connect (`ensureShare` already starts a container that has gone). Left running until you quit, it would keep a folder mounted for hours after you stopped using it, and it would never see a drive plugged in later: a container keeps the mounts it started with, so a USB stick under a shared `/run/media/you` would stay missing.
+
+"In use" is counted per container, by `hold`:
+
+```js
+const IDLE = 10000;
+function hold(share) {
+  const name = shareName(share);
+  const s = shareEntry(name);
+  s.held++;
+  clearTimeout(s.idle);
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    if (--s.held > 0) return;
+    s.idle = setTimeout(() => {
+      if (s.held || shares.get(name) !== s) return; // held again, or the app has quit
+      removeShare(s, name);
+    }, IDLE).unref();
+  };
+}
+```
+
+* The timer removes the container through `removeShare`, the one place a share's container is removed while the app runs:
+
+  ```js
+  function removeShare(s, name) {
+    Object.assign(s, { starting: null, up: false });
+    return (s.stopping = docker(['rm', '-f', name]).catch(() => {}));
+  }
+  ```
+
+  `ensureShare` uses it too, for a container that holds the wrong folder.
+* `hold` adds one to the container's count and returns a function that takes it off again, once: `released` makes a second call do nothing. A function that remembers a variable of the call that made it is a **closure**.
+* When the count reaches zero, a timer is set; `clearTimeout(s.idle)` in a later `hold` cancels it. The wait spares a quick reconnect the restart. `.unref()` tells Node not to stay alive just for this timer.
+* Each session holds the container three times over, one after the other, so there is no moment without a hold:
+  1. `openRemote` takes the hold before its first `await`, so before Docker is asked anything. If it fails (the folder changed, the name cannot be looked up), its `catch` lets go.
+  2. Otherwise the hold goes into the token's ticket. The page may take up to a minute to open its websocket, and a container must not be stopped under a token that is still good:
+
+     ```js
+     function ticket(release) {
+       for (const [t, { end }] of tickets) if (end < Date.now()) tickets.delete(t);
+       const t = crypto.randomBytes(16).toString('hex');
+       // A share's container is held for its token: until the token runs out unused, or else until its websocket has closed.
+       const timer = release && setTimeout(() => { tickets.delete(t); release(); }, TOKEN_LIFE).unref();
+       tickets.set(t, { end: Date.now() + TOKEN_LIFE, release, timer });
+       return t;
+     }
+     ```
+
+     A token nobody uses lets go when it expires, and is deleted in the same step, so it cannot be accepted a moment later.
+  3. When the token is used, `verifyClient` (above) cancels that timer and lets go when the connection under the websocket closes: `info.req.socket` is the TCP socket the page connected with, and its `'close'` event comes exactly once however the session ends (the tab closed, the server hung up, guacd died). guacamole-lite has `open` and `close` events of its own, but `close` is not sent for a connection that fails early, and a count that misses one never returns to zero.
+* **A new session during the removal.** `removeShare` marks the container as not started (`starting: null, up: false`) in the same step in which it begins `docker rm -f`, and keeps the removal's Promise in `s.stopping`. JavaScript runs one step at a time, so a connect sees either a container that is fully there, or one that is marked gone; in the second case `startShare` begins with `await s.stopping` and starts a fresh container only when the old one has left. It can never be handed a container that is on its way out. The relay's socket stays: it leads to the container by name, and the new one has the same name.
+* `shares.get(name) !== s` is true after `stopGuacd` has cleared the map on quit, so a timer that fires late does nothing.
+
+Checked against a real Docker: with two sessions open the container outlives the first; after the last it is gone within about ten seconds; a session opened within the wait keeps the same container; one opened right after the removal gets a new container with the folder mounted; and a token that was never used keeps the container for its minute and no longer.
 
 ### Shared folders: which folders, and who agrees
 
@@ -2327,7 +2401,7 @@ You hold **Shift** and double-click `dc01` (RDP, `admin` / `CORP`) while an SSH 
 | A bad bulk edit | Preview with checkboxes, a confirmation, and `connections.json.bak` before every bulk edit or delete. |
 | Half-written file after a crash | Write to `.tmp`, then atomic rename. |
 
-Known trade-offs of shared folders: the remote computer, and anything running on it, can read the whole shared folder (and change it, if you allowed that) for as long as the session is open; what it writes there is as trustworthy as that computer, so think before opening or running it; an ordinary folder that happens to hold secrets is not recognised as such; the page can find out whether a folder exists by trying to save it as a share (saving has to say whether it worked); and the share's container is stopped when banana-phone quits, not when the session ends (it cannot be reached in between without a new token).
+Known trade-offs of shared folders: the remote computer, and anything running on it, can read the whole shared folder (and change it, if you allowed that) for as long as the session is open; what it writes there is as trustworthy as that computer, so think before opening or running it; an ordinary folder that happens to hold secrets is not recognised as such; the page can find out whether a folder exists by trying to save it as a share (saving has to say whether it worked); and a drive plugged in during a session shows up in the next one, once the last session of that connection has been closed for about ten seconds (up to a minute more if a pane of it was started and never connected).
 
 Known trade-offs: the first connection to a server is trusted without proof (the nature of trust on first use: check the fingerprint shown in the toast if it matters); VNC connections cannot be verified at all; and anyone who can run Docker commands as your user can also inspect the guacd container.
 
@@ -2524,9 +2598,9 @@ Covered: multi-word search, that an empty password removes the saved one while a
 
 `share.test.js` builds a pretend home folder in a temporary directory and checks the folder rules against it: an ordinary folder passes and comes back as its real path with its device and inode numbers, the same through a link; the home folder (either of two), anything above it, hidden folders, `~/snap`, system folders, the app's own folder, a file, a missing folder and a path with a comma are refused, and so is a link leading to any of them. A folder holding `.ssh` is refused as a copy of a home folder, and, where the test may mount (as root, or through `sudo` in CI), the home folder mounted in a second place is refused under that name too. It checks the words of the question (`question`: the port, the first-time notice with the certificate, what a writable share could change, odd characters written out) and that `approvalOf` changes when the folder, the mode, the host, the port, the account, the certificate or the key does, and gives nothing without a key. `store.test.js` checks that `upsert` keeps only a well-formed share, only on RDP, that an agreement ends with any change to what was agreed and does not return when the change is undone, that none can be saved in, and that a bulk edit of the account ends it too.
 
-`scripts/share.itest.js` (`npm run test:share`) is the one test that touches the real things, so it is not part of `npm test`. It needs Docker, an RDP server on this machine (xrdp, standing in for Windows) and a second account to log in as; CI's `share` job installs all three on a fresh machine. The test calls `rdpFingerprint` and `openRemote` exactly as `main.js` does, opens the websocket the page would open, and then looks at the redirected drive *as the logged-in account*: what a program on the remote computer could do. It checks that a read-only share can be read and not changed, not even on a drive mounted inside the folder, that guacd can write nowhere in its container but `/tmp`, that a writable one can be changed and that the new files are yours, that links pointing out of the folder lead nowhere, that the container has one mount, no port and no way in from the network, that a token cannot be used twice, that a folder swapped for a link to another one is not shared, and that quitting stops the containers. `docs/shared-folders-check.md` lists the results and what is left to check by hand on a real Windows host.
+`scripts/share.itest.js` (`npm run test:share`) is the one test that touches the real things, so it is not part of `npm test`. It needs Docker, an RDP server on this machine (xrdp, standing in for Windows) and a second account to log in as; CI's `share` job installs all three on a fresh machine. The test calls `rdpFingerprint` and `openRemote` exactly as `main.js` does, opens the websocket the page would open, and then looks at the redirected drive *as the logged-in account*: what a program on the remote computer could do. It checks that a read-only share can be read and not changed, not even on a drive mounted inside the folder, that guacd can write nowhere in its container but `/tmp`, that a writable one can be changed and that the new files are yours, that links pointing out of the folder lead nowhere, that the container has one mount, no port and no way in from the network, that a token cannot be used twice, that a folder swapped for a link to another one is not shared, that closing the last session stops its container and the next session starts it again, and that quitting stops the containers. `docs/shared-folders-check.md` lists the results and what is left to check by hand on a real Windows host.
 
-`guacd.test.js` also checks `remoteSettings`: the RDP settings pin the certificate, ask for the admin session only when it is ticked, and turn the drive on (and guacd's own file transfer off) only for an RDP connection that was given a share. For shared folders it checks the `docker run` arguments (read-only at every level unless `writable` is exactly `true`, your user and groups, a read-only container with a `/tmp` of its own, this launch's network and a memory limit, no published port, bad paths refused), that a read-only share is not started on a Docker Engine older than 25 while a writable one is, that `shareBlocker` names rootless Docker, Podman, SELinux and Docker Desktop from sample `docker info` and `docker version` answers (nothing for an ordinary Docker, and a refusal for an answer that cannot be read) and that no container is started when it does, and, with a stand-in `docker` program on the `PATH`, that `ensureShare` starts the container once, creates its network first, sweeps only a crashed launch's leftover containers and network, refuses a container whose mounted folder is not the one that was examined, that its socket is private and carries bytes both ways through `docker exec`, and that `stopGuacd` stops the container, then removes the network and the socket. A last test covers tokens: one use, one minute, and each share's token naming its own guacd on the one bridge.
+`guacd.test.js` also checks `remoteSettings`: the RDP settings pin the certificate, ask for the admin session only when it is ticked, and turn the drive on (and guacd's own file transfer off) only for an RDP connection that was given a share. For shared folders it checks the `docker run` arguments (read-only at every level unless `writable` is exactly `true`, your user and groups, a read-only container with a `/tmp` of its own, this launch's network and a memory limit, no published port, bad paths refused), that a read-only share is not started on a Docker Engine older than 25 while a writable one is, that `shareBlocker` names rootless Docker, Podman, SELinux and Docker Desktop from sample `docker info` and `docker version` answers (nothing for an ordinary Docker, and a refusal for an answer that cannot be read) and that no container is started when it does, and, with a stand-in `docker` program on the `PATH`, that `ensureShare` starts the container once, creates its network first, sweeps only a crashed launch's leftover containers and network, refuses a container whose mounted folder is not the one that was examined, that its socket is private and carries bytes both ways through `docker exec`, and that `stopGuacd` stops the container, then removes the network and the socket. Another covers tokens: one use, one minute, and each share's token naming its own guacd on the one bridge. The last one covers the idle container, with the clock mocked (`t.mock.timers`) so that minutes pass at once: an open session or a token that is still good keeps it, it is removed ten seconds after the last of them, a session within those ten seconds keeps it, a session arriving during the removal starts a new one after it, and a connect that fails lets go.
 
 ---
 

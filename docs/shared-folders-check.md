@@ -23,6 +23,7 @@ RDP shared folders ([README](../README.md#features), [walkthrough §8](../WALKTH
 | Another account reaching the socket | no | |
 | Using a session's token a second time | refused | |
 | The folder swapped for a link to another folder before mounting | nothing is shared, the container is removed | |
+| Closing the last session stops its container; the next session starts it again | | yes |
 | Quitting stops the containers and removes their network | yes | |
 
 To run it yourself you need Docker, an xrdp server on port 3389 with an account other than yours, and passwordless `sudo`; the top of `scripts/share.itest.js` has the details and the CI job is a working recipe. The job runs on Ubuntu 24.04 deliberately: its xrdp (0.9.24) shows a redirected drive as a folder in the session, which is how the test looks at it. With Ubuntu 26.04's xrdp (0.10.1) guacd connects and the drive is announced, but that folder never appeared, so the test had nothing to look at; that is a limit of the test fixture, not a finding about the feature.
@@ -64,10 +65,10 @@ xrdp is not Windows. Before relying on the feature, connect to a real Windows ho
 ## Known limits
 
 - An ordinary folder that holds secrets is not recognised: only the home folder itself, hidden folders, `~/snap`, system folders and the app's own folder are refused.
-- A share's container runs until banana-phone quits. It cannot be reached in between without a new session being opened and checked.
+- A share's container runs while a session uses it and for about ten seconds after the last one closes (and for the minute a session's token is good, if the page never connects).
 - Shared team folders work, but think about who else can write there: what a share shows is whatever is in the folder at the time. Files the remote side creates are readable by you alone (mode 600, and 700 for folders), so teammates will not see them until you change that: `chmod -R g+rX <folder>` after a session. Nothing set on the folder beforehand helps, because guacd asks for exactly that mode when it creates a file (`open(…, S_IRUSR | S_IWUSR)` and `mkdir(…, S_IRWXU)` in its `fs.c`, still so in 1.6.0). A setgid folder gives the new file the team's group but no rights for it, and default ACLs (`setfacl -d`) are inherited but switched off, since the mode asked for becomes the new file's ACL mask (`getfacl` shows `group::rwx #effective:---`). Both were tried on ext4. The app does not loosen the files itself: it would be changing permissions on names the remote side chose, in a folder others can write to. The real fix belongs upstream, in guacamole-server: guacd leaving the mode to the umask.
 - A read-only share needs Docker Engine 25 or newer and Linux 5.12 or newer. On anything older it does not start, and the message says why.
-- A drive plugged in, or anything else mounted inside the shared folder, *after* the first session to a server does not show up until banana-phone is restarted: the container keeps the mounts it started with.
+- A drive plugged in, or anything else mounted inside the shared folder, *while* a session is open does not show up in it: the container keeps the mounts it started with. Close every session of that connection, wait about ten seconds (up to a minute more if a pane of it was started and never connected), and connect again.
 - Windows is not told when a file changes on this computer. Press F5 in Explorer to see it.
 - Writing to a read-only share fails on the remote side with an unhelpful message (guacd reports it as an invalid parameter), not with "access denied".
 - Many organisations set their Windows servers to refuse redirected drives (the CIS and DISA baselines both say to). The session then opens without the drive, and nothing on this side can tell, so the toast shown on connecting (and the tooltip of the pane's *shared folder* label) always adds: "If no drive appears there, the server may be set to refuse shared drives."
