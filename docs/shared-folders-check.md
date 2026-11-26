@@ -55,15 +55,17 @@ Saving still tells the page nothing about what is on disk, with several folders 
 
 xrdp is not Windows. Before relying on the feature, connect to a real Windows host with a share and tick these off. About ten minutes.
 
+**First run against a real Windows server (November 2026, banana-phone 0.5.0, one folder):** the drive appeared and opened. Read-only held: a PDF in the folder could be copied out, but it could not be cut or renamed, and no new file or folder could be made. Writable worked both ways: a folder made in Explorer with spaces in its name showed up on this computer, and a text file made here was edited in Windows and the edits were seen here. The items ticked below are the ones that run confirmed; the rest are still open.
+
 1. Edit an RDP connection, choose a folder with a few files in it (**Choose…**; the path cannot be typed), leave the checkbox unticked, and connect. The system dialog asks whether to share: **Share and connect**.
 2. In Explorer, *This PC* shows **Shared on banana-phone**, and `\\tsclient\Shared` opens it.
-   - [ ] the drive is there, and opening it does not drop the session (there is an old report of guacd failing on Explorer's `desktop.ini` lookup)
-   - [ ] files open; non-ASCII names and names with spaces look right
+   - [x] the drive is there, and opening it does not drop the session (there is an old report of guacd failing on Explorer's `desktop.ini` lookup)
+   - [ ] files open; non-ASCII names and names with spaces look right (spaces: yes; non-ASCII names not tried yet)
 3. Still read-only: try to save a file into the drive, rename one, delete one.
-   - [ ] all three fail, and nothing changes in the folder on this computer
+   - [x] all three fail, and nothing changes in the folder on this computer (tried: cut, rename, a new file or folder)
    - [ ] note the message Windows shows (guacd reports a read-only folder as "invalid parameter", so it may be an odd one)
 4. Disconnect, tick *Can change files*, connect. The dialog asks again, now saying *read, change and delete*.
-   - [ ] saving, renaming and deleting work in both directions, and a file made on this computer shows up in Explorer after a refresh
+   - [x] saving, renaming and deleting work in both directions, and a file made on this computer shows up in Explorer after a refresh
    - [ ] no `Download` folder appears in the folder
    - [ ] a file of a gigabyte or so copies both ways
 5. With a session open, in a terminal: `docker ps` shows `banana-phone-guacd-<uid>-<pid>-…` with nothing under PORTS. Quit banana-phone: it is gone.
