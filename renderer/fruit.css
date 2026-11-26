@@ -141,12 +141,11 @@ input:focus, select:focus { outline: none; border-color: var(--orange); }
 
 /* a tab's panes */
 .split { position: absolute; inset: 0; display: flex; gap: 0; padding: 6px; }
-.split.v { flex-direction: column; }
-.split.grid { display: grid; grid-template-columns: 1fr 1fr; grid-auto-rows: 1fr; gap: 6px; }
+.node { flex: 1 1 4px; min-width: 0; min-height: 0; display: flex; } /* 4px = a pane's two borders, so a nested split and a pane with the same share come out the same size */
+.node.v { flex-direction: column; }
 .gutter { flex: none; width: 6px; cursor: col-resize; border-radius: 3px; }
-.split.v > .gutter { width: auto; height: 6px; cursor: row-resize; }
+.node.v > .gutter { width: auto; height: 6px; cursor: row-resize; }
 .gutter:hover, .gutter.dragging { background: var(--peel); }
-.split.grid > .gutter { display: none; }
 
 .pane { flex: 1 1 0; min-width: 0; min-height: 0; display: flex; flex-direction: column; border: 2px solid var(--line); border-radius: 14px; overflow: hidden; background: var(--term-bg); }
 .split.single > .pane { border-color: transparent; }
