@@ -32,7 +32,7 @@ const dec = (s) => {
 const publicView = () => ({
   folders: data.folders,
   folderIcons: data.folderIcons,
-  connections: data.connections.map(({ password, shareOk, ...c }) => ({ ...c, hasPassword: !!password })),
+  connections: data.connections.map(({ password, gatewayPassword, shareOk, ...c }) => ({ ...c, hasPassword: !!password, hasGatewayPassword: !!gatewayPassword })),
   keyring: safeStorage.getSelectedStorageBackend?.() || 'unknown',
 });
 const persist = (backup) => store.save(FILE, data, { backup });
@@ -58,8 +58,9 @@ const picked = new Set();
 const mayShare = (p) => picked.has(p) || data.connections.some((c) => c.shares?.some((s) => s.path === p));
 
 // shareOk is dropped: the page may ask for shared folders, but only the user agrees to them (shareFor, below).
-change('store:save', ({ password, shareOk, ...conn }) => {
+change('store:save', ({ password, gatewayPassword, shareOk, ...conn }) => {
   if (password !== undefined) conn.password = enc(password); // undefined = keep existing, while it is for the same server and account
+  if (gatewayPassword !== undefined) conn.gatewayPassword = enc(gatewayPassword); // the same, for a Remote Desktop Gateway and its account
   // Every folder in the list must be one the user chose, and the answer is the same whichever is not and whatever
   // is on disk. What a list must be that needs no look at the disk is asked here too; the rest waits for the connect.
   const list = Array.isArray(conn.shares) ? conn.shares : [];
@@ -130,7 +131,27 @@ async function confirmChanged(id, what, host, saved, fp, also = '') {
 }
 
 const sshId = (c) => `${c.host}:${c.port || 22}`;
-const rdpId = (c) => `rdp ${c.host}:${c.port || 3389}`;
+// Through a Remote Desktop Gateway, the certificate banana-phone can read and remember is the gateway's.
+const gatewayOf = (c) => (c.gatewayHost ? `${c.gatewayHost}:${store.gatewayPort(c)}` : '');
+const rdpId = (c) => (c.gatewayHost ? `rdgw ${gatewayOf(c)}` : `rdp ${c.host}:${c.port || 3389}`);
+// Whose certificate banana-phone reads itself before an RDP connection, and how.
+//   who, label: its name in a sentence, and in the title of the "changed" dialog
+//   read(): { fp: the fingerprint just read, cert: what guacd is to accept from the server, as rdpFingerprint gives it }
+//   gateway(fp): only through a gateway: what guacd.openRemote needs to know about it
+function identityOf(conn) {
+  const gw = gatewayOf(conn);
+  if (!gw) {
+    return { who: conn.host, label: `${conn.host}:${conn.port || 3389}`,
+      read: async () => { const cert = await guacd.rdpFingerprint(conn.host, conn.port || 3389); return { fp: cert.fingerprint, cert }; } };
+  }
+  // Through a gateway the server cannot be reached from here to read its certificate. The gateway's is
+  // read and remembered instead, and the server's is the one the user wrote in the connection.
+  if (!conn.serverFingerprint) throw new Error(`To connect through the gateway ${conn.gatewayHost}, edit the connection and fill in the server's certificate fingerprint (SHA-256).`);
+  return { who: `the gateway ${conn.gatewayHost}`, label: `the gateway ${gw}`,
+    // Behind a gateway, NLA only: what the server would pick cannot be asked from here, and NLA is the strictest.
+    read: async () => ({ fp: await guacd.tlsFingerprint(conn.gatewayHost, store.gatewayPort(conn)), cert: { fingerprint: conn.serverFingerprint, nla: true } }),
+    gateway: (fp) => ({ fingerprint: fp, password: dec(conn.gatewayPassword) }) };
+}
 
 // For a renewed certificate or reinstalled server: forget what was saved so the next connect saves it anew.
 ipcMain.handle('store:forgetHost', (_e, connId) => {
@@ -189,7 +210,7 @@ async function shareFor(conn, fp, firstSeen) {
   if (!conn.shares?.length) return null; // none, or a list left empty in the file by hand: nothing is shared
   // The name in the dialog must be the name that is dialled. Lookups fold look-alike letters and invisible
   // characters ("ℓocalhost" is localhost), so a host that is not plain is not shared with at all.
-  if (!/^[A-Za-z0-9.:_-]+$/.test(conn.host)) throw new Error('To share a folder, the host must be written with plain letters, digits, dots and hyphens only (an international name in its xn-- form).');
+  if (!/^[A-Za-z0-9.:_-]+$/.test(conn.host) || !/^[A-Za-z0-9.:_-]*$/.test(conn.gatewayHost || '')) throw new Error('To share a folder, the host must be written with plain letters, digits, dots and hyphens only (an international name in its xn-- form).');
   const folders = share.pinAll(conn.shares, shareRules());
   for (const [i, f] of folders.entries()) {
     if (f.path !== conn.shares[i].path) throw new Error(`The shared folder ${conn.shares[i].path} now leads to ${f.path}. Edit the connection and choose the folder again.`);
@@ -293,18 +314,19 @@ ipcMain.handle('session:open', async (_e, connId, cols = 80, rows = 24, run) => 
   if (conn.protocol === 'rdp') {
     // Check the server's identity ourselves first (clear errors, trust on first use);
     // guacd then accepts only that exact certificate on its own connection.
-    const cert = await guacd.rdpFingerprint(conn.host, conn.port || 3389);
-    const fp = cert.fingerprint;
+    const { who, label, read, gateway } = identityOf(conn); // the server itself, or the gateway in front of it
+    const { fp, cert } = await read();
     const saved = trust(rdpId(conn), fp);
     const also = Array.isArray(conn.shares) ? `\n\nThis connection shares with the server: ${conn.shares.map((s) => share.visible(s?.path)).join(', ')}` : '';
-    if (saved && saved !== fp && !(await confirmChanged(rdpId(conn), 'certificate', `${conn.host}:${conn.port || 3389}`, saved, fp, also))) {
-      throw new Error(`The certificate of ${conn.host} has changed and was not trusted, so banana-phone did not connect. Expected SHA256 ${saved}, got ${fp}.`);
+    if (saved && saved !== fp && !(await confirmChanged(rdpId(conn), 'certificate', label, saved, fp, also))) {
+      throw new Error(`The certificate of ${who} has changed and was not trusted, so banana-phone did not connect. Expected SHA256 ${saved}, got ${fp}.`);
     }
-    const notice = !saved ? `Saved the certificate of ${conn.host}: SHA256 ${fp}`
-      : saved !== fp ? `Trusted the new certificate of ${conn.host}: SHA256 ${fp}` : undefined;
-    const shared = await shareFor(conn, fp, !saved); // after the identity check: the agreement is with that server
+    const notice = !saved ? `Saved the certificate of ${who}: SHA256 ${fp}`
+      : saved !== fp ? `Trusted the new certificate of ${who}: SHA256 ${fp}` : undefined;
+    // After the identity check: the agreement is with that server. Behind a gateway the server is known by the fingerprint written down, so it is never "first seen".
+    const shared = await shareFor(conn, cert.fingerprint, !gateway && !saved);
     // openRemote copies the connection before it waits for anything, so the session is the one just agreed to.
-    return { kind: 'remote', url: await guacd.openRemote(conn, dec(conn.password), cert, shared), notice, shared: shared && { folders: shared.folders.map(({ path, writable, name }) => ({ path, writable, name })) } };
+    return { kind: 'remote', url: await guacd.openRemote(conn, dec(conn.password), cert, shared, { gateway: gateway?.(fp) }), notice, shared: shared && { folders: shared.folders.map(({ path, writable, name }) => ({ path, writable, name })) } };
   }
   if (conn.protocol === 'vnc') {
     return { kind: 'remote', url: await guacd.openRemote(conn, dec(conn.password)) };

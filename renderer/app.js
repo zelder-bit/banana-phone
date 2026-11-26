@@ -2,7 +2,7 @@ import { Terminal } from '../node_modules/@xterm/xterm/lib/xterm.mjs';
 import { FitAddon } from '../node_modules/@xterm/addon-fit/lib/addon-fit.mjs';
 import Guacamole from '../node_modules/guacamole-common-js/dist/esm/guacamole-common.js';
 import { shareClipboard, clean } from './clipboard.js';
-import { FRUITS, ICONS, inFolder, parentOf, matches, sharingText, account } from './shared.mjs';
+import { FRUITS, ICONS, inFolder, parentOf, matches, sharingText, account, gatewayWho } from './shared.mjs';
 import { leaves, preset, kindOf, append, insert, map } from './layout.mjs';
 
 const $ = (s) => document.querySelector(s);
@@ -234,9 +234,9 @@ function connMenu(e, c) {
     ...moveRows('conn', c.id, c.folder || '', connsIn(c.folder || '').map((x) => x.id)),
     '-',
     ['Edit…', () => editConn(c)],
-    ['Duplicate', () => { const { id, ...rest } = c; editConn({ ...rest, name: c.name + ' copy', copyPasswordFrom: c.hasPassword ? id : undefined }); }],
+    ['Duplicate', () => { const { id, ...rest } = c; editConn({ ...rest, name: c.name + ' copy', copyPasswordFrom: c.hasPassword || c.hasGatewayPassword ? id : undefined }); }],
     ['Bulk edit everyone with this username…', () => openBulk('username', c.username || '')],
-    ...(c.protocol === 'ssh' || c.protocol === 'rdp' ? [['Forget saved key', async () => toast(await window.bp.forgetHost(c.id) ? `Forgot the saved key of ${c.host}; the next connect saves the new one` : 'No saved key for this host')]] : []),
+    ...(c.protocol === 'ssh' || c.protocol === 'rdp' ? [['Forget saved key', async () => toast(await window.bp.forgetHost(c.id) ? `Forgot the saved key of ${c.gatewayHost || c.host}; the next connect saves the new one` : 'No saved key for this host')]] : []),
     '-',
     ['Delete', async () => { if (confirm(`Delete "${c.name}"?`)) refresh(await window.bp.remove(c.id)); }, 'danger'],
   ]);
@@ -296,7 +296,19 @@ function editConn(c = { protocol: 'ssh' }) {
   const d = $('#edit-dlg');
   form.reset();
   $('#edit-title').textContent = c.id ? 'Edit connection' : 'New connection';
-  for (const k of ['name', 'protocol', 'folder', 'host', 'port', 'username', 'domain', 'keyPath']) form.elements[k].value = c[k] ?? '';
+  for (const k of ['name', 'protocol', 'folder', 'host', 'port', 'username', 'domain', 'keyPath', 'gatewayHost', 'gatewayPort', 'gatewayUsername', 'gatewayDomain', 'serverFingerprint']) form.elements[k].value = c[k] ?? '';
+  // Main keeps a saved gateway password only for the gateway and account it was saved for: say so while typing.
+  const gwHint = () => {
+    const f = form.elements;
+    const same = gatewayWho(c) === gatewayWho({ gatewayHost: f.gatewayHost.value.trim(), gatewayPort: f.gatewayPort.value, gatewayUsername: f.gatewayUsername.value.trim() });
+    f.gatewayPassword.placeholder = !c.hasGatewayPassword ? '' : same ? '•••••• (unchanged)' : 'Enter it again: the gateway changed';
+  };
+  gwHint();
+  $('#edit-dlg .gateway-box').oninput = gwHint; // typing in any of its fields bubbles up to the box
+  // The gateway's fields take room only for a connection that has one.
+  form.elements.viaGateway.checked = !!c.gatewayHost;
+  $('#edit-dlg .gateway-box').hidden = !c.gatewayHost;
+  form.elements.viaGateway.onchange = (e) => { $('#edit-dlg .gateway-box').hidden = !e.target.checked; };
   form.elements.tags.value = (c.tags || []).join(', ');
   // Main keeps (or copies) a saved password only for the server and account it was saved for: say so while typing.
   const pwHint = () => {
@@ -350,6 +362,10 @@ function editConn(c = { protocol: 'ssh' }) {
     if (conn.folder) { openFolders.add(conn.folder); saveOpen(); }
     conn.adminSession = conn.protocol === 'rdp' && f.adminSession.checked;
     conn.clipboard = f.clipboard.value; // kept for every type, so a limit survives a change to SSH and back
+    if (conn.protocol === 'rdp') { // main drops all of it when the gateway host is empty
+      Object.assign(conn, { gatewayHost: f.viaGateway.checked ? f.gatewayHost.value.trim() : '', gatewayPort: f.gatewayPort.value ? Number(f.gatewayPort.value) : undefined, gatewayUsername: f.gatewayUsername.value.trim(), gatewayDomain: f.gatewayDomain.value.trim(), serverFingerprint: f.viaGateway.checked ? f.serverFingerprint.value.trim() : '' });
+      if (f.gatewayPassword.value) conn.gatewayPassword = f.gatewayPassword.value; // empty = keep existing
+    }
     // Rows left empty are not folders. No folder at all (or not RDP) = not shared.
     conn.shares = conn.protocol !== 'rdp' ? [] : [...rows.children]
       .map((r) => ({ path: r.querySelector('[name=sharePath]').value, writable: r.querySelector('[name=shareWritable]').checked })).filter((s) => s.path);

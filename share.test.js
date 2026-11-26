@@ -152,6 +152,10 @@ test('the question names the server with its port, the account, and what is not 
   assert.ok(!/holds/.test(question(conn, readOnly).detail)); // read-only: nothing can be changed
   const writable = question(conn, [{ path: folder, writable: true, name: 'acme' }]).detail;
   assert.match(writable, /read, change and delete everything.*\n\nThis folder holds a git repository\. A server that can change files here/s);
+  // Through a gateway, the gateway is named too, with its port.
+  assert.ok(!/gateway/.test(q.detail));
+  assert.match(question({ ...conn, gatewayHost: 'rdgw.example' }, readOnly).detail, /So will any program running there\.\n\nThe connection goes through the gateway rdgw\.example:443\.\n\nYou are asked once/);
+  assert.match(question({ ...conn, gatewayHost: 'rdgw\n.example', gatewayPort: 8443 }, readOnly).detail, /through the gateway rdgw\?\.example:8443\./);
   // Nothing the page wrote can add lines or turn the text around.
   const odd = question({ ...conn, username: 'adm\nin\u202E', domain: '' }, [{ path: '/srv/a\u202Eb' }]).detail;
   assert.ok(odd.startsWith('/srv/a\\u{202e}b\n\ngw.example, signed in as adm?in?,'));
@@ -237,8 +241,15 @@ test('an agreement covers the list of folders, each with its mode, one account o
     approvalOf({ ...conn, domain: 'OTHER' }, 'AA:BB', key),
     approvalOf({ ...conn, adminSession: true }, 'AA:BB', key),
     approvalOf(conn, 'CC:DD', key),
+    // Through a gateway it covers the gateway and the account there as well.
+    approvalOf({ ...conn, gatewayHost: 'gw.example' }, 'AA:BB', key),
+    approvalOf({ ...conn, gatewayHost: 'gw.other' }, 'AA:BB', key),
+    approvalOf({ ...conn, gatewayHost: 'gw.example', gatewayPort: 8443 }, 'AA:BB', key),
+    approvalOf({ ...conn, gatewayHost: 'gw.example', gatewayUsername: 'me' }, 'AA:BB', key),
+    approvalOf({ ...conn, gatewayHost: 'gw.example', gatewayDomain: 'CORP' }, 'AA:BB', key),
   ];
-  assert.strictEqual(new Set([ok, ...changed]).size, 12);
+  assert.strictEqual(new Set([ok, ...changed]).size, 17);
+  assert.strictEqual(approvalOf({ ...conn, gatewayHost: 'gw.example', gatewayPort: 443 }, 'AA:BB', key), changed[11]);
   // Signed, not only summed up: without the key nobody can work one out, and there is none without a key.
   assert.notStrictEqual(approvalOf(conn, 'AA:BB', crypto.randomBytes(32)), ok);
   for (const none of [undefined, null, '', 'k'.repeat(32), Buffer.alloc(8)]) assert.throws(() => approvalOf(conn, 'AA:BB', none), /needs a key/);

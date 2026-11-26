@@ -336,3 +336,82 @@ test('the sharing toast says how the folder is shared, and why a drive may be mi
   // Several folders: each is named, with what the server may do to it.
   assert.match(sharingText([{ path: '/a', writable: false }, { path: '/b', writable: true }], 'h'), /^Sharing \/a \(read-only\), \/b \(it can change files\) with h\./);
 });
+
+test('a gateway is kept only on RDP and only while it is named, with the fingerprint in one form', () => {
+  const d = sample();
+  const c = () => d.connections[0];
+  const fp = 'ab'.repeat(32);
+  const kept = 'AB:'.repeat(32).slice(0, -1);
+  store.upsert(d, { id: 'a', gatewayHost: ' gw.example ', gatewayPort: 8443, gatewayUsername: 'me', gatewayDomain: 'CORP', gatewayPassword: 'ENC', serverFingerprint: `sha256:${fp}` });
+  assert.deepStrictEqual([c().gatewayHost, c().gatewayPort, c().gatewayUsername, c().gatewayPassword, c().serverFingerprint], ['gw.example', 8443, 'me', 'ENC', kept]);
+  // However it was pasted, it is the same fingerprint; anything else is refused and nothing is saved.
+  for (const same of [kept, kept.toLowerCase(), ` ${fp.match(/../g).join(' ')} `, `SHA-256: ${fp}`]) assert.strictEqual(store.fingerprint(same), kept);
+  for (const none of [undefined, null, '']) assert.strictEqual(store.fingerprint(none), undefined);
+  for (const bad of ['ab'.repeat(20), fp + 'ab', 'zz'.repeat(32), 42, {}]) assert.throws(() => store.upsert(d, { id: 'a', serverFingerprint: bad }), /SHA-256/, String(bad));
+  assert.strictEqual(c().serverFingerprint, kept);
+  // An edit that does not mention the gateway keeps it, password included.
+  store.upsert(d, { id: 'a', name: 'renamed' });
+  assert.deepStrictEqual([c().gatewayHost, c().gatewayPassword], ['gw.example', 'ENC']);
+  // What the page sends is tidied: a port that is none is no port, a host that is not text is no gateway.
+  store.upsert(d, { id: 'a', gatewayPort: '443; rm' });
+  assert.strictEqual(c().gatewayPort, undefined);
+  // No gateway host, or no longer RDP: nothing of the gateway stays, its password least of all.
+  for (const off of [{ gatewayHost: '' }, { gatewayHost: 42 }, { protocol: 'ssh' }]) {
+    Object.assign(c(), { protocol: 'rdp', gatewayHost: 'gw.example', gatewayPort: 443, gatewayUsername: 'me', gatewayDomain: 'CORP', gatewayPassword: 'ENC', serverFingerprint: kept });
+    store.upsert(d, { id: 'a', ...off });
+    assert.ok(!Object.keys(c()).some((k) => /^gateway|^serverFingerprint$/.test(k) && c()[k] !== undefined), JSON.stringify(off));
+  }
+  store.upsert(d, { id: 'b', gatewayHost: 'gw.example', gatewayPassword: 'ENC' }); // b is SSH
+  assert.ok(!('gatewayHost' in d.connections[1]) && !('gatewayPassword' in d.connections[1]));
+});
+
+test('an agreement to share ends when the gateway or the fingerprint of the server changes', () => {
+  const d = sample();
+  const c = () => d.connections[0];
+  const fp = (x) => x.repeat(32).match(/../g).join(':');
+  const agree = () => Object.assign(c(), { protocol: 'rdp', shares: [{ path: '/srv/files', writable: false }], gatewayHost: 'gw.example', gatewayUsername: 'me', gatewayDomain: 'CORP', serverFingerprint: fp('AB'), shareOk: 'agreed' });
+  agree(); delete c().gatewayPort;
+  store.upsert(d, { id: 'a', gatewayPort: 443 }); // the port that goes without saying, said
+  assert.strictEqual(c().shareOk, 'agreed');
+  delete c().gatewayPort;
+  store.upsert(d, { id: 'a', gatewayHost: 'gw.example', gatewayPort: undefined, gatewayUsername: 'me', gatewayDomain: 'CORP', serverFingerprint: fp('ab'), gatewayPassword: 'NEW' }); // nothing agreed to has changed
+  assert.strictEqual(c().shareOk, 'agreed');
+  for (const change of [{ gatewayHost: 'gw.other' }, { gatewayPort: 8443 }, { gatewayUsername: 'guest' }, { gatewayDomain: 'OTHER' }, { serverFingerprint: fp('CD') }, { gatewayHost: '' }]) {
+    agree(); delete c().gatewayPort;
+    store.upsert(d, { id: 'a', ...change });
+    assert.ok(!('shareOk' in c()), JSON.stringify(change));
+  }
+});
+
+test("a gateway's saved password stays with that gateway and account", () => {
+  const d = sample();
+  const c = () => d.connections[0];
+  const set = () => Object.assign(c(), { protocol: 'rdp', password: 'ENC1', gatewayHost: 'gw.example', gatewayPort: 443, gatewayUsername: 'me', gatewayDomain: 'CORP', gatewayPassword: 'ENC' });
+  // What the edit dialog sends when the gateway was not touched keeps it, and so does a change that sends it nowhere new.
+  for (const same of [{ gatewayHost: 'gw.example', gatewayPort: 443, gatewayUsername: 'me' }, { gatewayPort: undefined }, { gatewayDomain: 'OTHER' }, { serverFingerprint: 'cd'.repeat(32) }, { host: 'dc02' }]) {
+    set();
+    store.upsert(d, { id: 'a', ...same });
+    assert.strictEqual(c().gatewayPassword, 'ENC', JSON.stringify(same));
+  }
+  // Pointed at another gateway, port or account without a new password, the saved one is gone, and stays gone when pointed back.
+  for (const moved of [{ gatewayHost: 'gw.evil' }, { gatewayPort: 8443 }, { gatewayUsername: 'other' }]) {
+    set();
+    store.upsert(d, { id: 'a', ...moved });
+    assert.ok(!('gatewayPassword' in c()), JSON.stringify(moved));
+    store.upsert(d, { id: 'a', gatewayHost: 'gw.example', gatewayPort: 443, gatewayUsername: 'me' });
+    assert.ok(!('gatewayPassword' in c()), `back from ${JSON.stringify(moved)}`);
+    assert.strictEqual(c().password, 'ENC1'); // the server's password is not this rule's business
+  }
+  // A new password given with the move is the one kept.
+  set();
+  store.upsert(d, { id: 'a', gatewayHost: 'gw.other', gatewayPassword: 'NEW' });
+  assert.strictEqual(c().gatewayPassword, 'NEW');
+  // Duplicate takes the gateway's password along only to the same gateway and account, still encrypted.
+  set();
+  const same = store.upsert(d, { name: 'copy', protocol: 'rdp', host: c().host, username: c().username, gatewayHost: 'gw.example', gatewayUsername: 'me', copyPasswordFrom: 'a' });
+  assert.deepStrictEqual([same.password, same.gatewayPassword], ['ENC1', 'ENC']);
+  for (const moved of [{ gatewayHost: 'gw.evil', gatewayUsername: 'me' }, { gatewayHost: 'gw.example', gatewayPort: 8443, gatewayUsername: 'me' }, { gatewayHost: 'gw.example', gatewayUsername: 'other' }]) {
+    assert.strictEqual(store.upsert(d, { name: 'copy', protocol: 'rdp', ...moved, copyPasswordFrom: 'a' }).gatewayPassword, undefined, JSON.stringify(moved));
+  }
+  assert.strictEqual(store.upsert(d, { name: 'copy', protocol: 'rdp', gatewayHost: 'gw.evil', gatewayPassword: 'NEW', copyPasswordFrom: 'a' }).gatewayPassword, 'NEW');
+});

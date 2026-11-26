@@ -97,11 +97,28 @@
         <label class="field grow">Username <input name="username" type="text" autocomplete="off"></label>
         <label class="field grow rdp-only">Domain <input name="domain" type="text" placeholder="CORP"></label>
       </div>
-      <label class="check rdp-only" title="Connect to the server's console (admin) session, like mstsc /admin"><input name="adminSession" type="checkbox"> Admin session (mstsc /admin)</label>
+      <div class="row rdp-only">
+        <label class="check grow" title="Connect to the server's console (admin) session, like mstsc /admin"><input name="adminSession" type="checkbox"> Admin session (mstsc /admin)</label>
+        <label class="check grow" title="For a server that can only be reached through a Remote Desktop Gateway"><input name="viaGateway" type="checkbox"> Through a gateway</label>
+      </div>
       <fieldset class="share-box rdp-only">
         <legend>Shared folders <button class="btn small" type="button" id="share-add">Add a folder</button></legend>
         <div id="share-rows"></div>
         <p class="muted small">Shows up there as the drive “Shared on banana-phone”; several folders are folders in it. Read-only unless “Can change files” is ticked. You are asked to agree the first time you connect. Files changed here show there after a refresh (F5). Some servers are set to refuse shared drives.</p>
+      </fieldset>
+      <fieldset class="gateway-box rdp-only" hidden>
+        <legend>Remote Desktop Gateway</legend>
+        <div class="row">
+          <label class="field grow">Gateway host <input name="gatewayHost" type="text" autocomplete="off" spellcheck="false" placeholder="None: connects directly"></label>
+          <label class="field port">Port <input name="gatewayPort" type="number" min="1" max="65535" placeholder="443"></label>
+        </div>
+        <div class="row">
+          <label class="field grow">Gateway username <input name="gatewayUsername" type="text" autocomplete="off"></label>
+          <label class="field grow">Gateway domain <input name="gatewayDomain" type="text" placeholder="CORP"></label>
+        </div>
+        <label class="field">Gateway password <input name="gatewayPassword" type="password" autocomplete="new-password"></label>
+        <label class="field">Server's certificate fingerprint (SHA-256) <input name="serverFingerprint" type="text" autocomplete="off" spellcheck="false" placeholder="AB:CD:… (64 letters and digits)"></label>
+        <p class="muted small">The server's certificate cannot be read from outside, so write its SHA-256 fingerprint here; banana-phone shows it when you connect to the server directly, from inside its network. The gateway's own certificate is remembered on first connect. Untick “Through a gateway” to connect directly and forget all of this.</p>
       </fieldset>
       <div class="row net">
         <label class="field grow">Password <input name="password" type="password" autocomplete="new-password"></label>

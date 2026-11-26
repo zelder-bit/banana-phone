@@ -98,7 +98,7 @@ banana-phone/
     ├── fruit.css       theme (light "orchard" and dark "night grove")
     ├── app.js          all interface behaviour
     ├── clipboard.js    copy/paste between this computer and remote desktops
-    ├── shared.mjs      pure helpers both sides use: fruit list, folder paths, search rule, clipboard words
+    ├── shared.mjs      pure helpers both sides use: fruit list, folder paths, search rule, clipboard words, gateway port
     ├── layout.mjs      the split tree: how a tab's panes are arranged (pure logic)
     ├── icon.png        window icon
     ├── fonts/          Fredoka (headings) and Nunito (text)
@@ -109,7 +109,7 @@ Who loads whom:
 
 ```
 electron .  ──▶ main.js ──require──▶ store.js ──require──▶ renderer/shared.mjs
-                  │      └─require──▶ guacd.js, share.js, ssh2, node-pty
+                  │      └─require──▶ guacd.js, share.js, ssh2, node-pty   (guacd.js and share.js require store.js too, for the gateway's port)
                   │
                   └─ new BrowserWindow({ preload: preload.js })
                            │
@@ -243,7 +243,7 @@ A folder is just a string like `"Prod/Windows"`. There is no separate tree struc
 
 `setFolderIcon` checks the name against the fixed icon list (`ICONS` from `shared.mjs`: `crate` plus the fruit) before saving, so the renderer can never make the app read an arbitrary file name, and refuses a folder that does not exist, so no stray icon entries pile up.
 
-`password` is encrypted (see [§6](#encrypting-passwords)). `shares` lists the folders an RDP connection shows the server as a drive, each read-only or not, and `shareOk` records that you agreed to them (see [§8](#shared-folders-which-folders-and-who-agrees)).
+`password` is encrypted (see [§6](#encrypting-passwords)). An RDP connection that goes through a Remote Desktop Gateway also has `gatewayHost`, `gatewayPort`, `gatewayUsername`, `gatewayDomain`, an encrypted `gatewayPassword` and `serverFingerprint` (see [§8](#through-a-remote-desktop-gateway)). `shares` lists the folders an RDP connection shows the server as a drive, each read-only or not, and `shareOk` records that you agreed to them (see [§8](#shared-folders-which-folders-and-who-agrees)).
 
 ### Loading
 
@@ -381,10 +381,11 @@ function upsert(data, input) {
       .filter((x) => typeof x?.name === 'string' && typeof x.cmd === 'string' && x.name.trim() && x.cmd.trim())
       .map((x) => ({ name: x.name.trim(), cmd: x.cmd.trim(), onStart: x.onStart === true }));
   }
-  if (copyPasswordFrom && !conn.id && conn.password === undefined) { // new connections only
+  if (copyPasswordFrom && !conn.id) { // new connections only
     const src = data.connections.find((c) => c.id === copyPasswordFrom);
     // Copied still encrypted, never decrypted on the way, and only to the server and account it was saved for.
-    if (src?.password && account(src) === account(conn)) conn.password = src.password;
+    if (src?.password && conn.password === undefined && account(src) === account(conn)) conn.password = src.password;
+    if (src?.gatewayPassword && conn.gatewayPassword === undefined && gatewayWho(conn) === gatewayWho(src)) conn.gatewayPassword = src.gatewayPassword;
   }
   if (!conn.id) conn.id = crypto.randomUUID();
   const i = data.connections.findIndex((c) => c.id === conn.id);
@@ -402,7 +403,7 @@ function upsert(data, input) {
 
 The `commands` block cleans up a terminal connection's **saved commands** (a list of `{ name, cmd, onStart }`). The page is our own code, but it is still the other side of the IPC bridge, so the store does not take its word: anything that is not a list becomes an empty list, entries without a text name and command are dropped, and `onStart` is only true when it is exactly `true`. If the page does not send `commands` at all (an RDP edit, a drag into another folder), the merge below leaves the saved ones alone.
 
-The `copyPasswordFrom` lines handle **Duplicate**. The page never sees passwords, so it cannot copy one into the duplicate. It sends `copyPasswordFrom: <id of the original>` instead, and `upsert` copies the original's stored value, which is still encrypted. The same keyring key encrypted it, so the copy decrypts just like the original. The rest pattern `{ copyPasswordFrom, ...conn }` keeps the helper field out of the saved file. `src?.password` is **optional chaining**: if no connection has that id, `src` is `undefined` and the expression gives `undefined` instead of throwing. A password typed in the dialog (or `''` from "Remove the saved password") always wins, because the copy only happens while `conn.password` is still `undefined`, and only for a new connection (no `id` yet), so an existing connection can never have its password swapped this way.
+The `copyPasswordFrom` lines handle **Duplicate**. The page never sees passwords, so it cannot copy one into the duplicate. It sends `copyPasswordFrom: <id of the original>` instead, and `upsert` copies the original's stored value, which is still encrypted. The same keyring key encrypted it, so the copy decrypts just like the original. The rest pattern `{ copyPasswordFrom, ...conn }` keeps the helper field out of the saved file. The second `if` does the same for the password of a [gateway](#through-a-remote-desktop-gateway), but only when the copy names the same gateway and account as the original (`gatewayWho`, explained there). `src?.password` is **optional chaining**: if no connection has that id, `src` is `undefined` and the expression gives `undefined` instead of throwing. A password typed in the dialog (or `''` from "Remove the saved password") always wins, because the copy only happens while `conn.password` is still `undefined`, and only for a new connection (no `id` yet), so an existing connection can never have its password swapped this way.
 
 **A saved password stays with its server and account.** The page never sees a password, but it saves connections freely, and whatever is saved is what the next connect dials. If a page that had been taken over could point a saved connection at a server of its own, or duplicate it there, the next connect would hand that server the password. So the store ties a password to what `account` in `shared.mjs` lists:
 
@@ -466,12 +467,12 @@ const dec = (s) => {
 const publicView = () => ({
   folders: data.folders,
   folderIcons: data.folderIcons,
-  connections: data.connections.map(({ password, shareOk, ...c }) => ({ ...c, hasPassword: !!password })),
+  connections: data.connections.map(({ password, gatewayPassword, shareOk, ...c }) => ({ ...c, hasPassword: !!password, hasGatewayPassword: !!gatewayPassword })),
   keyring: safeStorage.getSelectedStorageBackend?.() || 'unknown',
 });
 ```
 
-* `({ password, shareOk, ...c })` in a parameter list destructures each connection: `password` and `shareOk` go into their own variables and `c` gets **all the other** properties (the "rest" pattern). The returned object therefore has no password at all, only `hasPassword: true/false`. `shareOk` (your agreement to a shared folder) is left out because the page has no use for it.
+* `({ password, gatewayPassword, shareOk, ...c })` in a parameter list destructures each connection: `password`, `gatewayPassword` and `shareOk` go into their own variables and `c` gets **all the other** properties (the "rest" pattern). The returned object therefore has no password at all, only `hasPassword: true/false`, and the same for a gateway's password (`hasGatewayPassword`). `shareOk` (your agreement to a shared folder) is left out because the page has no use for it.
 * `!!x` turns any value into a real boolean.
 * `?.()` is **optional chaining**: call the function only if it exists. Older Electron versions lacked `getSelectedStorageBackend`.
 
@@ -501,8 +502,9 @@ const change = (channel, fn, backup = false) => ipcMain.handle(channel, (_e, ...
 The handlers themselves are then one line each:
 
 ```js
-change('store:save', ({ password, shareOk, ...conn }) => {
+change('store:save', ({ password, gatewayPassword, shareOk, ...conn }) => {
   if (password !== undefined) conn.password = enc(password); // undefined = keep existing, while it is for the same server and account
+  if (gatewayPassword !== undefined) conn.gatewayPassword = enc(gatewayPassword); // the same, for a Remote Desktop Gateway and its account
   const list = Array.isArray(conn.shares) ? conn.shares : [];
   if (list.some((s) => !mayShare(s?.path))) throw new Error('Not saved: choose the shared folder with the Choose… button.');
   if (list.length) share.together(list);
@@ -726,17 +728,17 @@ ipcMain.handle('session:open', async (_e, connId, cols = 80, rows = 24, run) => 
   if (conn.protocol === 'rdp') {
     // Check the server's identity ourselves first (clear errors, trust on first use);
     // guacd then accepts only that exact certificate on its own connection.
-    const cert = await guacd.rdpFingerprint(conn.host, conn.port || 3389);
-    const fp = cert.fingerprint;
+    const { who, label, read, gateway } = identityOf(conn); // the server itself, or the gateway in front of it
+    const { fp, cert } = await read();
     const saved = trust(rdpId(conn), fp);
     const also = Array.isArray(conn.shares) ? `\n\nThis connection shares with the server: ${conn.shares.map((s) => share.visible(s?.path)).join(', ')}` : '';
-    if (saved && saved !== fp && !(await confirmChanged(rdpId(conn), 'certificate', `${conn.host}:${conn.port || 3389}`, saved, fp, also))) {
-      throw new Error(`The certificate of ${conn.host} has changed and was not trusted, so banana-phone did not connect. Expected SHA256 ${saved}, got ${fp}.`);
+    if (saved && saved !== fp && !(await confirmChanged(rdpId(conn), 'certificate', label, saved, fp, also))) {
+      throw new Error(`The certificate of ${who} has changed and was not trusted, so banana-phone did not connect. Expected SHA256 ${saved}, got ${fp}.`);
     }
-    const notice = !saved ? `Saved the certificate of ${conn.host}: SHA256 ${fp}`
-      : saved !== fp ? `Trusted the new certificate of ${conn.host}: SHA256 ${fp}` : undefined;
-    const shared = await shareFor(conn, fp, !saved); // after the identity check: the agreement is with that server
-    return { kind: 'remote', url: await guacd.openRemote(conn, dec(conn.password), cert, shared), notice, shared: shared && { folders: shared.folders.map(({ path, writable, name }) => ({ path, writable, name })) } };
+    const notice = !saved ? `Saved the certificate of ${who}: SHA256 ${fp}`
+      : saved !== fp ? `Trusted the new certificate of ${who}: SHA256 ${fp}` : undefined;
+    const shared = await shareFor(conn, cert.fingerprint, !gateway && !saved);
+    return { kind: 'remote', url: await guacd.openRemote(conn, dec(conn.password), cert, shared, { gateway: gateway?.(fp) }), notice, shared: shared && { folders: shared.folders.map(({ path, writable, name }) => ({ path, writable, name })) } };
   }
   if (conn.protocol === 'vnc') {
     return { kind: 'remote', url: await guacd.openRemote(conn, dec(conn.password)) };
@@ -754,6 +756,7 @@ For a terminal, main works out `start`, the lines to type in once the shell is r
 * `async` makes the function return a **Promise** and lets it use `await`, which pauses this function (not the whole app) until another Promise settles. `guacd.openRemote` may need to start a Docker container, which takes a while.
 * `throw new Error(...)` inside a `handle` rejects the Promise on the page side, where `connect()` catches it and shows the message in the pane.
 * **RDP server identity** works like SSH host keys: the certificate's fingerprint is saved the first time and must match afterwards. A changed certificate opens a warning dialog with both fingerprints: Cancel (the default) stops the connection with an explanation in the pane, and Trust saves the new one and connects. A newly saved or newly trusted certificate is announced with a `notice` carrying the full fingerprint, which the page shows as a toast for 12 seconds so you can compare it with the one the server's administrator sees. See [`rdpFingerprint`](#checking-the-rdp-servers-identity) for how the certificate is fetched.
+* `identityOf(conn)` answers "whose certificate do we read ourselves, and how". Normally that is the server's: `read()` calls `rdpFingerprint`, and `fp` and `cert.fingerprint` are the same thing. A connection **through a gateway** cannot reach the server, so there `read()` reads the gateway's certificate (`fp`, the one remembered and compared) and `cert` is the server's fingerprint as written in the connection. `gateway` only exists in that case. Everything after those two lines is the same code for both; [§8](#through-a-remote-desktop-gateway) shows `identityOf`.
 * A connection with **shared folders** then goes through `shareFor` ([§8](#shared-folders-which-folders-and-who-agrees)), which may ask you to agree. The warning for a changed certificate names them when the connection shares any (`also`), since trusting an impostor would now hand it your files.
 * VNC has no certificate to check: guacd's VNC support has no TLS, so VNC is best kept on trusted networks or inside a VPN.
 * The page only ever sends a connection **id**. It cannot ask main to connect to an arbitrary host with stored credentials.
@@ -1171,15 +1174,17 @@ The app then hands both results to guacd, so that FreeRDP (the RDP library insid
 ```js
       security: cert.nla ? 'nla' : 'tls',
       // Accept exactly this certificate, self-signed or not; anything else is refused by FreeRDP in guacd.
-      'cert-fingerprints': `sha256:${cert.fingerprint}`,
+      'cert-fingerprints': [cert, gateway].filter(Boolean).map((c) => `sha256:${c.fingerprint}`).join(','),
 ```
+
+(`[cert, gateway]` is a list of one for an ordinary connection: `gateway` is only there for a connection [through a gateway](#through-a-remote-desktop-gateway), and `filter(Boolean)` drops what is not.)
 
 Both halves are needed. An impostor sitting between you and the server could let the app's check through to the real server, then answer guacd's connection a moment later with its own certificate (refused by `cert-fingerprints`) or with legacy RDP security, which has no certificate at all and would skip the fingerprint check. Telling guacd to use `tls` or `nla` rather than `any` closes that second door: the server must speak TLS, so it must show the pinned certificate. Both attacks were reproduced with a fake server; guacd logs `Certificate validation failed` and `Security negotiation failed` respectively.
 
 ### Building the connection
 
 ```js
-async function openRemote(conn, password, cert, share) {
+async function openRemote(conn, password, cert, share, { gateway } = {}) {
   if (conn.protocol !== 'rdp') share = null;
   conn = { ...conn }; // as it is now: a change made while Docker starts must not reach a session already agreed to
   let guacdPort; // guacamole-lite reads this from the token and calls net.connect(guacdPort, host), which takes a socket path too
@@ -1195,8 +1200,8 @@ async function openRemote(conn, password, cert, share) {
       guacdPort = await ensureGuacd();
     }
     const port = await ensureBridge();
-    const host = await resolveHost(conn.host);
-    const token = encryptToken({ once: ticket(release), connection: { type: conn.protocol, settings: remoteSettings({ ...conn, host }, password, cert, share), ...(guacdPort && { guacdPort }) } });
+    const names = gateway ? { gatewayHost: await resolveHost(conn.gatewayHost) } : { host: await resolveHost(conn.host) };
+    const token = encryptToken({ once: ticket(release), connection: { type: conn.protocol, settings: remoteSettings({ ...conn, ...names }, password, cert, share, { gateway }), ...(guacdPort && { guacdPort }) } });
     return `ws://127.0.0.1:${port}/?token=${encodeURIComponent(token)}`;
   } catch (e) {
     release?.(); // no token was made, so nothing else would let go
@@ -1212,7 +1217,7 @@ async function resolveHost(host) {
   }
 }
 
-function remoteSettings(conn, password, cert, share) {
+function remoteSettings(conn, password, cert, share, { gateway } = {}) {
   const settings = { hostname: conn.host, port: String(conn.port || (conn.protocol === 'rdp' ? 3389 : 5900)), password: password || '' };
   if (conn.protocol === 'rdp') {
     Object.assign(settings, {
@@ -1221,7 +1226,7 @@ function remoteSettings(conn, password, cert, share) {
       // impostor fall back to legacy RDP (no certificate) and slip past the pinned fingerprint.
       security: cert.nla ? 'nla' : 'tls',
       // Accept exactly this certificate, self-signed or not; anything else is refused by FreeRDP in guacd.
-      'cert-fingerprints': `sha256:${cert.fingerprint}`,
+      'cert-fingerprints': [cert, gateway].filter(Boolean).map((c) => `sha256:${c.fingerprint}`).join(','),
       'resize-method': 'display-update',
     });
     if (conn.adminSession) settings.console = 'true'; // the server's console / admin session, like mstsc /admin
@@ -1236,7 +1241,8 @@ function remoteSettings(conn, password, cert, share) {
 
 **Why the app looks up the name, not guacd.** guacd usually runs inside a Docker container, and Docker gives the container only a copy of the host's `/etc/resolv.conf` (the list of DNS servers). Your own machine resolves names through more than that: `/etc/hosts`, mDNS for `.local` names, and DNS servers a VPN sets for particular domains (*split DNS*, e.g. "ask the office DNS server about `*.prod.example.com`"). The container sees none of those, so a private name that works in Remmina or `ping` could fail in guacd. `resolveHost` looks the name up in the app, through the same system resolver every other program uses (`dns.promises.lookup` calls the C library's `getaddrinfo`), and hands guacd the address instead.
 
-* `{ ...conn, host }` makes a copy of the connection with `host` replaced (the *spread* syntax), so the saved connection keeps its name.
+* `{ ...conn, ...names }` makes a copy of the connection with `host` replaced by its address (the *spread* syntax), so the saved connection keeps its name. Through a gateway it is the gateway's name that is replaced instead, see [below](#through-a-remote-desktop-gateway).
+* `{ gateway } = {}` as the last parameter takes an object of options and picks `gateway` out of it; `= {}` lets callers leave it out altogether.
 * `conn = { ...conn }` at the top copies the connection before the first `await`. Starting a container takes seconds, and the saved connection could be edited meanwhile; the session uses the values that were checked.
 * `...(guacdPort && { guacdPort })` adds the property only when there is one: spreading `undefined` adds nothing. Without a share it is the port `ensureGuacd` answered with: 4822 for Docker, or the port the installed guacd was started on. For a shared folder it is the path of the unix socket that leads to that folder's guacd, and because it sits inside the encrypted token with the settings, the page cannot send one share's settings to another share's folder.
 * `hold(share)` and `release` keep a shared folder's container from being stopped while this session needs it ("Shared folders: only while in use", below). `release?.()` calls it only if there is one: `?.` skips the call when `release` is `null`, as it is for a connection without a share.
@@ -1252,6 +1258,7 @@ The settings are built by their own function, `remoteSettings`, which only compu
 * With a `share`, `enable-drive` turns on RDP **drive redirection**: the server sees one more drive, backed by the folder `drive-path` on the machine guacd runs on. Windows lists it as "Shared on banana-phone" (`drive-name` on `client-name`) and as `\\tsclient\Shared`.
 
 * `disable-copy` and `disable-paste` close one direction of the clipboard each, for RDP and VNC alike, according to the connection's **Clipboard** choice (`clipboardWays`, from `shared.mjs`, says which). guacd names them from the remote side's point of view: "copy" is text leaving the remote desktop, "paste" is text going to it. Only the four known words open anything: a word that is not one of them closes both. See [the clipboard section](#clipboard-clipboardjs-and-terminal-shortcuts).
+* `gateway` is only given for a connection through a Remote Desktop Gateway; what it adds to the settings is shown [below](#through-a-remote-desktop-gateway).
 * `...NO_TRANSFER` spreads in two more settings, explained next.
 
 ```js
@@ -1259,6 +1266,113 @@ const NO_TRANSFER = { 'disable-download': 'true', 'disable-upload': 'true' };
 ```
 
 Guacamole has a second way to move files, made for its web client, where there is no folder to share: the files travel through the Guacamole connection itself. Uploads come from the page (drag a file onto the screen). Downloads use a trick: guacd creates a folder called `Download` in the drive, and a file the remote side moves into it is not moved at all but streamed to the page, while Windows is told the move worked. banana-phone shares a real folder, so it needs neither, and leaving them on would do harm: a `Download` folder would appear in your folder (seen in testing with a writable share), and anything moved into it from Windows would be sent to a page that takes no files, so the move would seem to work and nothing would arrive. With both off, guacd creates no `Download` folder and refuses file streams, and the mounted folder is the only way a file can cross. It also keeps the page out of it: the page never handles file contents or chooses where a file lands. (guacd would still tell the page the *names* of the files, which is why the bridge drops the page's `get` and `put`, above.)
+
+### Through a Remote Desktop Gateway
+
+Good practice is to keep the RDP port (3389) off the internet and let people in through a **Remote Desktop Gateway**: an HTTPS server on port 443 that checks who you are and then carries the RDP conversation to a server inside the network. guacd (through FreeRDP) can speak to one. What changes for banana-phone is the identity check, because [`rdpFingerprint`](#checking-the-rdp-servers-identity) dials the server itself, and that is exactly what cannot be done from outside.
+
+So a connection through a gateway has **two** certificates, and each is checked its own way:
+
+* **The gateway's** can be read from here. `tlsFingerprint` connects to it the way a browser would and returns the fingerprint of the certificate it shows. `main.js` then treats it like any other: saved on first use, a warning dialog if it changes.
+* **The server's** cannot be read from here, and guacd does not report what it saw. So you write it in the connection: the edit dialog has a field for the server's SHA-256 fingerprint, and a gateway connection without one does not connect. (An easy way to get it: connect to the server once directly, from inside its network; banana-phone shows the fingerprint when it saves it.)
+
+```js
+async function tlsFingerprint(host, port) {
+  const address = await resolveHost(host);
+  return new Promise((resolve, reject) => {
+    const t = tls.connect({ host: address, port, rejectUnauthorized: false }, () => {
+      const fingerprint = t.getPeerCertificate().fingerprint256;
+      t.destroy();
+      fingerprint ? resolve(fingerprint) : reject(new Error(`${host} sent no certificate`));
+    });
+    const fail = (msg) => { t.destroy(); reject(new Error(msg)); }; // no-op once resolved
+    t.setTimeout(10000, () => fail(`${host}:${port} did not answer in time`));
+    t.once('error', (e) => fail(`${host}:${port}: ${e.message}`));
+  });
+}
+```
+
+* `rejectUnauthorized: false` is the same choice as in `probeRdp`: the certificate is not judged by who signed it, only read, and then compared with the one saved before.
+* The gateway is dialled by **address**, looked up here with `resolveHost`, because that is how guacd will dial it (see Names, below). A server that hosts several sites picks the certificate to show by the name it is asked for (SNI, sent in the TLS handshake); asked by address, it shows its default one. Dialling the same way here means the certificate read is the one guacd will be shown.
+
+In `session:open` the two cases share the code that remembers and compares a certificate. Whose certificate it is, and how it is read, is decided in one place in `main.js`:
+
+```js
+function identityOf(conn) {
+  const gw = gatewayOf(conn);
+  if (!gw) {
+    return { who: conn.host, label: `${conn.host}:${conn.port || 3389}`,
+      read: async () => { const cert = await guacd.rdpFingerprint(conn.host, conn.port || 3389); return { fp: cert.fingerprint, cert }; } };
+  }
+  if (!conn.serverFingerprint) throw new Error(`To connect through the gateway ${conn.gatewayHost}, edit the connection and fill in the server's certificate fingerprint (SHA-256).`);
+  return { who: `the gateway ${conn.gatewayHost}`, label: `the gateway ${gw}`,
+    read: async () => ({ fp: await guacd.tlsFingerprint(conn.gatewayHost, store.gatewayPort(conn)), cert: { fingerprint: conn.serverFingerprint, nla: true } }),
+    gateway: (fp) => ({ fingerprint: fp, password: dec(conn.gatewayPassword) }) };
+}
+```
+
+* `who` and `label` are the words for messages: "the certificate of `who`", and the title of the dialog for a changed one.
+* `read()` gives two things that are one and the same for a direct connection and two different certificates through a gateway: `fp`, the fingerprint just read from the network (remembered and compared), and `cert`, what guacd must see from the server.
+* `gateway(fp)` builds what `guacd.openRemote` needs to know about the gateway. A direct connection has no such property, and `gateway?.(fp)` in `session:open` then gives `undefined`: `?.(` calls a function only if there is one.
+
+```js
+const gatewayOf = (c) => (c.gatewayHost ? `${c.gatewayHost}:${store.gatewayPort(c)}` : '');
+const rdpId = (c) => (c.gatewayHost ? `rdgw ${gatewayOf(c)}` : `rdp ${c.host}:${c.port || 3389}`);
+```
+
+`rdpId` is the name a certificate is remembered under in `known_hosts.json`. For a gateway connection it names the gateway, so several servers behind one gateway share one remembered certificate, and **Forget saved key** forgets the gateway's.
+
+guacd is then given both fingerprints (in `remoteSettings`):
+
+```js
+      'cert-fingerprints': [cert, gateway].filter(Boolean).map((c) => `sha256:${c.fingerprint}`).join(','),
+```
+
+```js
+    if (gateway) Object.assign(settings, {
+      'gateway-hostname': conn.gatewayHost, 'gateway-port': String(gatewayPort(conn)),
+      'gateway-username': conn.gatewayUsername || '', 'gateway-domain': conn.gatewayDomain || '', 'gateway-password': gateway.password || '',
+    });
+```
+
+* **One list for both.** FreeRDP makes two TLS connections, to the gateway and, inside the tunnel, to the server, and checks each certificate against the same `cert-fingerprints` list. There is no separate setting for the gateway. That is why the looser settings guacd offers were not used: `ignore-cert` and `cert-tofu` would each accept an unknown certificate from the gateway as well as from the server.
+* **NLA only.** For a direct connection `security` is whatever the server picked when it was probed. Behind a gateway it cannot be probed, so `cert.nla` is simply `true`: NLA is the strictest, and never `any` (see [above](#checking-the-rdp-servers-identity)). A server that only does plain TLS will not connect through a gateway.
+* **The gateway has its own account**: username, domain and password, sent only to the gateway. Its password is kept like the other one: encrypted by the keyring in `store:save`, never shown to the page (`hasGatewayPassword` says only whether there is one), and decrypted in `session:open` straight into the token.
+* **Names.** `openRemote` does not look the server's name up here when there is a gateway: the name may only mean something inside the gateway's network, and it is the gateway that dials it. The gateway's own name *is* looked up here and guacd gets the address, for the reason every server's is ([above](#building-the-connection)): guacd sits in Docker, which knows nothing of `/etc/hosts`, mDNS or a VPN's DNS, and a gateway is often an internal name. The price: a gateway that sits behind something which routes by name (several sites on one address) is asked by address and may not answer as the gateway. Trust does not depend on the name either way; it is the fingerprint that is pinned.
+* **Port 443** unless the connection says otherwise. `gatewayPort` in `shared.mjs` is the one place that says so; `store.js` passes it on, and everything that needs the port asks it, so "no port" and "443" are the same gateway everywhere, in an agreement to share too.
+
+What the page sends is tidied in `store.js`, like saved commands and shares:
+
+```js
+const GATEWAY_ID = ['gatewayHost', 'gatewayPort', 'gatewayUsername', 'gatewayDomain', 'serverFingerprint'];
+const GATEWAY = [...GATEWAY_ID, 'gatewayPassword'];
+
+function fingerprint(s) {
+  if (s == null || s === '') return undefined;
+  const hex = String(s).replace(/^\s*sha-?256\s*:?/i, '').replace(/[\s:]/g, '');
+  if (!/^[0-9a-f]{64}$/i.test(hex)) throw new Error("The server's fingerprint must be the SHA-256 of its certificate: 64 letters and digits (0-9, A-F). Windows shows a shorter SHA-1 \"thumbprint\", which is not it.");
+  return hex.toUpperCase().match(/../g).join(':');
+}
+```
+
+```js
+export const gatewayPort = (c) => Number(c.gatewayPort) || 443;
+export const gatewayWho = (c) => JSON.stringify([c.gatewayHost || '', gatewayPort(c), c.gatewayUsername || '']);
+```
+
+```js
+  if (old && conn.gatewayPassword === undefined && gatewayWho(saved) !== gatewayWho(old)) delete saved.gatewayPassword;
+  if (saved.protocol !== 'rdp' || !saved.gatewayHost) for (const k of GATEWAY) delete saved[k];
+```
+
+* `GATEWAY_ID` is everything that says which gateway, which account there and which server behind it. It is what `agreedTo` adds for a shared folder. `GATEWAY` is that plus the password: everything that goes when the gateway goes.
+* **A saved gateway password stays with its gateway.** `gatewayWho` is where that password is sent: the gateway's host and port, and the username it goes with. The page saves connections, so without this rule a taken-over page could point a connection at a gateway of its own and have the saved password sent there on the next connect. So when a save changes any of the three and brings no new password, the saved one is deleted, and pointing the connection back does not bring it back. In the edit dialog this means: change the gateway or the username there, and you type the password again. The dialog says so as you type: `gatewayWho` lives in `shared.mjs` so that the page can ask the same question, and the password field's placeholder turns from "(unchanged)" to "Enter it again: the gateway changed". Duplicate follows the same rule: the copy gets the gateway's password only if it names the same gateway and account.
+
+* `fingerprint` accepts the forms people paste (colons or spaces, either case, a leading `sha256:`) and keeps one form, `AB:CD:…`, the same one `rdpFingerprint` produces. Anything that is not 64 hex digits is refused and the save fails with that message; the thumbprint Windows shows in a certificate's details is SHA-1, 40 digits, and is the usual mistake.
+* A connection keeps its gateway fields only while it is RDP **and** names a gateway host. Unticking "Through a gateway" in the edit dialog sends an empty host, and everything goes with it, the gateway's password included.
+* **Shared folders.** The gateway's host, port and account and the server's fingerprint are part of what an agreement to share covers (`agreedTo` in `store.js`, `approvalOf` in `share.js`), and the question names the gateway. The fingerprint signed into the agreement is the server's, the one you wrote down.
+
+**Not yet tried against a real gateway.** The settings and the checks around them are tested; a session through an actual Remote Desktop Gateway is not, as none was at hand when this was written.
 
 ### Shared folders: a guacd of its own
 
@@ -1694,7 +1808,7 @@ async function shareFor(conn, fp, firstSeen) {
 ```
 
 ```js
-  if (!/^[A-Za-z0-9.:_-]+$/.test(conn.host)) throw new Error('To share a folder, the host must be written with plain letters, digits, dots and hyphens only (an international name in its xn-- form).');
+  if (!/^[A-Za-z0-9.:_-]+$/.test(conn.host) || !/^[A-Za-z0-9.:_-]*$/.test(conn.gatewayHost || '')) throw new Error('To share a folder, the host must be written with plain letters, digits, dots and hyphens only (an international name in its xn-- form).');
   const folders = share.pinAll(conn.shares, shareRules());
   for (const [i, f] of folders.entries()) {
     if (f.path !== conn.shares[i].path) throw new Error(`The shared folder ${conn.shares[i].path} now leads to ${f.path}. Edit the connection and choose the folder again.`);
@@ -1756,6 +1870,8 @@ function approvalOf(conn, fingerprint, key) {
   if (!Buffer.isBuffer(key) || key.length < 32) throw new Error('An agreement to share a folder needs a key to be signed with');
   return crypto.createHmac('sha256', key).update(JSON.stringify([
     conn.shares.map((s) => [s.path, s.writable === true]), conn.host, conn.port || 3389, conn.username || '', conn.domain || '', conn.adminSession === true, fingerprint,
+    // Only said when there is one, so agreements made before gateways existed still stand.
+    ...(conn.gatewayHost ? [conn.gatewayHost, gatewayPort(conn), conn.gatewayUsername || '', conn.gatewayDomain || ''] : []),
   ])).digest('hex');
 }
 ```
@@ -1998,7 +2114,7 @@ import { Terminal } from '../node_modules/@xterm/xterm/lib/xterm.mjs';
 import { FitAddon } from '../node_modules/@xterm/addon-fit/lib/addon-fit.mjs';
 import Guacamole from '../node_modules/guacamole-common-js/dist/esm/guacamole-common.js';
 import { shareClipboard, clean } from './clipboard.js';
-import { FRUITS, ICONS, inFolder, parentOf, matches, sharingText, account } from './shared.mjs';
+import { FRUITS, ICONS, inFolder, parentOf, matches, sharingText, account, gatewayWho } from './shared.mjs';
 import { leaves, preset, kindOf, append, insert, map } from './layout.mjs';
 
 const $ = (s) => document.querySelector(s);
@@ -2676,6 +2792,8 @@ You hold **Shift** and double-click `dc01` (RDP, `admin` / `CORP`) while an SSH 
 | Passwords visible to the page | Never sent. Remote desktop credentials go into an AES token encrypted with a per-launch key. |
 | SSH man-in-the-middle | Trust-on-first-use host key fingerprints; a changed key is only accepted after you confirm it in a warning dialog that defaults to Cancel. |
 | RDP server impersonation | The certificate fingerprint is saved on first use and pinned in guacd (`cert-fingerprints`); a changed certificate is only accepted after you confirm it, and the newly trusted one is pinned instead. guacd is told to use exactly the TLS or NLA security seen during the check, so an impostor cannot fall back to legacy RDP; servers offering only legacy RDP security are refused. |
+| A server that can only be reached through a gateway, whose certificate cannot be read beforehand | The gateway's certificate is read, saved on first use and pinned like a server's. The server's fingerprint is written in the connection by you and pinned with it; guacd accepts those two certificates and no other, and uses NLA. Without the server's fingerprint a gateway connection does not connect. |
+| A saved gateway password being sent to another gateway (a taken-over page re-pointing the connection) | The password stays with the gateway host, port and username it was saved for: a save that changes one of them without a new password deletes it, and Duplicate copies it only to the same gateway and account. |
 | Other machines using your guacd | guacd and the websocket bridge listen on `127.0.0.1` only. |
 | An installed guacd that is too old to check certificates | One older than 1.6.0 would ignore `cert-fingerprints` and connect unchecked, so it is not used, and the message says which version was found. |
 | An installed guacd, which runs as you, being used for a shared folder | Never: shared folders start only in Docker, and are refused with a clear message where Docker is missing. |
@@ -2779,6 +2897,8 @@ Two subtests are about the split tree. One fills a tab with eight terminals, che
 One subtest is about shared folders. It fills in the edit dialog and checks that the box is shown for RDP only, that the path cannot be typed, that choosing the home folder is refused with the reason in a toast, that a chosen folder is saved by its real path and read-only unless the checkbox is ticked, that **Add a folder** gives a second folder a row and a mode of its own while a row left empty is ignored, that the same folder chosen twice is refused, that ✕ takes a folder out, and that ✕ on the last row removes the share. The system's folder dialog cannot be clicked from DevTools, so the test replaces it: `app.main(expr)` runs an expression in the main process through Node's inspector (`launch` waits for the inspector's address to be printed before it returns), and the test uses it to swap `dialog.showOpenDialog` for a function that answers with the folder the test wants "chosen". It also plays a misbehaving page. It sends `store:save` paths nobody chose (a folder that exists, one that does not, the home folder, `/etc`), alone and in a list beside a folder that was chosen, and checks that all get the very same refusal and nothing is saved; and it sends a made-up `shareOk` and then reads this run's `connections.json` (`app.profile` is the throwaway profile's folder) to see that it never reached the file. A second, short test starts the app with a `connections.json` that already holds a share in the old single-folder form (`launch(saved)` writes it into the profile first) and checks that editing and duplicating that connection save without any choosing, while a path that is not saved is still refused, alone or in a list. The question before sharing is a system dialog too, and is covered by `share.js`'s unit tests and the hand check in `docs/shared-folders-check.md`.
 
 Another is about the clipboard choice. It checks that the box is shown for RDP and VNC only, that the choice is saved and shown again, and that a made-up word sent to `store:save` reaches the file as `'off'`. It then loads `clipboard.js` in the page (`import()`) and runs `shareClipboard` with a stand-in for the Guacamole client, once per word, to see which directions it serves. No remote desktop is involved, so that guacd really drops the clipboard is not tested here.
+
+Another is about gateways. It checks that "Through a gateway" is offered for RDP only and that its fields stay out of the way until it is ticked, that a 40-digit SHA-1 thumbprint is refused as the server's fingerprint with the reason in a toast, that the gateway's password reaches the file encrypted and the page is only told there is one, and that unticking the box leaves nothing of the gateway in the file. With the gateway's fields showing, the dialog is taller than the window and scrolls, so this subtest saves with `requestSubmit()`, which is what pressing Enter does.
 
 The dialog step caught a real bug. The edit dialog used to save from its `close` event, with a new listener added each time it opened. Chromium can deliver a `close` event late. Under the test's fast input, the Esc that cancelled one opening only "arrived" together with the next opening's Save. Both listeners then read `returnValue` as `ok`, and the connection was saved twice. In the opposite order (Save, then reopen at once), a Save could be lost. The dialogs now save on `submit` instead (see [§9](#9-rendererindexhtml-and-fruitcss-the-look)), and the test covers both orders: Esc then Save, and Save then an immediate reopen.
 
@@ -2892,7 +3012,7 @@ keywords = ["/home/", "/users/"]
 
 The rules were tested by committing throwaway fakes (a random AWS-style key, a random GitHub-style token, a freshly generated private key, an email address and a `/home/<name>/` path) to a scratch copy: each was reported and the push was blocked, while the allowed addresses and paths passed. For a genuine false positive, `git push --no-verify` skips the hook, and the pattern belongs in an allowlist.
 
-Covered: multi-word search, that an empty password removes the saved one while a missing one keeps it, that Duplicate's `copyPasswordFrom` copies the encrypted password unless a new one is given, that a saved password is neither copied to nor kept for another host, port, type or username, bulk update by username, by folder (including subfolders but not `Production` when asking for `Prod`), respecting unticked ids, backup and round-trip of the file, and (in `guacd.test.js`) that a token with a non-ASCII password decrypts correctly with guacamole-lite's own code, that `rdpFingerprint` returns the right fingerprint from a fake RDP server using a throwaway certificate made with `openssl`, and that it refuses a server offering only legacy RDP security, and that it fails quickly when the server hangs up or is not an RDP server at all, and that the bridge drops the page's requests for files while passing everything else on.
+Covered: multi-word search, that an empty password removes the saved one while a missing one keeps it, that Duplicate's `copyPasswordFrom` copies the encrypted password unless a new one is given, that a saved password is neither copied to nor kept for another host, port, type or username, bulk update by username, by folder (including subfolders but not `Production` when asking for `Prod`), respecting unticked ids, backup and round-trip of the file, and (in `guacd.test.js`) that a token with a non-ASCII password decrypts correctly with guacamole-lite's own code, that `rdpFingerprint` returns the right fingerprint from a fake RDP server using a throwaway certificate made with `openssl`, and that it refuses a server offering only legacy RDP security, and that it fails quickly when the server hangs up or is not an RDP server at all, and that the bridge drops the page's requests for files while passing everything else on. For gateways it checks that `tlsFingerprint` reads the certificate of a throwaway TLS server, that `remoteSettings` pins both certificates and names the gateway with its own account, and (in `store.test.js`) that the gateway's fields are kept only on RDP and only while a gateway is named, that a fingerprint is kept in one form and anything that is not SHA-256 is refused, that changing the gateway or the server's fingerprint ends an agreement to share, and that a saved gateway password is dropped when the gateway, its port or the username there changes without a new one, in an edit and in a Duplicate alike. No test talks to a real gateway.
 
 `share.test.js` builds a pretend home folder in a temporary directory and checks the folder rules against it: an ordinary folder passes and comes back as its real path with its device and inode numbers, the same through a link; the home folder (either of two), anything above it, hidden folders, `~/snap`, system folders, the app's own folder, a file, a missing folder and a path with a comma are refused, and so is a link leading to any of them. A folder holding `.ssh` is refused as a copy of a home folder, and, where the test may mount (as root, or through `sudo` in CI), the home folder mounted in a second place is refused under that name too. It checks the words of the question (`question`: the port, the first-time notice with the certificate, what a writable share could change, odd characters written out, and for several folders each one's line, name and mode) and that `approvalOf` changes when a folder, a mode, the list (one added, two swapped), the host, the port, the account, the certificate or the key does, and gives nothing without a key. For lists it checks `pinAll` (every folder held to the rules, none twice even through a link, none inside another, eight at most) and `driveNames`. `store.test.js` checks that `upsert` keeps only well-formed shares, only on RDP, that a file from when a connection shared one folder loads as a list of one, that an agreement ends with any change to what was agreed and does not return when the change is undone, that none can be saved in, and that a bulk edit of the account ends it too.
 

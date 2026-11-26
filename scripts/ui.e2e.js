@@ -690,6 +690,64 @@ test('tabs, splits, gutter and dialogs', { timeout: 120000 }, async (t) => {
     assert.deepStrictEqual(JSON.parse(tried), { undefined: [true, true], both: [true, true], toRemote: [false, true], fromRemote: [true, false], off: [false, false], everything: [false, false] });
   });
 
+  await t.test('gateway: RDP only, its password never shown, a fingerprint that is not SHA-256 refused, unticked to connect directly', async () => {
+    const fill = (fields) => app.eval(`(() => { const f = document.querySelector('#edit-form').elements;
+      for (const [k, v] of Object.entries(${JSON.stringify(fields)})) f[k].value = v;
+      f.protocol.dispatchEvent(new Event('change')); })()`);
+    const boxShown = 'document.querySelector("#edit-dlg .gateway-box").offsetParent !== null';
+    const tickShown = 'document.querySelector("#edit-form [name=viaGateway]").offsetParent !== null';
+    // With the gateway's fields showing the dialog scrolls and Save may be out of sight, so it is saved the way Enter does.
+    const save = () => app.eval('document.querySelector("#edit-form").requestSubmit()');
+    const gwbox = '(async () => JSON.stringify((await window.bp.get()).connections.find((c) => c.name === "gwbox") || null))()';
+    const onDisk = () => JSON.parse(fs.readFileSync(path.join(app.profile, 'connections.json'), 'utf8')).connections.find((c) => c.name === 'gwbox');
+    const fp = 'ab'.repeat(32);
+
+    await app.click('#new-conn');
+    await app.waitFor('document.querySelector("#edit-dlg").open');
+    await fill({ name: 'gwbox', protocol: 'ssh', host: 'dc01.corp.test' });
+    assert.ok(!(await app.eval(tickShown)), 'no gateway for SSH');
+    await fill({ protocol: 'rdp' });
+    assert.ok(await app.eval(tickShown) && !(await app.eval(boxShown)), 'RDP: offered, and out of the way until ticked');
+    await app.click('#edit-form [name=viaGateway]');
+    await fill({ gatewayHost: 'gw.test', gatewayUsername: 'me', gatewayPassword: 'gw-secret', serverFingerprint: 'ab'.repeat(20) });
+    assert.ok(await app.eval(boxShown), 'gateway fields shown once ticked');
+    await save();
+    await app.waitFor(`/fingerprint must be the SHA-256/.test(document.querySelector('#toast').textContent)`);
+    assert.strictEqual(await app.eval(gwbox), 'null', 'a SHA-1 thumbprint is not saved as the fingerprint');
+
+    await app.click('#new-conn');
+    await app.waitFor('document.querySelector("#edit-dlg").open');
+    await fill({ name: 'gwbox', protocol: 'rdp', host: 'dc01.corp.test' });
+    await app.click('#edit-form [name=viaGateway]');
+    await fill({ gatewayHost: 'gw.test', gatewayUsername: 'me', gatewayPassword: 'gw-secret', serverFingerprint: fp });
+    await save();
+    await app.waitFor(`(async () => (await ${gwbox}) !== 'null')()`);
+    const seen = JSON.parse(await app.eval(gwbox));
+    assert.deepStrictEqual([seen.gatewayHost, seen.gatewayUsername, seen.serverFingerprint, seen.hasGatewayPassword], ['gw.test', 'me', 'AB:'.repeat(32).slice(0, -1), true]);
+    assert.ok(!('gatewayPassword' in seen), 'the page is never shown the gateway password');
+    assert.ok(onDisk().gatewayPassword && !JSON.stringify(onDisk()).includes('gw-secret'), 'saved encrypted');
+
+    await app.eval(`(() => { [...document.querySelectorAll('#tree .conn')].find((n) => n.textContent.startsWith('gwbox')).dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 50, clientY: 50 }));
+      [...document.querySelectorAll('#menu button')].find((b) => b.textContent === 'Edit…').click(); })()`);
+    await app.waitFor('document.querySelector("#edit-dlg").open');
+    assert.ok(await app.eval(boxShown), 'shown for a connection with a gateway');
+    assert.deepStrictEqual(await app.eval(`(() => { const f = document.querySelector('#edit-form').elements; return [f.gatewayHost.value, f.gatewayPassword.value, f.gatewayPassword.placeholder]; })()`), ['gw.test', '', '•••••• (unchanged)']);
+    // The saved password stays with its gateway: typing another one says, there and then, that it must be entered again.
+    const retype = (host) => app.eval(`(() => { const f = document.querySelector('#edit-form').elements; f.gatewayHost.value = ${JSON.stringify(host)};
+      f.gatewayHost.dispatchEvent(new Event('input', { bubbles: true })); return f.gatewayPassword.placeholder; })()`);
+    assert.strictEqual(await retype('gw.other'), 'Enter it again: the gateway changed');
+    assert.strictEqual(await retype('gw.test'), '•••••• (unchanged)');
+    await app.eval('document.querySelector("#edit-form [name=viaGateway]").click()');
+    await save();
+    await app.waitFor(`(async () => !('gatewayHost' in JSON.parse(await ${gwbox})))()`);
+    assert.ok(!Object.keys(onDisk()).some((k) => /^gateway|^serverFingerprint$/.test(k)), 'nothing of the gateway is left on disk');
+    // Gone again: a row under the sidebar grip would turn the next test's drag into a drag of that row.
+    await app.eval(`(() => { const ask = window.confirm; window.confirm = () => true;
+      [...document.querySelectorAll('#tree .conn')].find((n) => n.textContent.startsWith('gwbox')).dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 50, clientY: 50 }));
+      [...document.querySelectorAll('#menu button')].find((b) => b.textContent === 'Delete').click(); window.confirm = ask; })()`);
+    await app.waitFor(`![...document.querySelectorAll('#tree .conn')].some((n) => n.textContent.startsWith('gwbox'))`);
+  });
+
   await t.test('the sidebar grip widens the list, collapse still hides it, and the width survives a reload', async () => {
     const sideW = 'document.querySelector("#side").getBoundingClientRect().width';
     const before = await app.eval(sideW);
