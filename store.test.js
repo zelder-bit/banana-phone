@@ -261,3 +261,11 @@ test("an agreement ends with any change to what was agreed, and cannot be saved 
   store.bulkUpdate(d, { ids: ['a'], username: 'admin' }, { domain: 'NEW' });
   assert.ok(!('shareOk' in c()));
 });
+
+test('the sharing toast says how the folder is shared, and why a drive may be missing', () => {
+  const { sharingText } = require('./renderer/shared.mjs');
+  const ro = sharingText({ path: '/home/me/out', writable: false }, 'win.test');
+  assert.match(ro, /^Sharing \/home\/me\/out with win\.test \(read-only\)\./);
+  assert.match(ro, /If no drive appears there, the server may be set to refuse shared drives\.$/);
+  assert.match(sharingText({ path: '/x', writable: true }, 'h'), /\(it can change files\)/);
+});

@@ -18,3 +18,7 @@ export function matches(conn, q) {
     .filter(Boolean).join(' ').toLowerCase();
   return q.split(/\s+/).every((word) => hay.includes(word));
 }
+
+// Said in a toast when a session with a shared folder opens, and kept as the tooltip of the pane's label.
+// The last sentence is there because a server that refuses redirected drives looks, from here, like any other.
+export const sharingText = (shared, host) => `Sharing ${shared.path} with ${host} (${shared.writable ? 'it can change files' : 'read-only'}). If no drive appears there, the server may be set to refuse shared drives.`;
