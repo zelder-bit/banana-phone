@@ -240,7 +240,8 @@ test('a token opens one websocket, soon, and says itself which guacd it is for',
 });
 
 test('the bridge drops the page\'s requests for files, however they are cut up, and passes the rest', async (t) => {
-  const { fromPage, ensureBridge, ticket, stopGuacd } = require('./guacd');
+  const { fromPage } = require('./pagefilter');
+  const { ensureBridge, ticket, stopGuacd } = require('./guacd');
   const through = (...messages) => { const out = []; const f = fromPage((i) => out.push(i)); for (const m of messages) f(Buffer.from(m)); return out.join(''); };
   const rest = '4.sync,2.10;5.mouse,1.1,1.2,1.0;3.key,5.65307,1.1;9.clipboard,1.0,10.text/plain;4.blob,1.0,4.aGk=;3.end,1.0;3.ack,1.1,2.OK,1.0;3.nop;';
   assert.strictEqual(through(rest), rest, 'screen, mouse, keys and clipboard pass as they are');

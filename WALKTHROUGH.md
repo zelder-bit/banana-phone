@@ -72,6 +72,7 @@ banana-phone/
 ├── preload.js          exposes a safe `window.bp` API to the page
 ├── store.js            load/save connections.json, search, bulk update (pure logic)
 ├── guacd.js            starts guacd in Docker, runs the websocket bridge, makes tokens
+├── pagefilter.js       on the bridge: drops the page's requests for files before guacd sees them
 ├── share.js            shared folders: which folders may be shared, what the user agreed to (pure logic)
 ├── store.test.js       tests for store.js
 ├── guacd.test.js       tests for tokens, the RDP identity check and shared folders' containers
@@ -961,7 +962,7 @@ function verifyClient(info) {
 
 ### What the page may not ask guacd
 
-Once the websocket is open, guacamole-lite passes every message from the page to guacd as it came. Nearly all of that is what a session is: key presses, mouse moves, clipboard text, "I have drawn that frame". Two instructions are not. guacd shows a shared folder to the Guacamole client as a *filesystem object*, and the client may send `get` (give me this folder's listing, or this file) and `put` (take this file). `disable-download` and `disable-upload` (below) make guacd refuse the files, but guacd 1.6.0 answers a `get` for a *folder* before it looks at those settings, so a page that had been taken over could read the names of the files in a folder you shared. Nothing else uses `get` and `put`, so the bridge takes them out:
+Once the websocket is open, guacamole-lite passes every message from the page to guacd as it came. Nearly all of that is what a session is: key presses, mouse moves, clipboard text, "I have drawn that frame". Two instructions are not. guacd shows a shared folder to the Guacamole client as a *filesystem object*, and the client may send `get` (give me this folder's listing, or this file) and `put` (take this file). `disable-download` and `disable-upload` (below) make guacd refuse the files, but guacd 1.6.0 answers a `get` for a *folder* before it looks at those settings, so a page that had been taken over could read the names of the files in a folder you shared. Nothing else uses `get` and `put`, so the bridge takes them out. The code is a file of its own, `pagefilter.js`, which `guacd.js` loads with `require('./pagefilter')`:
 
 ```js
 const FILE_REQUESTS = new Set(['get', 'put']);
@@ -982,8 +983,8 @@ function fromPage(send) {
     if (waiting > MAX_WAITING) throw new Error('The page sent an instruction that does not end');
   };
 }
-// guacamole-lite passes each websocket message to guacd as it came, and has no hook to change that.
 const passOn = ClientConnection.prototype.sendMessageToGuacd;
+if (typeof passOn !== 'function') throw new Error('guacamole-lite changed: the page filter cannot be installed');
 ClientConnection.prototype.sendMessageToGuacd = function (message) {
   this.fromPage ||= fromPage((instruction) => passOn.call(this, instruction));
   try { this.fromPage(message); } catch (e) { this.close(e); }
@@ -993,6 +994,7 @@ ClientConnection.prototype.sendMessageToGuacd = function (message) {
 * A Guacamole instruction is text such as `3.key,5.65307,1.1;`: each element is its length, a dot and its value; commas separate elements and a semicolon ends the instruction. The first element is the *opcode*, the instruction's name. `Parser` is the Guacamole project's own parser, which guacamole-lite ships and already uses for what guacd sends. It calls `oninstruction` once for every complete instruction.
 * Looking for the text `3.get` in each message would not do. The page decides how its text is cut into messages, so it could send `3.g` in one and `et,…` in the next; and a harmless instruction may hold `;3.get,…` inside a value, where it is only text. So the bridge reads the stream the way guacd does, with one parser per connection that remembers what is still unfinished, and it does not pass the page's text on at all: `Parser.toInstruction` writes each instruction out again from what was understood. guacd is given nothing that this code read differently.
 * `sendMessageToGuacd` is the method of guacamole-lite's `ClientConnection` that receives each websocket message. It has no hook for this, so the method itself is replaced: the new one feeds the message to the connection's own filter (`this.fromPage`, made on first use; `||=` assigns only if the left side is empty), and the filter calls the original, kept in `passOn`, for each instruction that may pass. `function`, not an arrow, because `this` must be the connection the method was called on.
+* Replacing a method inside a library depends on how that library happens to be written. A later guacamole-lite could rename the method, and the replacement would then sit there unused while sessions ran unfiltered, with nothing to show for it. Two things prevent that. `package.json` names the version exactly (`"guacamole-lite": "1.2.0"`, not `^1.2.0`, which would accept any 1.x), so it changes only when someone changes it. And if the method is not there when the file loads, the `throw` stops the app at startup: no remote session can start without the filter. The test through the real bridge would fail too.
 * guacd is written in C, where a NUL character ends a piece of text: it would read `get` followed by a NUL as `get`, while to this code that is a different, unknown name. No real instruction holds a NUL, so a message with one is refused. Text that is not an instruction makes the parser throw, and an instruction that never ends would otherwise pile up in memory; any of the three closes the connection.
 * It applies to every session, shared folder or not: without a shared folder there is no filesystem object, and the two instructions did nothing. `guacd.test.js` sends requests for files through the real bridge to a stand-in guacd, whole and cut in two, and checks that only the rest arrives.
 

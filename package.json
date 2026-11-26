@@ -23,6 +23,7 @@
       "preload.js",
       "store.js",
       "guacd.js",
+      "pagefilter.js",
       "share.js",
       "renderer/**",
       "node_modules/**"
@@ -41,7 +42,7 @@
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
     "guacamole-common-js": "^1.5.0",
-    "guacamole-lite": "^1.2.0",
+    "guacamole-lite": "1.2.0",
     "node-pty": "^1.1.0",
     "ssh2": "^1.17.0"
   },
