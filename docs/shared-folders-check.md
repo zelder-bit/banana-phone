@@ -19,10 +19,11 @@ RDP shared folders ([README](../README.md#features), [walkthrough §8](../WALKTH
 | The container: one mount, your user, no capabilities, no published port | yes | |
 | The container's own files | read-only; only its `/tmp` can be written | |
 | guacd reachable on the container's address | no | |
+| The container's network and memory | this launch's own network, not `bridge`; a limit of 1 GiB | |
 | Another account reaching the socket | no | |
 | Using a session's token a second time | refused | |
 | The folder swapped for a link to another folder before mounting | nothing is shared, the container is removed | |
-| Quitting stops the containers | yes | |
+| Quitting stops the containers and removes their network | yes | |
 
 To run it yourself you need Docker, an xrdp server on port 3389 with an account other than yours, and passwordless `sudo`; the top of `scripts/share.itest.js` has the details and the CI job is a working recipe. The job runs on Ubuntu 24.04 deliberately: its xrdp (0.9.24) shows a redirected drive as a folder in the session, which is how the test looks at it. With Ubuntu 26.04's xrdp (0.10.1) guacd connects and the drive is announced, but that folder never appeared, so the test had nothing to look at; that is a limit of the test fixture, not a finding about the feature.
 
@@ -36,7 +37,7 @@ A second review, of the pull requests themselves, added these:
 - **A home folder under another name.** The folder rules compared paths only. A home folder mounted in a second place is now recognised by which folder it is on disk, and a folder that holds `.ssh`, `.gnupg` or the like is refused as a copy of one (a snapshot, a backup).
 - **The question says more.** It names the server with its port when that is not 3389, says when the server's certificate was first seen on this very connect and shows it, says when a writable share holds a git repository or programs, and writes out invisible and direction-changing characters in the folder's path.
 - **Agreements are signed.** They were a plain hash of things written in the app's own files; they are now signed with a key kept behind the system keyring.
-- **The container is tighter**: its own files read-only, `/tmp` in memory, a limit on processes. It also runs in the groups you are in, so a folder you reach through a group is not empty on the remote side.
+- **The container is tighter**: its own files read-only, `/tmp` in memory, a limit on processes. Since issue #68 also a network of its own, where containers cannot reach each other or the ordinary guacd, and a memory limit of 1 GiB (measured against xrdp: 189 MB for one session at 7680×2160; not yet measured against Windows). It also runs in the groups you are in, so a folder you reach through a group is not empty on the remote side.
 
 A third pass found that guacd answers a request for a folder's listing even with its file transfer off, so the page (the app's own window) could learn the names of the files in a shared folder. The bridge now drops the two instructions that ask guacd's filesystem for anything (`get` and `put`) before they reach guacd (issue #61). Checked by hand against the real `guacamole/guacd:1.6.0` image with a read-only share: asked for the folder's listing, guacd sent the file names when the filter was taken out, and nothing with it in. That run got no further than the server's login, so a signed-in session through the filter is covered only by `npm test`, where a stand-in guacd receives keys, mouse and clipboard unchanged; the Windows checklist below exercises it for real.
 

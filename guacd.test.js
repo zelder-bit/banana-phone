@@ -87,14 +87,19 @@ test('the drive is on only for an RDP connection that was given a share', () => 
 });
 
 test("a share's container sees only that folder, read-only by default, as you, with no port", () => {
-  const { shareRunArgs, shareName } = require('./guacd');
+  const { shareRunArgs, shareName, shareNet } = require('./guacd');
   const args = shareRunArgs('n', { path: '/home/u/My Files' });
   const after = (a, flag) => a[a.indexOf(flag) + 1];
   assert.strictEqual(after(args, '--mount'), 'type=bind,source=/home/u/My Files,target=/drive,readonly,bind-recursive=readonly,bind-propagation=rprivate');
   assert.strictEqual(after(args, '--user'), `${process.getuid()}:${process.getgid()}`);
   assert.strictEqual(after(args, '--cap-drop'), 'ALL');
   assert.strictEqual(after(args, '--security-opt'), 'no-new-privileges');
-  assert.ok(!args.some((a) => /^(-p|-P|--publish|--publish-all|-v|--volume|--privileged|--network|--net)/.test(a)));
+  assert.ok(!args.some((a) => /^(-p|-P|--publish|--publish-all|-v|--volume|--privileged|--net$|--net=|--network=)/.test(a)));
+  // On this launch's own network, never Docker's default bridge or the host's, and with a limit on memory (and no swap on top).
+  assert.strictEqual(shareNet(), `banana-phone-guacd-${process.getuid()}-${process.pid}`);
+  assert.deepStrictEqual(args.filter((a, i) => args[i - 1] === '--network'), [shareNet()]);
+  assert.match(after(args, '--memory'), /^\d+[mg]$/);
+  assert.strictEqual(after(args, '--memory-swap'), after(args, '--memory'));
   // In the groups you are in, so a folder you reach through one of them is not empty over there.
   const added = args.flatMap((a, i) => (a === '--group-add' ? [Number(args[i + 1])] : []));
   assert.deepStrictEqual(added, process.getgroups().filter((g) => g !== process.getgid()));
@@ -125,8 +130,9 @@ test("a share's container sees only that folder, read-only by default, as you, w
 function fakeDocker(t, existing = []) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bp-docker-'));
   const log = path.join(dir, 'log');
-  fs.writeFileSync(path.join(dir, 'docker'), `#!/bin/sh\necho "$*" >> "${log}"\n[ "$1 $2" = "exec -i" ] && exec cat\n[ "$1" = inspect ] && echo true\n[ "$1" = version ] && cat "${dir}/version"\n[ "$1" = info ] && cat "${dir}/info"\n[ "$1" = ps ] && cat "${dir}/ps"\n[ "$1 $3" = "exec stat" ] && cat "${dir}/mounted"\nexit 0\n`, { mode: 0o755 });
+  fs.writeFileSync(path.join(dir, 'docker'), `#!/bin/sh\necho "$*" >> "${log}"\n[ "$1 $2" = "network create" ] && echo false > "${dir}/icc"\n[ "$1 $2" = "network inspect" ] && { cat "${dir}/icc"; exit; }\n[ "$1 $2" = "exec -i" ] && exec cat\n[ "$1" = inspect ] && echo true\n[ "$1" = version ] && cat "${dir}/version"\n[ "$1" = info ] && cat "${dir}/info"\n[ "$1" = ps ] && cat "${dir}/ps"\n[ "$1 $2" = "network ls" ] && cat "${dir}/nets"\n[ "$1 $3" = "exec stat" ] && cat "${dir}/mounted"\nexit 0\n`, { mode: 0o755 });
   fs.writeFileSync(path.join(dir, 'ps'), existing.map((n) => n + '\n').join(''));
+  fs.writeFileSync(path.join(dir, 'nets'), existing.map((n) => n.replace(/-[^-]*$/, '') + '\n').join('')); // each one's network: its name without the last part
   const engine = (v) => fs.writeFileSync(path.join(dir, 'version'), JSON.stringify({ Server: { Version: v } }) + '\n');
   engine('29.1.0');
   fs.writeFileSync(path.join(dir, 'info'), '{}\n');
@@ -148,7 +154,7 @@ test('a share starts its container once, is reached through a private socket, an
   const ended = require('child_process').spawnSync(process.execPath, ['-e', '']).pid;
   const left = `banana-phone-guacd-${uid}-${ended}-aaaaaaaaaaaa`;
   const calls = fakeDocker(t, [left, `banana-phone-guacd-${uid}-${process.pid}-bbbbbbbbbbbb`, `banana-phone-guacd-${uid + 1}-${ended}-cccccccccccc`, `banana-phone-guacd-${uid}-${ended}-not-ours`]);
-  const { ensureShare, shareName, stopGuacd } = require('./guacd');
+  const { ensureShare, shareName, shareNet, stopGuacd } = require('./guacd');
   const share = { id: 'c1', path: fs.mkdtempSync(path.join(os.tmpdir(), 'bp-share-')), dev: '64', ino: '1234' };
   const name = shareName(share);
   calls.mounted('64:1234');
@@ -158,6 +164,11 @@ test('a share starts its container once, is reached through a private socket, an
   assert.strictEqual(runs.length, 1);
   assert.match(runs[0], new RegExp(`--name ${name} .*--mount type=bind,source=${share.path},target=/drive,readonly,bind-recursive=readonly,bind-propagation=rprivate `));
   assert.deepStrictEqual(calls().filter((c) => c.startsWith('rm -f ') && c !== `rm -f ${name}`), [`rm -f ${left}`]); // only the crashed launch's
+  // The same for networks: the crashed launch's goes, and ours is made, closed between containers, before the container is run on it.
+  const made = `network create -o com.docker.network.bridge.enable_icc=false ${shareNet()}`;
+  assert.deepStrictEqual(calls().filter((c) => c.startsWith('network rm ') || c.startsWith('network create ')), [`network rm banana-phone-guacd-${uid}-${ended}`, made]);
+  assert.ok(calls().indexOf(made) < calls().indexOf(runs[0]));
+  assert.match(runs[0], new RegExp(` --network ${shareNet()} `));
   // Only this user may connect: the socket and the folder around it.
   assert.strictEqual(fs.statSync(sock).mode & 0o777, 0o600);
   assert.strictEqual(fs.statSync(path.dirname(sock)).mode & 0o777, 0o700);
@@ -177,8 +188,11 @@ test('a share starts its container once, is reached through a private socket, an
   assert.strictEqual(calls().filter((c) => c === `rm -f ${name}`).length, 2); // once before starting, once now
   await assert.rejects(ensureShare({ id: 'c2', path: share.path }), /changed while it was being shared/); // a share nobody identified is not served either
 
+  assert.strictEqual(calls().filter((c) => c.startsWith('network create ')).length, 1); // the later starts found the network as it should be and left it
+
   stopGuacd();
   assert.ok(calls().some((c) => c.startsWith('stop -t 1 ') && c.split(' ').includes(name)));
+  assert.strictEqual(calls().at(-1), `network rm ${shareNet()}`); // after the stop: a network in use cannot be removed
   assert.ok(!fs.existsSync(path.dirname(sock)));
 });
 

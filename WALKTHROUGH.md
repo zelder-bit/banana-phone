@@ -1164,6 +1164,7 @@ function shareRunArgs(name, share) {
     '--user', me(), ...myGroups(), '-e', 'HOME=/tmp', // FreeRDP wants a home it can write to; yours does not exist in there
     '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges',
     '--read-only', '--tmpfs', `/tmp:uid=${process.getuid()},gid=${process.getgid()},mode=700`, '--pids-limit', '512',
+    '--network', shareNet(), '--memory', MEMORY, '--memory-swap', MEMORY,
     // Unlike -v, --mount fails if the folder is missing instead of creating it as root.
     '--mount', `type=bind,source=${share.path},target=${DRIVE}${share.writable === true ? '' : READ_ONLY}`,
     IMAGE, '-b', '127.0.0.1']; // the image's entrypoint passes extra arguments to guacd; the last -b wins
@@ -1176,6 +1177,8 @@ guacd was written to run on a server its administrator controls. Its drive code 
 * **Read-only unless `writable` is exactly `true`**, and read-only *all the way down* (`READ_ONLY`, below). The kernel refuses writes, whatever guacd is asked to do. A missing or mistyped `writable` means read-only.
 * **`--user`** runs guacd as you (`me()` is your user and group number) instead of the image's built-in user 1000. It can open only what you can, and files the remote side creates belong to you, and to you alone (mode 600, see the [known limits](docs/shared-folders-check.md#known-limits)). `myGroups()` adds a `--group-add` for every other group you are in: `--user` alone leaves them out, and a folder you can open only because of a group (a team's folder) would look empty from the remote side. `HOME=/tmp` goes with it: FreeRDP refuses to connect without a home directory it can write to, and your user has none in the container.
 * **`--read-only`, `--tmpfs /tmp` and `--pids-limit`.** guacd reads whatever the RDP server sends it. If a flaw in it were ever used against you, the program would find the container's own files read-only, a `/tmp` that exists only in memory, and a limit of 512 processes. The `/tmp` is given your user number and mode 700 outright: left alone, Docker gives it the owner the image's `/tmp` has, and a home guacd cannot write to stops FreeRDP from connecting.
+* **`--memory`** is `MEMORY`, 1 GiB. Measured with one session and a busy screen, a share's guacd used 54 MB at 1920×1080, 128 MB at 3840×2160 and 189 MB at 7680×2160 (two 4K screens side by side), so the limit is about five times the largest of those. It is a ceiling, not memory set aside. What is written to the in-memory `/tmp` counts towards it. `--memory-swap` with the same figure means memory and swap *together* may reach 1 GiB, so there is no swap on top. A guacd that goes over is killed by the kernel and the session ends; the rest of the computer is not slowed down.
+* **`--network`** puts the container on a network of this launch's own instead of Docker's default one (`shareNet`, below).
 * **`--cap-drop ALL`** and **`no-new-privileges`** take away the extra powers Docker gives a container by default; guacd needs none of them.
 * **No `-p`, and `-b 127.0.0.1`.** The ordinary guacd publishes port 4822 on localhost, which is harmless: it holds nothing. This one would give the shared folder to any program or account on this computer that connected to it. So no port is published, and guacd is told to listen only on the container's *own* loopback, which nothing outside the container can reach, not even through the container's IP address.
 * The path check refuses what would break `--mount`'s comma-separated syntax. `execFile` already rules out shell injection; this rules out *option* injection, where a folder named `x,readonly=false` would rewrite the mount.
@@ -1233,6 +1236,27 @@ const dockerSays = (what) => docker([what, '--format', '{{json .}}']);
 * **Docker Desktop** reports its `OperatingSystem` as "Docker Desktop". Its containers run in a virtual machine and the folder crosses through a file-sharing layer, so the device and inode numbers seen inside are not the ones `share.js` recorded, and the check described below would refuse every share without saying why.
 * The words say "yet": this refuses, it does not support. Which of the four to make work is still to be decided.
 
+**A network of its own.** Docker puts a container on its default network, called `bridge`, unless told otherwise, and containers there can connect to each other. A guacd that a server had managed to turn against you could then reach the ordinary guacd's port 4822 at that container's address, and every other container on the computer.
+
+```js
+const shareNet = () => `${NAME}-${process.getuid()}-${process.pid}`;
+const NO_ICC = 'com.docker.network.bridge.enable_icc';
+let networking;
+// Asked each time a share's container starts: the network may have been pruned while no share was up.
+const ensureNet = () => (networking ||= (async () => {
+  const closed = () => docker(['network', 'inspect', '-f', `{{index .Options "${NO_ICC}"}}`, shareNet()]).then((icc) => icc === 'false', () => false);
+  if (await closed()) return;
+  // Docker may only have been too busy to answer the first time: a network that is there and closed after all is fine.
+  // One of that name that is not closed was not made here (the name carries our process id), and nothing is started on it.
+  await docker(['network', 'create', '-o', `${NO_ICC}=false`, shareNet()]).catch(async (e) => { if (!(await closed())) throw e; });
+})().finally(() => { networking = null; }));
+```
+
+* Each launch has one network for all its share containers, named `banana-phone-guacd-<your user number>-<this launch's process id>`: a container's name without the hash, so leftovers can be told apart the same way.
+* `enable_icc=false` turns off *inter-container communication*: containers on this network cannot connect to each other, so two shares' guacds cannot meet. Docker already keeps one network's containers from reaching another network's, which covers the ordinary guacd and everything else on `bridge`. Connections *out* still work, or guacd could not reach the RDP server. Checked against a real Docker: from a container on such a network, port 4822 of a guacd on `bridge` and of a second container on the same network both refused, while the same port answered a container on `bridge`.
+* `startShare` (below) calls `ensureNet` just before `docker run`. It asks Docker whether the network is there with that option set to `false`, and only otherwise creates it. If creating fails, it asks once more and is content if the network is there and closed after all: the first question may have failed only because Docker was busy. A network of that name that is *not* closed was not made by this launch (the name carries its process id); it is left alone, and the share does not start. It asks every time because `docker network prune` removes a network that has no container on it at that moment.
+* `networking ||=` shares one check between shares that start at the same moment (two would both try to create it, and the second would fail), and `.finally` forgets it afterwards so that the next start asks again.
+
 With no port, the way in is `docker exec`, which runs a program inside a running container:
 
 ```js
@@ -1241,7 +1265,8 @@ function relay(name) {
   const sock = path.join(runDir, `${name.slice(-12)}.sock`); // short: socket paths end at 107 bytes
   const server = net.createServer((c) => {
     const p = spawn('docker', ['exec', '-i', name, 'nc', '127.0.0.1', String(GUACD_PORT)], { stdio: ['pipe', 'pipe', 'ignore'] });
-    const end = () => { c.destroy(); p.kill(); };
+    execs.add(p);
+    const end = () => { c.destroy(); p.kill(); execs.delete(p); };
     for (const x of [c, p, p.stdin, p.stdout]) x.on('error', end);
     c.on('close', end);
     p.on('close', end); // 'close', not 'exit': by then everything guacd sent has been passed on
@@ -1270,6 +1295,7 @@ function startShare(share) {
     if (blocked) throw new Error(blocked);
     await sweep();
     await docker(['rm', '-f', name]).catch(() => {});
+    await ensureNet();
     await docker(args);
     for (let i = 0; i < 50; i++) {
       const up = await docker(['exec', name, 'nc', '-z', '127.0.0.1', String(GUACD_PORT)]).then(() => true, () => false);
@@ -1284,8 +1310,8 @@ function startShare(share) {
 * The container's name comes from `shareName`: `banana-phone-guacd-<your user number>-<this launch's process id>-<12 hex digits>`, the digits being a SHA-256 hash of the connection's id, its server, the folder and whether it is writable. Sessions of the same connection to the same server use one container; another connection, another server, or the same folder shared read-only instead of writable, gets another.
 * The same `starting ||=` pattern as `ensureGuacd` makes four panes opened at once share one start-up.
 * `nc -z` only tests whether the port accepts connections. It is the same command the image's own health check runs.
-* `sweep` removes containers left over from a launch that crashed: ones with your user number whose process id is no longer running (`process.kill(pid, 0)` sends no signal, it only reports whether the process exists). It runs when the app starts and again before the first share. A second banana-phone that is still running, with another profile for instance, keeps its containers.
-* `stopGuacd` stops every share's container on quit and deletes the socket folder. Unlike the ordinary guacd, nothing else can be using them.
+* `sweep` removes containers left over from a launch that crashed: ones with your user number whose process id is no longer running (`process.kill(pid, 0)` sends no signal, it only reports whether the process exists). It runs when the app starts and again before the first share. A second banana-phone that is still running, with another profile for instance, keeps its containers. Then it removes the networks of those same launches, in that order: Docker refuses to remove a network that still has a container on it.
+* `stopGuacd` stops every share's container on quit, then removes this launch's network and deletes the socket folder. Unlike the ordinary guacd, nothing else can be using them. Before the stop it kills the `docker exec` of every session still open (`execs`, filled in `relay`): `docker stop` waits for an attached `docker exec` to finish, and `stopGuacd` blocks until the stop returns, so nothing could have passed the bytes on. A session left open at quit used to hold the stop up until it gave up after ten seconds, with the container (and now the network) still there.
 
 **Is it the right folder?** Docker mounts a *path*, and `share.js` (below) checked a path a moment earlier. In between, the path can be made to lead somewhere else: anyone who can write to a folder above the shared one can swap it for a link to, say, your home folder, and Docker, running as root, would follow it. So the folder is not trusted by its path but by what the kernel uses to tell folders apart, its **device and inode numbers**:
 
@@ -2500,7 +2526,7 @@ Covered: multi-word search, that an empty password removes the saved one while a
 
 `scripts/share.itest.js` (`npm run test:share`) is the one test that touches the real things, so it is not part of `npm test`. It needs Docker, an RDP server on this machine (xrdp, standing in for Windows) and a second account to log in as; CI's `share` job installs all three on a fresh machine. The test calls `rdpFingerprint` and `openRemote` exactly as `main.js` does, opens the websocket the page would open, and then looks at the redirected drive *as the logged-in account*: what a program on the remote computer could do. It checks that a read-only share can be read and not changed, not even on a drive mounted inside the folder, that guacd can write nowhere in its container but `/tmp`, that a writable one can be changed and that the new files are yours, that links pointing out of the folder lead nowhere, that the container has one mount, no port and no way in from the network, that a token cannot be used twice, that a folder swapped for a link to another one is not shared, and that quitting stops the containers. `docs/shared-folders-check.md` lists the results and what is left to check by hand on a real Windows host.
 
-`guacd.test.js` also checks `remoteSettings`: the RDP settings pin the certificate, ask for the admin session only when it is ticked, and turn the drive on (and guacd's own file transfer off) only for an RDP connection that was given a share. For shared folders it checks the `docker run` arguments (read-only at every level unless `writable` is exactly `true`, your user and groups, a read-only container with a `/tmp` of its own, no published port, bad paths refused), that a read-only share is not started on a Docker Engine older than 25 while a writable one is, that `shareBlocker` names rootless Docker, Podman, SELinux and Docker Desktop from sample `docker info` and `docker version` answers (nothing for an ordinary Docker, and a refusal for an answer that cannot be read) and that no container is started when it does, and, with a stand-in `docker` program on the `PATH`, that `ensureShare` starts the container once, sweeps only a crashed launch's leftovers, refuses a container whose mounted folder is not the one that was examined, that its socket is private and carries bytes both ways through `docker exec`, and that `stopGuacd` stops the container and removes the socket. A last test covers tokens: one use, one minute, and each share's token naming its own guacd on the one bridge.
+`guacd.test.js` also checks `remoteSettings`: the RDP settings pin the certificate, ask for the admin session only when it is ticked, and turn the drive on (and guacd's own file transfer off) only for an RDP connection that was given a share. For shared folders it checks the `docker run` arguments (read-only at every level unless `writable` is exactly `true`, your user and groups, a read-only container with a `/tmp` of its own, this launch's network and a memory limit, no published port, bad paths refused), that a read-only share is not started on a Docker Engine older than 25 while a writable one is, that `shareBlocker` names rootless Docker, Podman, SELinux and Docker Desktop from sample `docker info` and `docker version` answers (nothing for an ordinary Docker, and a refusal for an answer that cannot be read) and that no container is started when it does, and, with a stand-in `docker` program on the `PATH`, that `ensureShare` starts the container once, creates its network first, sweeps only a crashed launch's leftover containers and network, refuses a container whose mounted folder is not the one that was examined, that its socket is private and carries bytes both ways through `docker exec`, and that `stopGuacd` stops the container, then removes the network and the socket. A last test covers tokens: one use, one minute, and each share's token naming its own guacd on the one bridge.
 
 ---
 
