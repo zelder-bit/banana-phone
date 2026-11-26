@@ -172,6 +172,26 @@ test('tabs, splits, gutter and dialogs', { timeout: 120000 }, async (t) => {
     assert.strictEqual(await app.eval(count('.xterm')), 4);
   });
 
+  await t.test('full screen repeats the header\'s shared-folder label under the banana', async () => {
+    // No RDP server here, so the label is put on the selected pane's header the way openRemote does it.
+    const fsShared = '(() => { const s = document.querySelector("#fs-shared"); return JSON.stringify([s.offsetParent !== null, s.textContent, s.title]); })()';
+    await app.eval(`(() => { const s = document.createElement('span'); s.className = 'shared'; s.textContent = 'shared folder: read-only'; s.title = 'Sharing /tmp/x with win.test (read-only)';
+      document.querySelector('.pane.active .pane-head .t').after(s); })()`);
+    await app.click('#fullscreen');
+    await app.waitFor('!!document.querySelector(".pane.full")');
+    await app.mouse('mouseMoved', await app.center('#fs-banana img'));
+    assert.deepStrictEqual(JSON.parse(await app.eval(fsShared)), [true, 'shared folder: read-only', 'Sharing /tmp/x with win.test (read-only)']);
+    await app.click('#fs-back');
+    await app.waitFor('!document.querySelector(".pane.full")');
+    await app.eval('document.querySelector(".pane.active .pane-head .shared").remove()');
+    await app.click('#fullscreen'); // the same pane, now sharing nothing: no label is left over
+    await app.waitFor('!!document.querySelector(".pane.full")');
+    await app.mouse('mouseMoved', await app.center('#fs-banana img'));
+    assert.deepStrictEqual(JSON.parse(await app.eval(fsShared)), [false, '', '']);
+    await app.click('#fs-back');
+    await app.waitFor(`!document.querySelector(".pane.full") && ${visiblePanes} === 4`);
+  });
+
   await t.test('the pane button pops a session into its own tab', async () => {
     await app.click('.split:not([hidden]) > .pane ~ .pane button[title="Own tab"]');
     await app.waitFor(`${count('.tab')} === 2 && ${visiblePanes} === 1`);

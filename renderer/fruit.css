@@ -154,7 +154,7 @@ input:focus, select:focus { outline: none; border-color: var(--orange); }
 .pane-head { display: flex; align-items: center; gap: 6px; padding: 3px 4px 3px 10px; background: var(--surface-2); font-size: .82rem; font-weight: 700; cursor: grab; flex: none; }
 .pane-head img { width: 16px; height: 16px; }
 .pane-head .t { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.pane-head .shared { flex: none; font-size: .7rem; padding: 1px 8px; border-radius: 999px; border: 1.5px solid var(--orange); white-space: nowrap; }
+.pane-head .shared, .fs-actions .shared { flex: none; align-self: center; font-size: .7rem; padding: 1px 8px; border-radius: 999px; border: 1.5px solid var(--orange); white-space: nowrap; }
 .split.single .pane-head { display: none; }
 .split.single .pane.sharing .pane-head { display: flex; } /* a session that shares a folder always says so */
 .pane.full { position: fixed; inset: 0; z-index: 50; border: 0; border-radius: 0; }

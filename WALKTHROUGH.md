@@ -1859,7 +1859,7 @@ function setFull(p) { // p = the pane to full-screen, or null to leave; pane cla
   was?.root.classList.remove('full');
   p?.root.classList.add('full');
   $('#fs-banana').hidden = !p;
-  $('#fs-cad').hidden = !canCtrlAltDel(p);
+  fsControls();
   window.bp.fullScreen(!!p);
   focusPane(p || was); // focusPane ignores a pane that is no longer in a tab
 }
@@ -1867,6 +1867,20 @@ const unfull = (p) => { if (p === fsPane) setFull(null); }; // a pane that close
 window.bp.onLeftFullScreen(() => setFull(null)); // e.g. a window manager shortcut took the window out of full screen
 ```
 
+What sits under the banana besides Minimize and Back to tab depends on the pane, and `fsControls()` works it out from the pane itself every time:
+
+```js
+function fsControls() { // what sits under the banana is read from the full-screen pane each time, never remembered
+  $('#fs-cad').hidden = !canCtrlAltDel(fsPane);
+  const label = fsPane?.root.querySelector('.pane-head .shared'); // the header's own label, which full screen hides
+  $('#fs-shared').hidden = !label;
+  $('#fs-shared').textContent = label?.textContent || '';
+  $('#fs-shared').title = label?.title || '';
+}
+```
+
+* Full screen hides the pane's header, and with it the "shared folder: read-only / writable" label (see [Remote desktop panes](#remote-desktop-panes-guacamole)). So the same words are copied to `#fs-shared`, next to the buttons under the banana. They are read from the header's label, not kept in a variable of their own, so the two cannot disagree.
+* `setFull` calls it, and so does `openRemote` once its session is ready, for a pane that went full screen while it was still connecting.
 * `was?.root…` and `p?.root…` use optional chaining, so the same lines work for entering (`was` is `null`), leaving (`p` is `null`) and switching panes.
 * `unfull(p)` is for "this pane went away": closing it, its shell ending, or a remote desktop failing all call it, and it only acts if that pane is the full-screen one.
 * `onLeftFullScreen` is the page's end of `win:left-fullscreen` (see [§6](#creating-the-window)). If your window manager takes the window out of full screen, the page drops its pinned pane too instead of leaving it covering a normal window.

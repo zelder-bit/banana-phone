@@ -660,9 +660,16 @@ function setFull(p) { // p = the pane to full-screen, or null to leave; pane cla
   was?.root.classList.remove('full');
   p?.root.classList.add('full');
   $('#fs-banana').hidden = !p;
-  $('#fs-cad').hidden = !canCtrlAltDel(p);
+  fsControls();
   window.bp.fullScreen(!!p);
   focusPane(p || was); // focusPane ignores a pane that is no longer in a tab
+}
+function fsControls() { // what sits under the banana is read from the full-screen pane each time, never remembered
+  $('#fs-cad').hidden = !canCtrlAltDel(fsPane);
+  const label = fsPane?.root.querySelector('.pane-head .shared'); // the header's own label, which full screen hides
+  $('#fs-shared').hidden = !label;
+  $('#fs-shared').textContent = label?.textContent || '';
+  $('#fs-shared').title = label?.title || '';
 }
 const unfull = (p) => { if (p === fsPane) setFull(null); }; // a pane that closes or ends leaves full screen
 window.bp.onLeftFullScreen(() => setFull(null)); // e.g. a window manager shortcut took the window out of full screen
@@ -813,7 +820,7 @@ async function openRemote(p, c) {
   p.body.append(wrap);
   p.body.tabIndex = 0;
   p.guac = client;
-  if (p === fsPane) $('#fs-cad').hidden = false; // it went full screen while still starting: it can take Ctrl+Alt+Del from now on
+  if (p === fsPane) fsControls(); // it went full screen while still starting: Ctrl+Alt+Del and the shared-folder label show from now on
 
   // Scale the remote screen to fit the pane, and ask the server to match the pane size.
   const fitDisplay = () => {
