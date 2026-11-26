@@ -21,4 +21,5 @@ export function matches(conn, q) {
 
 // Said in a toast when a session with a shared folder opens, and kept as the tooltip of the pane's label.
 // The last sentence is there because a server that refuses redirected drives looks, from here, like any other.
-export const sharingText = (shared, host) => `Sharing ${shared.path} with ${host} (${shared.writable ? 'it can change files' : 'read-only'}). If no drive appears there, the server may be set to refuse shared drives.`;
+// folders: every folder the session shares, [{ path, writable }], each said with what the server may do to it.
+export const sharingText = (folders, host) => `Sharing ${folders.map((s) => `${s.path} (${s.writable ? 'it can change files' : 'read-only'})`).join(', ')} with ${host}. If no drive appears there, the server may be set to refuse shared drives.`;

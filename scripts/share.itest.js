@@ -13,7 +13,7 @@ const net = require('net');
 const os = require('os');
 const path = require('path');
 const guacd = require('../guacd');
-const { pin } = require('../share');
+const { pin, pinAll } = require('../share');
 
 const USER = process.env.BP_RDP_USER;
 const PASSWORD = process.env.BP_RDP_PASSWORD;
@@ -97,7 +97,7 @@ test('a shared folder, end to end', { skip: !USER && 'set BP_RDP_USER and BP_RDP
   const listing = () => fs.readdirSync(folder).sort().join();
   const before = listing();
   // What main.js hands to openRemote: the folder as share.js saw it (path, device, inode), for one connection.
-  const shareOf = (id, writable) => ({ ...pin(folder, { home: os.homedir() }), writable, id });
+  const shareOf = (id, writable) => ({ id, folders: [{ ...pin(folder, { home: os.homedir() }), writable }] });
 
   await t.test('read-only: the remote side reads the folder and can change nothing', async () => {
     const share = shareOf('conn-1', false);
@@ -168,7 +168,7 @@ test('a shared folder, end to end', { skip: !USER && 'set BP_RDP_USER and BP_RDP
     assert.ok(sh('sudo', ['-n', 'mount', '-t', 'tmpfs', '-o', 'mode=777', 'none', stick]).ok, 'a drive is mounted inside the folder');
     try {
       fs.writeFileSync(path.join(stick, 'on-the-stick.txt'), 'kept');
-      const share = { ...pin(outer, { home: os.homedir() }), writable: false, id: 'conn-drive' };
+      const share = { id: 'conn-drive', folders: [{ ...pin(outer, { home: os.homedir() }), writable: false }] };
       await guacd.ensureShare(share);
       // Asked of the container itself, as guacd's user: the limit is the kernel's, whatever guacd is told to do.
       const inside = (cmd) => docker('exec', guacd.shareName(share), 'sh', '-c', cmd);
@@ -183,6 +183,38 @@ test('a shared folder, end to end', { skip: !USER && 'set BP_RDP_USER and BP_RDP
       assert.ok(inside('echo x > /tmp/scratch').ok, 'its /tmp is writable');
     } finally {
       sh('sudo', ['-n', 'umount', stick]);
+    }
+  });
+
+  await t.test('several folders: each under its own name with its own mode, and nothing can be put beside them', async () => {
+    // Two folders of the same name, one read-only and one not, as main.js hands them over (share.js's pinAll).
+    const [ro, rw] = ['one', 'two'].map((d) => path.join(base, d, 'Documents'));
+    for (const d of [ro, rw]) { fs.mkdirSync(d, { recursive: true }); fs.writeFileSync(path.join(d, 'here.txt'), d); }
+    const share = { id: 'conn-many', folders: pinAll([{ path: ro }, { path: rw, writable: true }], { home: os.homedir() }) };
+    await guacd.ensureShare(share);
+    const name = guacd.shareName(share);
+    const inside = (cmd) => docker('exec', name, 'sh', '-c', cmd);
+    assert.strictEqual(inside('ls /drive').out, 'Documents\nDocuments (2)');
+    assert.strictEqual(inside('cat /drive/Documents/here.txt "/drive/Documents (2)/here.txt"').out, ro + rw);
+    assert.deepStrictEqual(JSON.parse(docker('inspect', '-f', '{{json .Mounts}}', name).out).map((m) => [m.Source, m.Destination, m.RW]).sort(),
+      [[ro, '/drive/Documents', false], [rw, '/drive/Documents (2)', true]]);
+    // The read-only one cannot be changed, and neither can /drive itself: no file beside the folders, none renamed or removed.
+    for (const cmd of ['echo x > /drive/Documents/new.txt', 'rm /drive/Documents/here.txt', 'echo x > /drive/planted', 'mkdir /drive/new', 'mv "/drive/Documents (2)" /drive/moved', 'rmdir /drive/Documents', 'ln -s /etc /drive/link']) {
+      assert.ok(!inside(cmd).ok, `refused: ${cmd}`);
+    }
+    assert.ok(inside('echo from the container > "/drive/Documents (2)/new.txt"').ok);
+    assert.strictEqual(fs.readFileSync(path.join(rw, 'new.txt'), 'utf8').trim(), 'from the container');
+    assert.deepStrictEqual(fs.readdirSync(ro), ['here.txt']);
+    // One of the folders swapped for a link to somewhere else between the check and the mount: nothing at all is shared.
+    const swapped = { ...share, id: 'conn-many-swap' };
+    fs.renameSync(rw, rw + '-aside');
+    fs.symlinkSync(base, rw);
+    try {
+      await assert.rejects(guacd.ensureShare(swapped), /changed while it was being shared/);
+      assert.ok(!docker('inspect', guacd.shareName(swapped)).ok, 'the container that mounted the wrong folder is gone');
+    } finally {
+      fs.unlinkSync(rw);
+      fs.renameSync(rw + '-aside', rw);
     }
   });
 

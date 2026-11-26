@@ -23,6 +23,9 @@ RDP shared folders ([README](../README.md#features), [walkthrough §8](../WALKTH
 | Another account reaching the socket | no | |
 | Using a session's token a second time | refused | |
 | The folder swapped for a link to another folder before mounting | nothing is shared, the container is removed | |
+| Two folders of the same name, one read-only and one writable (looked at from inside the container) | `Documents`: read, not changed | `Documents (2)`: changed |
+| Several folders: a file created beside them, or one of them renamed or removed | refused | refused |
+| Several folders: one of them swapped for a link before mounting | none is shared, the container is removed | |
 | Closing the last session stops its container; the next session starts it again | | yes |
 | Quitting stops the containers and removes their network | yes | |
 
@@ -42,7 +45,11 @@ A second review, of the pull requests themselves, added these:
 
 A third pass found that guacd answers a request for a folder's listing even with its file transfer off, so the page (the app's own window) could learn the names of the files in a shared folder. The bridge now drops the two instructions that ask guacd's filesystem for anything (`get` and `put`) before they reach guacd (issue #61). Checked by hand against the real `guacamole/guacd:1.6.0` image with a read-only share: asked for the folder's listing, guacd sent the file names when the filter was taken out, and nothing with it in. That run got no further than the server's login, so a signed-in session through the filter is covered only by `npm test`, where a stand-in guacd receives keys, mouse and clipboard unchanged; the Windows checklist below exercises it for real.
 
-`npm run test:ui` covers the edit dialog (the box is there for RDP only, the home folder is refused, read-only unless ticked, the page cannot write an agreement, and a path the page sends without your choosing it in the folder dialog gets one refusal whether the folder exists or not), and `npm test` covers the folder rules, the agreement, the `docker run` arguments, the relay and the bridge's filter.
+**Several folders per connection** (issue #64) came later. guacd has one drive per connection, so the folders are mounted side by side inside it, each under its own name and each read-only or not on its own. Every folder goes through the folder rules and the device-and-inode check separately, one agreement covers the whole list in its order, and the folder that holds them (`/drive`) is the container's own and read-only. The three rows about several folders in the table above were run against a real Docker (Engine 26) and the `guacamole/guacd:1.6.0` image, from inside the container. They have **not** yet been seen through an RDP session: the `share` job will do that part with xrdp the next time it runs.
+
+Saving still tells the page nothing about what is on disk, with several folders as with one. Every folder in a saved list must be one you chose in the folder dialog in this launch, or one already saved; any other gets the one refusal, whether it exists or not. The only other things asked at save are about the list itself (eight at most, none twice, none inside another, judged by the paths as written). The folder rules are asked when a folder is chosen, and all of them again, for every folder, on each connect.
+
+`npm run test:ui` covers the edit dialog (the box is there for RDP only, the home folder is refused, read-only unless ticked, a second folder with a mode of its own, the same folder twice refused, the page cannot write an agreement, and a list in which the page put a path you did not choose in the folder dialog gets one refusal whether that folder exists or not), and `npm test` covers the folder rules, the agreement, the `docker run` arguments, the relay and the bridge's filter.
 
 ## Not checked yet: do this once against Windows
 
@@ -55,15 +62,23 @@ xrdp is not Windows. Before relying on the feature, connect to a real Windows ho
 3. Still read-only: try to save a file into the drive, rename one, delete one.
    - [ ] all three fail, and nothing changes in the folder on this computer
    - [ ] note the message Windows shows (guacd reports a read-only folder as "invalid parameter", so it may be an odd one)
-4. Disconnect, tick *Let the remote computer change and delete files in it*, connect. The dialog asks again, now saying *read, change and delete*.
+4. Disconnect, tick *Can change files*, connect. The dialog asks again, now saying *read, change and delete*.
    - [ ] saving, renaming and deleting work in both directions, and a file made on this computer shows up in Explorer after a refresh
    - [ ] no `Download` folder appears in the folder
    - [ ] a file of a gigabyte or so copies both ways
 5. With a session open, in a terminal: `docker ps` shows `banana-phone-guacd-<uid>-<pid>-…` with nothing under PORTS. Quit banana-phone: it is gone.
 6. If you use them: an NLA server, an admin session (`mstsc /admin`), and signing out of Windows with a file from the drive open.
+7. Several folders: edit the connection, **Add a folder**, choose a second folder, tick *Can change files* on one of the two only, and connect. The dialog lists both, each with its name in the drive and `read-only` or `CAN BE CHANGED`.
+   - [ ] the drive shows two folders, named after the folders on this computer, and both open
+   - [ ] saving works in the one that can be changed and fails in the other
+   - [ ] creating a file or folder directly in the drive, next to the two, fails, and so does renaming or deleting one of the two
+   - [ ] a folder whose name has a space, an accent or brackets (`Documents (2)`) opens
 
 ## Known limits
 
+- With several folders, the top of the drive is read-only even when every folder in it is writable: files go into the folders, not beside them. Windows shows the usual unhelpful message if you try.
+- A connection shares eight folders at most, no folder twice, and not a folder together with one inside it.
+- Adding a second folder to a connection that shared one moves the first: it was the drive itself, and is now a folder in the drive. Paths saved on the remote side (`\\tsclient\Shared\file.txt`) change with it.
 - An ordinary folder that holds secrets is not recognised: only the home folder itself, hidden folders, `~/snap`, system folders and the app's own folder are refused.
 - A share's container runs while a session uses it and for about ten seconds after the last one closes (and for the minute a session's token is good, if the page never connects).
 - Shared team folders work, but think about who else can write there: what a share shows is whatever is in the folder at the time. Files the remote side creates are readable by you alone (mode 600, and 700 for folders), so teammates will not see them until you change that: `chmod -R g+rX <folder>` after a session. Nothing set on the folder beforehand helps, because guacd asks for exactly that mode when it creates a file (`open(…, S_IRUSR | S_IWUSR)` and `mkdir(…, S_IRWXU)` in its `fs.c`, still so in 1.6.0). A setgid folder gives the new file the team's group but no rights for it, and default ACLs (`setfacl -d`) are inherited but switched off, since the mode asked for becomes the new file's ACL mask (`getfacl` shows `group::rwx #effective:---`). Both were tried on ext4. The app does not loosen the files itself: it would be changing permissions on names the remote side chose, in a folder others can write to. The real fix belongs upstream, in guacamole-server: guacd leaving the mode to the umask.

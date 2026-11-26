@@ -99,14 +99,9 @@
       </div>
       <label class="check rdp-only" title="Connect to the server's console (admin) session, like mstsc /admin"><input name="adminSession" type="checkbox"> Admin session (mstsc /admin)</label>
       <fieldset class="share-box rdp-only">
-        <legend>Shared folder</legend>
-        <div class="row">
-          <label class="field grow">Folder on this computer <input name="sharePath" type="text" readonly placeholder="None: nothing is shared"></label>
-          <button class="btn small" type="button" id="share-pick">Choose…</button>
-          <button class="btn small" type="button" id="share-none">Stop sharing</button>
-        </div>
-        <label class="check"><input name="shareWritable" type="checkbox"> Let the remote computer change and delete files in it</label>
-        <p class="muted small">Shows up there as the drive “Shared on banana-phone”. Read-only unless ticked. You are asked to agree the first time you connect. Files changed here show there after a refresh (F5). Some servers are set to refuse shared drives.</p>
+        <legend>Shared folders <button class="btn small" type="button" id="share-add">Add a folder</button></legend>
+        <div id="share-rows"></div>
+        <p class="muted small">Shows up there as the drive “Shared on banana-phone”; several folders are folders in it. Read-only unless “Can change files” is ticked. You are asked to agree the first time you connect. Files changed here show there after a refresh (F5). Some servers are set to refuse shared drives.</p>
       </fieldset>
       <label class="field net">Password <input name="password" type="password" autocomplete="new-password"></label>
       <label class="check net" id="clear-pw"><input name="clearPassword" type="checkbox"> Remove the saved password</label>

@@ -50,17 +50,21 @@ const change = (channel, fn, backup = false) => ipcMain.handle(channel, (_e, ...
   return { ...publicView(), result };
 });
 
-// Which folder a saved connection may share: one the user chose in the system's folder dialog in this
-// launch (share:pick adds it here, by its real path), or one that is already saved. The folder is not
+// Which folders a saved connection may share: ones the user chose in the system's folder dialog in this
+// launch (share:pick adds each here, by its real path), or ones already saved, in any connection. The folder is not
 // looked at, so the answer tells the page nothing about what is on disk.
 // The set only grows, folders chosen and then never saved included: each passed the folder rules, so none need forgetting.
 const picked = new Set();
-const mayShare = (p) => picked.has(p) || data.connections.some((c) => c.share?.path === p);
+const mayShare = (p) => picked.has(p) || data.connections.some((c) => c.shares?.some((s) => s.path === p));
 
-// shareOk is dropped: the page may ask for a shared folder, but only the user agrees to one (shareFor, below).
+// shareOk is dropped: the page may ask for shared folders, but only the user agrees to them (shareFor, below).
 change('store:save', ({ password, shareOk, ...conn }) => {
   if (password !== undefined) conn.password = enc(password); // undefined = keep existing
-  if (conn.share?.path && !mayShare(conn.share.path)) throw new Error('Not saved: choose the shared folder with the Choose… button.');
+  // Every folder in the list must be one the user chose, and the answer is the same whichever is not and whatever
+  // is on disk. What a list must be that needs no look at the disk is asked here too; the rest waits for the connect.
+  const list = Array.isArray(conn.shares) ? conn.shares : [];
+  if (list.some((s) => !mayShare(s?.path))) throw new Error('Not saved: choose the shared folder with the Choose… button.');
+  if (list.length) share.together(list);
   store.upsert(data, conn); // its return value holds the encrypted password, so it is not passed on
 });
 change('store:delete', (id) => store.remove(data, id), true);
@@ -161,7 +165,7 @@ function agreementKey() {
   return shareKey;
 }
 
-// The edit dialog's "Choose…" button. The page is sandboxed and cannot browse folders itself.
+// The edit dialog's "Choose…" buttons. The page is sandboxed and cannot browse folders itself.
 // What the user chose is remembered (`picked`, above) as its real path, so that what is shown, saved,
 // agreed to and mounted are the same folder.
 ipcMain.handle('share:pick', async (_e, from) => {
@@ -176,30 +180,31 @@ ipcMain.handle('share:pick', async (_e, from) => {
   return folder;
 });
 
-// The folder an RDP connection shares, as guacd.openRemote wants it, or null. The folder is checked again
+// The folders an RDP connection shares, as guacd.openRemote wants them, or null. Every folder is checked again
 // (it may have moved or been replaced since it was saved), and the user must have agreed to exactly
-// this: this folder, read-only or not, with this server showing this certificate. The agreement is
+// this: these folders, each read-only or not, with this server showing this certificate. The agreement is
 // asked here, in a system dialog, because a saved connection is not proof of it: the page writes those.
 // firstSeen: the certificate was saved on this very connect, which the question then says.
 async function shareFor(conn, fp, firstSeen) {
-  if (!conn.share) return null;
+  if (!conn.shares?.length) return null; // none, or a list left empty in the file by hand: nothing is shared
   // The name in the dialog must be the name that is dialled. Lookups fold look-alike letters and invisible
   // characters ("ℓocalhost" is localhost), so a host that is not plain is not shared with at all.
   if (!/^[A-Za-z0-9.:_-]+$/.test(conn.host)) throw new Error('To share a folder, the host must be written with plain letters, digits, dots and hyphens only (an international name in its xn-- form).');
-  const pinned = share.pin(conn.share.path, shareRules());
-  if (pinned.path !== conn.share.path) throw new Error(`The shared folder ${conn.share.path} now leads to ${pinned.path}. Edit the connection and choose the folder again.`);
-  const writable = conn.share.writable === true;
+  const folders = share.pinAll(conn.shares, shareRules());
+  for (const [i, f] of folders.entries()) {
+    if (f.path !== conn.shares[i].path) throw new Error(`The shared folder ${conn.shares[i].path} now leads to ${f.path}. Edit the connection and choose the folder again.`);
+  }
   const ok = share.approvalOf(conn, fp, agreementKey());
   if (conn.shareOk !== ok) {
     const { response } = await dialog.showMessageBox(win, {
       type: 'question',
-      ...share.question(conn, pinned.path, { fingerprint: fp, firstSeen }),
+      ...share.question(conn, folders, { fingerprint: fp, firstSeen }),
       buttons: ['Cancel', 'Share and connect'],
       defaultId: 0,
       cancelId: 0,
       noLink: true,
     });
-    if (response !== 1) throw new Error('Did not connect: the folder was not shared. To connect without it, edit the connection and empty its shared folder.');
+    if (response !== 1) throw new Error('Did not connect: nothing was shared. To connect without sharing, edit the connection and remove its shared folders.');
     // The answer is for what the dialog said. If the connection was saved or bulk-edited meanwhile, it is not for this.
     if (data.connections.find((c) => c.id === conn.id) !== conn || share.approvalOf(conn, fp, agreementKey()) !== ok) {
       throw new Error('The connection was changed while you were being asked, so nothing was shared. Connect again.');
@@ -207,7 +212,7 @@ async function shareFor(conn, fp, firstSeen) {
     conn.shareOk = ok;
     persist();
   }
-  return { ...pinned, writable, id: conn.id, server: `${conn.host}:${conn.port || 3389}` };
+  return { folders, id: conn.id, server: `${conn.host}:${conn.port || 3389}` };
 }
 
 function openSsh(id, conn, cols, rows, start) {
@@ -291,7 +296,7 @@ ipcMain.handle('session:open', async (_e, connId, cols = 80, rows = 24, run) => 
     const cert = await guacd.rdpFingerprint(conn.host, conn.port || 3389);
     const fp = cert.fingerprint;
     const saved = trust(rdpId(conn), fp);
-    const also = conn.share ? `\n\nThis connection shares the folder ${share.visible(conn.share.path)} with the server.` : '';
+    const also = Array.isArray(conn.shares) ? `\n\nThis connection shares with the server: ${conn.shares.map((s) => share.visible(s?.path)).join(', ')}` : '';
     if (saved && saved !== fp && !(await confirmChanged(rdpId(conn), 'certificate', `${conn.host}:${conn.port || 3389}`, saved, fp, also))) {
       throw new Error(`The certificate of ${conn.host} has changed and was not trusted, so banana-phone did not connect. Expected SHA256 ${saved}, got ${fp}.`);
     }
@@ -299,7 +304,7 @@ ipcMain.handle('session:open', async (_e, connId, cols = 80, rows = 24, run) => 
       : saved !== fp ? `Trusted the new certificate of ${conn.host}: SHA256 ${fp}` : undefined;
     const shared = await shareFor(conn, fp, !saved); // after the identity check: the agreement is with that server
     // openRemote copies the connection before it waits for anything, so the session is the one just agreed to.
-    return { kind: 'remote', url: await guacd.openRemote(conn, dec(conn.password), cert, shared), notice, shared: shared && { path: shared.path, writable: shared.writable } };
+    return { kind: 'remote', url: await guacd.openRemote(conn, dec(conn.password), cert, shared), notice, shared: shared && { folders: shared.folders.map(({ path, writable, name }) => ({ path, writable, name })) } };
   }
   if (conn.protocol === 'vnc') {
     return { kind: 'remote', url: await guacd.openRemote(conn, dec(conn.password)) };

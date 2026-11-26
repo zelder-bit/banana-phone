@@ -188,6 +188,11 @@ dialog::backdrop { background: rgb(30 20 10 / 45%); backdrop-filter: blur(3px); 
 .cmds legend, .share-box legend { font-weight: 700; font-size: .85rem; padding: 0 4px; }
 .cmds .row, .share-box .row { align-items: flex-end; }
 .share-box p { margin: 0; }
+#share-rows { display: grid; gap: 8px; }
+.share-box .share-row { align-items: center; }
+.share-row input[type="text"] { flex: 1; min-width: 0; }
+.share-row .check { white-space: nowrap; }
+#share-add { margin-left: 6px; }
 
 .search-dlg { width: min(560px, calc(100vw - 32px)); margin-top: 12vh; }
 .search-dlg .dialog { gap: 8px; }

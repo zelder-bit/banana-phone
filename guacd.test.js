@@ -71,6 +71,9 @@ test('RDP settings: pinned certificate, and the admin (console) session only whe
 
 // ---- shared folders ----
 
+// A share as main.js hands it over (see shareName in guacd.js), with one folder in it.
+const one = (folder, rest = {}) => ({ ...rest, folders: [folder] });
+
 test('the drive is on only for an RDP connection that was given a share', () => {
   const { remoteSettings } = require('./guacd');
   const cert = { fingerprint: 'AA:BB', nla: true };
@@ -88,7 +91,7 @@ test('the drive is on only for an RDP connection that was given a share', () => 
 
 test("a share's container sees only that folder, read-only by default, as you, with no port", () => {
   const { shareRunArgs, shareName, shareNet } = require('./guacd');
-  const args = shareRunArgs('n', { path: '/home/u/My Files' });
+  const args = shareRunArgs('n', one({ path: '/home/u/My Files' }));
   const after = (a, flag) => a[a.indexOf(flag) + 1];
   assert.strictEqual(after(args, '--mount'), 'type=bind,source=/home/u/My Files,target=/drive,readonly,bind-recursive=readonly,bind-propagation=rprivate');
   assert.strictEqual(after(args, '--user'), `${process.getuid()}:${process.getgid()}`);
@@ -111,18 +114,39 @@ test("a share's container sees only that folder, read-only by default, as you, w
   assert.deepStrictEqual(args.slice(-2), ['-b', '127.0.0.1']); // guacd on the container's own loopback
   assert.match(args.at(-3), /^guacamole\/guacd:1\.6\.0@sha256:[0-9a-f]{64}$/); // by digest: a tag can be pointed at another image
   // Writable only when asked in so many words.
-  assert.strictEqual(after(shareRunArgs('n', { path: '/srv/x', writable: true }), '--mount'), 'type=bind,source=/srv/x,target=/drive');
-  for (const writable of [undefined, null, false, 'true', 1, {}]) assert.match(after(shareRunArgs('n', { path: '/srv/x', writable }), '--mount'), /,target=\/drive,readonly,bind-recursive=readonly,/);
+  assert.strictEqual(after(shareRunArgs('n', one({ path: '/srv/x', writable: true })), '--mount'), 'type=bind,source=/srv/x,target=/drive');
+  for (const writable of [undefined, null, false, 'true', 1, {}]) assert.match(after(shareRunArgs('n', one({ path: '/srv/x', writable })), '--mount'), /,target=\/drive,readonly,bind-recursive=readonly,/);
   // A path that could add mount options of its own, or is no path at all, starts nothing.
   for (const bad of ['relative/x', '', '/a,readonly=false', '/a,source=/', '/a"b', '/a\nb', '/a\u0000b', undefined, null, 42, ['/a']]) {
-    assert.throws(() => shareRunArgs('n', { path: bad }), /cannot be shared/, String(bad));
+    assert.throws(() => shareRunArgs('n', one({ path: bad })), /cannot be shared/, String(bad));
   }
-  assert.throws(() => shareRunArgs('n', undefined), /cannot be shared/);
+  for (const none of [undefined, null, {}, { path: '/a' }, { folders: [] }, { folders: '/a' }, one(undefined), one(null)]) assert.throws(() => shareRunArgs('n', none), /cannot be shared/, JSON.stringify(none));
   // One container per connection, folder and mode, named for this user and this launch.
-  assert.match(shareName({ id: 'c1', path: '/a' }), new RegExp(`^banana-phone-guacd-${process.getuid()}-${process.pid}-[0-9a-f]{12}$`));
-  assert.strictEqual(shareName({ id: 'c1', path: '/a' }), shareName({ id: 'c1', path: '/a', writable: false, dev: '1', ino: '2' }));
-  const names = [{ id: 'c1', path: '/a' }, { id: 'c1', path: '/a', writable: true }, { id: 'c1', path: '/b' }, { id: 'c2', path: '/a' }, { id: 'c1', server: 'dc02:3389', path: '/a' }].map(shareName);
-  assert.strictEqual(new Set(names).size, 5); // two servers never share a container, nor do read-only and writable
+  const c1 = { id: 'c1' };
+  assert.match(shareName(one({ path: '/a' }, c1)), new RegExp(`^banana-phone-guacd-${process.getuid()}-${process.pid}-[0-9a-f]{12}$`));
+  assert.strictEqual(shareName(one({ path: '/a' }, c1)), shareName(one({ path: '/a', writable: false, dev: '1', ino: '2' }, c1)));
+  const names = [one({ path: '/a' }, c1), one({ path: '/a', writable: true }, c1), one({ path: '/b' }, c1), one({ path: '/a' }, { id: 'c2' }), one({ path: '/a' }, { id: 'c1', server: 'dc02:3389' }),
+    { id: 'c1', folders: [{ path: '/a' }, { path: '/b' }] }, { id: 'c1', folders: [{ path: '/b' }, { path: '/a' }] }, { id: 'c1', folders: [{ path: '/a' }, { path: '/b', writable: true }] }].map(shareName);
+  assert.strictEqual(new Set(names).size, 8); // two servers never share a container, nor do read-only and writable, nor two lists of folders
+});
+
+test('several folders are several mounts under /drive, each read-only unless it alone is writable', () => {
+  const { shareRunArgs } = require('./guacd');
+  const mounts = (folders) => { const a = shareRunArgs('n', { folders }); return a.flatMap((x, i) => (x === '--mount' ? [a[i + 1]] : [])); };
+  const ro = ',readonly,bind-recursive=readonly,bind-propagation=rprivate';
+  assert.deepStrictEqual(mounts([{ path: '/home/u/Projects', name: 'Projects' }, { path: '/home/u/Scans', name: 'Scans', writable: true }, { path: '/srv/Projects', name: 'Projects (2)', writable: 'true' }]), [
+    `type=bind,source=/home/u/Projects,target=/drive/Projects${ro}`,
+    'type=bind,source=/home/u/Scans,target=/drive/Scans',
+    `type=bind,source=/srv/Projects,target=/drive/Projects (2)${ro}`,
+  ]);
+  // /drive itself is never a mount then: it is one of the container's own folders, which are read-only.
+  const args = shareRunArgs('n', { folders: [{ path: '/a', name: 'a', writable: true }, { path: '/b', name: 'b', writable: true }] });
+  assert.ok(args.includes('--read-only') && !args.some((a) => /target=\/drive(,|$)/.test(a)));
+  // Every folder is held to the rule for paths, and its name cannot lead out of /drive or add mount options.
+  assert.throws(() => mounts([{ path: '/a', name: 'a' }, { path: '/b,readonly=false', name: 'b' }]), /cannot be shared/);
+  for (const name of ['', '.', '..', '../etc', 'a/b', '/', 'a,readonly=false', 'a"b', 'a\nb', undefined, null, 42]) {
+    assert.throws(() => mounts([{ path: '/a', name: 'a' }, { path: '/b', name }]), /cannot be shared: its name/, String(name));
+  }
 });
 
 // A stand-in for the docker program: writes down what it was asked, `exec -i` (the relay's way in) echoes,
@@ -155,14 +179,15 @@ test('a share starts its container once, is reached through a private socket, an
   const left = `banana-phone-guacd-${uid}-${ended}-aaaaaaaaaaaa`;
   const calls = fakeDocker(t, [left, `banana-phone-guacd-${uid}-${process.pid}-bbbbbbbbbbbb`, `banana-phone-guacd-${uid + 1}-${ended}-cccccccccccc`, `banana-phone-guacd-${uid}-${ended}-not-ours`]);
   const { ensureShare, shareName, shareNet, stopGuacd } = require('./guacd');
-  const share = { id: 'c1', path: fs.mkdtempSync(path.join(os.tmpdir(), 'bp-share-')), dev: '64', ino: '1234' };
+  const folder = fs.mkdtempSync(path.join(os.tmpdir(), 'bp-share-'));
+  const share = { id: 'c1', folders: [{ path: folder, dev: '64', ino: '1234' }] };
   const name = shareName(share);
   calls.mounted('64:1234');
   const [sock, again] = await Promise.all([ensureShare(share), ensureShare(share)]);
   assert.strictEqual(sock, again);
   const runs = calls().filter((c) => c.startsWith('run '));
   assert.strictEqual(runs.length, 1);
-  assert.match(runs[0], new RegExp(`--name ${name} .*--mount type=bind,source=${share.path},target=/drive,readonly,bind-recursive=readonly,bind-propagation=rprivate `));
+  assert.match(runs[0], new RegExp(`--name ${name} .*--mount type=bind,source=${folder},target=/drive,readonly,bind-recursive=readonly,bind-propagation=rprivate `));
   assert.deepStrictEqual(calls().filter((c) => c.startsWith('rm -f ') && c !== `rm -f ${name}`), [`rm -f ${left}`]); // only the crashed launch's
   // The same for networks: the crashed launch's goes, and ours is made, closed between containers, before the container is run on it.
   const made = `network create -o com.docker.network.bridge.enable_icc=false ${shareNet()}`;
@@ -186,7 +211,20 @@ test('a share starts its container once, is reached through a private socket, an
   calls.mounted('64:9999'); // as if the folder had been swapped for a link to another one
   await assert.rejects(ensureShare(share), /changed while it was being shared/);
   assert.strictEqual(calls().filter((c) => c === `rm -f ${name}`).length, 2); // once before starting, once now
-  await assert.rejects(ensureShare({ id: 'c2', path: share.path }), /changed while it was being shared/); // a share nobody identified is not served either
+  await assert.rejects(ensureShare({ id: 'c2', folders: [{ path: folder }] }), /changed while it was being shared/); // a share nobody identified is not served either
+
+  // Several folders: each must be the folder that was looked at, where it is mounted, in the order they were given.
+  const two = { id: 'c3', folders: [{ path: folder, name: 'a', dev: '64', ino: '1234' }, { path: os.tmpdir(), name: 'b', writable: true, dev: '64', ino: '77' }] };
+  calls.mounted('64:1234\n64:77');
+  await ensureShare(two);
+  assert.ok(calls().includes(`exec ${shareName(two)} stat -c %d:%i /drive/a /drive/b`));
+  for (const wrong of ['64:1234\n64:9999', '64:77\n64:1234', '64:1234', '64:1234\n64:77\n64:1']) {
+    calls.mounted(wrong);
+    await assert.rejects(ensureShare(two), /^Error: One of .* changed while it was being shared/, wrong);
+  }
+  assert.ok(calls().filter((c) => c === `rm -f ${shareName(two)}`).length >= 4);
+  calls.mounted('64:1234\n64:77');
+  await assert.rejects(ensureShare({ ...two, id: 'c4', folders: [two.folders[0], { ...two.folders[1], ino: undefined }] }), /changed while it was being shared/);
 
   assert.strictEqual(calls().filter((c) => c.startsWith('network create ')).length, 1); // the later starts found the network as it should be and left it
 
@@ -203,19 +241,22 @@ test('a read-only share is not started where Docker cannot keep all of it read-o
   const folder = fs.mkdtempSync(path.join(os.tmpdir(), 'bp-share-'));
   t.after(() => fs.rmSync(folder, { recursive: true, force: true }));
   calls.mounted('64:1234');
+  const readOnly = { id: 'old', folders: [{ path: folder, dev: '64', ino: '1234' }] };
+  const mixed = { id: 'old', folders: [{ path: folder, name: 'a', writable: true, dev: '64', ino: '1234' }, { path: os.tmpdir(), name: 'b', dev: '64', ino: '77' }] };
   // Before Engine 25 a drive mounted inside the folder would stay writable, so nothing is started at all.
   for (const old of ['24.0.7', '20.10.24', '', 'what']) {
     calls.engine(old);
-    await assert.rejects(ensureShare({ id: 'old', path: folder, dev: '64', ino: '1234' }), /needs Docker Engine 25 or newer/, old);
+    await assert.rejects(ensureShare(readOnly), /needs Docker Engine 25 or newer/, old);
+    await assert.rejects(ensureShare(mixed), /needs Docker Engine 25 or newer/, old); // one read-only folder among writable ones is enough
   }
   assert.deepStrictEqual(calls().filter((c) => c.startsWith('run ')), []);
   // A writable share promises no such thing, and starts on any Engine.
-  const writable = { id: 'old', path: folder, writable: true, dev: '64', ino: '1234' };
+  const writable = { id: 'old', folders: [{ path: folder, writable: true, dev: '64', ino: '1234' }] };
   await ensureShare(writable);
   assert.match(calls().filter((c) => c.startsWith('run '))[0], new RegExp(`--name ${shareName(writable)} .*,target=/drive guacamole/guacd`));
   // And the read-only one starts once Docker is new enough.
   calls.engine('25.0.0');
-  await ensureShare({ id: 'old', path: folder, dev: '64', ino: '1234' });
+  await ensureShare(readOnly);
   assert.strictEqual(calls().filter((c) => c.startsWith('run ')).length, 2);
 });
 
@@ -261,16 +302,16 @@ test('a share is not started where it is known not to work, and the message says
   t.after(() => fs.rmSync(folder, { recursive: true, force: true }));
   calls.mounted('64:1234');
   calls.info({ ServerVersion: '27.0.3', SecurityOptions: ['name=seccomp,profile=builtin', 'name=rootless'] });
-  for (const writable of [false, true]) await assert.rejects(ensureShare({ id: 'r', path: folder, writable, dev: '64', ino: '1234' }), /do not work with rootless Docker/);
+  for (const writable of [false, true]) await assert.rejects(ensureShare({ id: 'r', folders: [{ path: folder, writable, dev: '64', ino: '1234' }] }), /do not work with rootless Docker/);
   // Podman gives its own version number (5.x). The reason given is Podman, not an Engine that is too old.
   calls.engine('5.4.2');
   calls.info({ host: { security: { rootless: true } }, version: { Version: '5.4.2' } });
-  await assert.rejects(ensureShare({ id: 'r', path: folder, dev: '64', ino: '1234' }), /do not work with Podman/);
+  await assert.rejects(ensureShare({ id: 'r', folders: [{ path: folder, dev: '64', ino: '1234' }] }), /do not work with Podman/);
   assert.deepStrictEqual(calls().filter((c) => c.startsWith('run ')), []);
   // Asked again on the next connect: with an ordinary Docker the same share starts.
   calls.engine('27.0.3');
   calls.info({ ServerVersion: '27.0.3', SecurityOptions: ['name=seccomp,profile=builtin'] });
-  await ensureShare({ id: 'r', path: folder, dev: '64', ino: '1234' });
+  await ensureShare({ id: 'r', folders: [{ path: folder, dev: '64', ino: '1234' }] });
   assert.strictEqual(calls().filter((c) => c.startsWith('run ')).length, 1);
 });
 
@@ -296,7 +337,7 @@ test('a token opens one websocket, soon, and says itself which guacd it is for',
 
   // A share's token carries the way to its own guacd, encrypted with the settings that were agreed to.
   // The page cannot pair those settings with another share's folder: there is one bridge, and no port to choose.
-  const share = (id, dir) => ({ id, path: fs.mkdtempSync(path.join(os.tmpdir(), dir)), dev: '64', ino: '1' });
+  const share = (id, dir) => ({ id, folders: [{ path: fs.mkdtempSync(path.join(os.tmpdir(), dir)), dev: '64', ino: '1' }] });
   calls.mounted('64:1');
   const cert = { fingerprint: 'AA:BB', nla: false };
   const conn = { protocol: 'rdp', host: '127.0.0.1', username: 'u' };
@@ -348,8 +389,8 @@ test("a share's container is removed a while after its last session ends, never 
   const calls = fakeDocker(t);
   const { openRemote, verifyClient, shareName, stopGuacd } = require('./guacd');
   t.after(stopGuacd);
-  const share = { id: 'c1', path: fs.mkdtempSync(path.join(os.tmpdir(), 'bp-share-')), dev: '64', ino: '1' };
-  t.after(() => fs.rmSync(share.path, { recursive: true, force: true }));
+  const share = { id: 'c1', folders: [{ path: fs.mkdtempSync(path.join(os.tmpdir(), 'bp-share-')), dev: '64', ino: '1' }] };
+  t.after(() => fs.rmSync(share.folders[0].path, { recursive: true, force: true }));
   calls.mounted('64:1');
   const name = shareName(share);
   const count = (line) => calls().filter((c) => c.startsWith(line)).length;
@@ -448,7 +489,7 @@ require('net').createServer().listen(Number(a[a.indexOf('-l') + 1]), a[a.indexOf
   assert.strictEqual(await listening(port), true);
 
   // A shared folder is never handed to this guacd: no container, no share.
-  await assert.rejects(openRemote({ protocol: 'rdp', host: '127.0.0.1', id: 'c1' }, 'pw', { fingerprint: 'AA:BB', nla: false }, { id: 'c1', path: dir, dev: '64', ino: '1' }), /A shared folder needs Docker/);
+  await assert.rejects(openRemote({ protocol: 'rdp', host: '127.0.0.1', id: 'c1' }, 'pw', { fingerprint: 'AA:BB', nla: false }, { id: 'c1', folders: [{ path: dir, dev: '64', ino: '1' }] }), /A shared folder needs Docker/);
   assert.strictEqual(started().length, 2);
 
   // guacd dies, and its port is then anyone's. Whatever answers there next is not sent a session: a new guacd is started.

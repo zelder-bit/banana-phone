@@ -206,51 +206,76 @@ test('upsert keeps only well-formed saved commands', () => {
   assert.deepStrictEqual(d.connections[0].commands, []);
 });
 
-test('a shared folder is kept only well-formed, only on RDP, and loses its agreement when removed', () => {
+test('shared folders are kept only well-formed, only on RDP, and lose their agreement when removed', () => {
   const d = sample();
-  const share = () => d.connections[0].share;
-  store.upsert(d, { id: 'a', share: { path: '/home/user/Projects', writable: 'yes', extra: 1 } });
-  assert.deepStrictEqual(share(), { path: '/home/user/Projects', writable: false }); // writable only when exactly true
-  store.upsert(d, { id: 'a', share: { path: '/home/user/Projects', writable: true } });
-  assert.deepStrictEqual(share(), { path: '/home/user/Projects', writable: true });
+  const shares = () => d.connections[0].shares;
+  store.upsert(d, { id: 'a', shares: [{ path: '/home/user/Projects', writable: 'yes', extra: 1 }] });
+  assert.deepStrictEqual(shares(), [{ path: '/home/user/Projects', writable: false }]); // writable only when exactly true
+  // Several folders, each with its own mode; what is not a folder is left out of the list.
+  store.upsert(d, { id: 'a', shares: [{ path: '/home/user/Projects', writable: true }, null, { path: ' ' }, { path: 42 }, '/x', { path: '/home/user/Scans' }] });
+  assert.deepStrictEqual(shares(), [{ path: '/home/user/Projects', writable: true }, { path: '/home/user/Scans', writable: false }]);
   d.connections[0].shareOk = 'agreed'; // main.js sets this once the user has agreed
-  store.upsert(d, { id: 'a', name: 'dc01 renamed' }); // an edit that does not mention the share keeps both
-  assert.deepStrictEqual([share().path, d.connections[0].shareOk], ['/home/user/Projects', 'agreed']);
-  for (const off of [null, '', '/home/user/Projects', { path: '' }, { path: '  ' }, { path: 42 }, {}]) {
-    Object.assign(d.connections[0], { share: { path: '/x', writable: false }, shareOk: 'agreed' });
-    store.upsert(d, { id: 'a', share: off });
-    assert.ok(!('share' in d.connections[0]) && !('shareOk' in d.connections[0]), JSON.stringify(off));
+  store.upsert(d, { id: 'a', name: 'dc01 renamed' }); // an edit that does not mention the shares keeps both
+  assert.deepStrictEqual([shares().length, d.connections[0].shareOk], [2, 'agreed']);
+  for (const off of [null, '', [], '/home/user/Projects', { path: '/home/user/Projects' }, [{ path: '' }], [{ path: '  ' }], [{ path: 42 }], [{}], [null]]) {
+    Object.assign(d.connections[0], { shares: [{ path: '/x', writable: false }], shareOk: 'agreed' });
+    store.upsert(d, { id: 'a', shares: off });
+    assert.ok(!('shares' in d.connections[0]) && !('shareOk' in d.connections[0]), JSON.stringify(off));
   }
-  // SSH has no drives: a share sent for one is dropped, and an RDP connection turned into SSH loses its own.
-  store.upsert(d, { id: 'b', share: { path: '/home/user/Projects' } });
-  assert.ok(!('share' in d.connections[1]));
-  Object.assign(d.connections[0], { share: { path: '/x', writable: false }, shareOk: 'agreed' });
+  // SSH has no drives: shares sent for one are dropped, and an RDP connection turned into SSH loses its own.
+  store.upsert(d, { id: 'b', shares: [{ path: '/home/user/Projects' }] });
+  assert.ok(!('shares' in d.connections[1]));
+  Object.assign(d.connections[0], { shares: [{ path: '/x', writable: false }], shareOk: 'agreed' });
   store.upsert(d, { id: 'a', protocol: 'ssh' });
-  assert.ok(!('share' in d.connections[0]) && !('shareOk' in d.connections[0]));
-  assert.ok(store.upsert(d, { name: 'new rdp', protocol: 'rdp', share: { path: '/srv/files' } }).share.path === '/srv/files');
+  assert.ok(!('shares' in d.connections[0]) && !('shareOk' in d.connections[0]));
+  assert.ok(store.upsert(d, { name: 'new rdp', protocol: 'rdp', shares: [{ path: '/srv/files' }] }).shares[0].path === '/srv/files');
+});
+
+test('a file saved when a connection shared one folder loads as a list of one, to be agreed to again', () => {
+  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'bp-')), 'c.json');
+  const rdp = { id: 'a', name: 'dc01', protocol: 'rdp', host: '10.0.0.1' };
+  fs.writeFileSync(file, JSON.stringify({ ordered: true, connections: [
+    { ...rdp, share: { path: '/srv/files', writable: true }, shareOk: 'agreed' }, { ...rdp, id: 'b' }, { ...rdp, id: 'c', shares: [{ path: '/srv/new', writable: false }] },
+    // Written by hand: an empty list, a list with things in it that are no folders, and something that is no list.
+    { ...rdp, id: 'd', shares: [] }, { ...rdp, id: 'e', shares: [null, { path: 42 }, { path: '/srv/kept', writable: 'yes', extra: 1 }, '/x'] }, { ...rdp, id: 'f', shares: { path: '/srv/x' } },
+  ] }));
+  const d = store.load(file);
+  assert.deepStrictEqual(d.connections.map((c) => [c.shares, 'share' in c]), [[[{ path: '/srv/files', writable: true }], false], [undefined, false], [[{ path: '/srv/new', writable: false }], false],
+    [undefined, false], [[{ path: '/srv/kept', writable: false }], false], [undefined, false]]);
+  assert.ok(!('shares' in d.connections[3]) && !('shares' in d.connections[5])); // no list at all, so the connection opens without sharing
+  // The old form is not a way in for the page: only a file is read that way.
+  store.upsert(d, { id: 'b', share: { path: '/srv/files', writable: true } });
+  assert.ok(!('share' in d.connections[1]) && !('shares' in d.connections[1]));
 });
 
 test("an agreement ends with any change to what was agreed, and cannot be saved in or brought back", () => {
   const d = sample();
   const c = () => d.connections[0];
-  const agree = () => { Object.assign(c(), { share: { path: '/srv/files', writable: true }, host: '10.0.0.1', username: 'admin', domain: 'CORP', shareOk: 'agreed' }); delete c().port; delete c().adminSession; };
+  const agree = () => { Object.assign(c(), { shares: [{ path: '/srv/files', writable: true }], host: '10.0.0.1', username: 'admin', domain: 'CORP', shareOk: 'agreed' }); delete c().port; delete c().adminSession; };
   // What the edit dialog sends when nothing was changed keeps the agreement.
   agree();
-  store.upsert(d, { id: 'a', name: 'dc01', protocol: 'rdp', host: '10.0.0.1', port: undefined, username: 'admin', domain: 'CORP', adminSession: false, share: { path: '/srv/files', writable: true } });
+  store.upsert(d, { id: 'a', name: 'dc01', protocol: 'rdp', host: '10.0.0.1', port: undefined, username: 'admin', domain: 'CORP', adminSession: false, shares: [{ path: '/srv/files', writable: true }] });
   assert.strictEqual(c().shareOk, 'agreed');
-  for (const change of [{ share: { path: '/srv/files', writable: false } }, { share: { path: '/srv/other', writable: true } }, { host: '10.0.0.2' }, { port: 3390 }, { username: 'guest' }, { domain: 'OTHER' }, { adminSession: true }]) {
+  const more = { path: '/srv/more', writable: false };
+  for (const change of [{ shares: [{ path: '/srv/files', writable: false }] }, { shares: [{ path: '/srv/other', writable: true }] }, { shares: [{ path: '/srv/files', writable: true }, more] }, { host: '10.0.0.2' }, { port: 3390 }, { username: 'guest' }, { domain: 'OTHER' }, { adminSession: true }]) {
     agree();
     store.upsert(d, { id: 'a', ...change });
     assert.ok(!('shareOk' in c()), JSON.stringify(change));
     // Changing it back does not bring the old agreement back: the user made it read-only, so writable is a new question.
-    store.upsert(d, { id: 'a', share: { path: '/srv/files', writable: true }, host: '10.0.0.1', port: undefined, username: 'admin', domain: 'CORP', adminSession: false });
+    store.upsert(d, { id: 'a', shares: [{ path: '/srv/files', writable: true }], host: '10.0.0.1', port: undefined, username: 'admin', domain: 'CORP', adminSession: false });
     assert.ok(!('shareOk' in c()), `back from ${JSON.stringify(change)}`);
   }
   // Nothing that is saved can carry an agreement in.
   agree(); delete c().shareOk;
   store.upsert(d, { id: 'a', shareOk: 'forged' });
   assert.ok(!('shareOk' in c()));
-  assert.ok(!('shareOk' in store.upsert(d, { name: 'new', protocol: 'rdp', share: { path: '/srv/files' }, shareOk: 'forged' })));
+  assert.ok(!('shareOk' in store.upsert(d, { name: 'new', protocol: 'rdp', shares: [{ path: '/srv/files' }], shareOk: 'forged' })));
+  // A folder taken out of the list, or the same folders in another order, is a change too.
+  for (const shares of [[more], [more, { path: '/srv/files', writable: true }]]) {
+    agree(); c().shares.push(more);
+    store.upsert(d, { id: 'a', shares });
+    assert.ok(!('shareOk' in c()), JSON.stringify(shares));
+  }
   // Bulk edit: another account ends it, a new password does not.
   agree();
   store.bulkUpdate(d, { ids: ['a'], username: 'admin' }, { password: 'ENC' });
@@ -264,8 +289,10 @@ test("an agreement ends with any change to what was agreed, and cannot be saved 
 
 test('the sharing toast says how the folder is shared, and why a drive may be missing', () => {
   const { sharingText } = require('./renderer/shared.mjs');
-  const ro = sharingText({ path: '/home/me/out', writable: false }, 'win.test');
-  assert.match(ro, /^Sharing \/home\/me\/out with win\.test \(read-only\)\./);
+  const ro = sharingText([{ path: '/home/me/out', writable: false }], 'win.test');
+  assert.match(ro, /^Sharing \/home\/me\/out \(read-only\) with win\.test\./);
   assert.match(ro, /If no drive appears there, the server may be set to refuse shared drives\.$/);
-  assert.match(sharingText({ path: '/x', writable: true }, 'h'), /\(it can change files\)/);
+  assert.match(sharingText([{ path: '/x', writable: true }], 'h'), /\(it can change files\)/);
+  // Several folders: each is named, with what the server may do to it.
+  assert.match(sharingText([{ path: '/a', writable: false }, { path: '/b', writable: true }], 'h'), /^Sharing \/a \(read-only\), \/b \(it can change files\) with h\./);
 });

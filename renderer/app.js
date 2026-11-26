@@ -303,12 +303,23 @@ function editConn(c = { protocol: 'ssh' }) {
   form.elements.clearPassword.onchange = (e) => { form.elements.password.disabled = e.target.checked; };
   d.dataset.proto = c.protocol || 'ssh';
   form.elements.adminSession.checked = !!c.adminSession;
-  form.elements.sharePath.value = c.share?.path || '';
-  form.elements.shareWritable.checked = c.share?.writable === true;
-  // Main shows the folder dialog and answers with the folder's real path, or rejects (toasted) if it may not be shared.
-  // The path cannot be typed: main saves a share only for a folder chosen this way, or one already saved.
-  $('#share-pick').onclick = async () => { const p = await window.bp.pickFolder(form.elements.sharePath.value); if (p) form.elements.sharePath.value = p; };
-  $('#share-none').onclick = () => { form.elements.sharePath.value = ''; form.elements.shareWritable.checked = false; };
+  // One row for each shared folder, and always at least one: an empty row shares nothing.
+  const rows = $('#share-rows');
+  const shareRow = (s = {}) => {
+    // The path cannot be typed: main saves a share only for a folder chosen with Choose…, or one already saved.
+    const input = el('input', { name: 'sharePath', type: 'text', readOnly: true, placeholder: 'None: nothing is shared', ariaLabel: 'Folder on this computer', value: s.path || '' });
+    // Main shows the folder dialog and answers with the folder's real path, or rejects (toasted) if it may not be shared.
+    const pick = el('button', { className: 'btn small share-pick', type: 'button', textContent: 'Choose…', onclick: async () => { const p = await window.bp.pickFolder(input.value); if (p) input.value = p; } });
+    // Taking the last row out leaves an empty one, read-only again: nothing is shared.
+    const drop = el('button', { className: 'btn small share-drop', type: 'button', textContent: '✕', title: 'Stop sharing this folder', ariaLabel: 'Stop sharing this folder', onclick: () => { row.remove(); if (!rows.children.length) shareRow(); } });
+    const row = el('div', { className: 'row share-row' }, input, pick,
+      el('label', { className: 'check', title: 'Let the remote computer change and delete files in this folder' }, el('input', { name: 'shareWritable', type: 'checkbox', checked: s.writable === true }), 'Can change files'),
+      drop);
+    rows.append(row);
+  };
+  rows.replaceChildren();
+  for (const s of c.shares?.length ? c.shares : [{}]) shareRow(s);
+  $('#share-add').onclick = () => shareRow();
   form.elements.port.placeholder = DEFAULT_PORT[d.dataset.proto] || '';
   form.elements.protocol.onchange = () => { d.dataset.proto = form.elements.protocol.value; form.elements.port.placeholder = DEFAULT_PORT[d.dataset.proto] || ''; };
   const cmds = editCmds(c.commands);
@@ -329,7 +340,9 @@ function editConn(c = { protocol: 'ssh' }) {
     if (!conn.id) delete conn.id;
     if (conn.folder) { openFolders.add(conn.folder); saveOpen(); }
     conn.adminSession = conn.protocol === 'rdp' && f.adminSession.checked;
-    conn.share = conn.protocol === 'rdp' && f.sharePath.value ? { path: f.sharePath.value, writable: f.shareWritable.checked } : null; // null = not shared
+    // Rows left empty are not folders. No folder at all (or not RDP) = not shared.
+    conn.shares = conn.protocol !== 'rdp' ? [] : [...rows.children]
+      .map((r) => ({ path: r.querySelector('[name=sharePath]').value, writable: r.querySelector('[name=shareWritable]').checked })).filter((s) => s.path);
     if (conn.protocol === 'ssh' || conn.protocol === 'local') {
       conn.commands = cmds.map((x) => ({ ...x, name: x.name.trim() || x.cmd.trim() })); // the store drops empty ones
       const empty = cmds.filter((x) => x.name.trim() && !x.cmd.trim()).length;
@@ -808,11 +821,14 @@ async function openRemote(p, c) {
   status(p, `Connecting to ${c.host}…`);
   const { url, notice, shared } = await window.bp.open(c.id);
   // What this session can reach on this computer is said out loud and stays on the pane's header.
-  const sharing = shared && sharingText(shared, c.host);
+  const folders = shared?.folders;
+  const sharing = folders && sharingText(folders, c.host);
   if (notice || sharing) toast([notice, sharing].filter(Boolean).join(' · '), 12000); // long enough to compare the fingerprint
   if (sharing) {
     p.root.classList.add('sharing'); // keeps the header, and so the label, even when the pane has the tab to itself
-    p.root.querySelector('.pane-head .t').after(el('span', { className: 'shared', textContent: shared.writable ? 'shared folder: writable' : 'shared folder: read-only', title: sharing }));
+    const writable = folders.filter((s) => s.writable).length;
+    const label = `${folders.length > 1 ? `${folders.length} shared folders` : 'shared folder'}: ${writable === folders.length ? 'writable' : writable ? `${writable} writable` : 'read-only'}`;
+    p.root.querySelector('.pane-head .t').after(el('span', { className: 'shared', textContent: label, title: sharing }));
   }
   if (p.closed) return; // pane closed while guacd was starting
   const [base, query] = url.split('?');
