@@ -30,6 +30,7 @@ These test `store.js` directly on plain data and temporary files. No Electron, n
 | search matches every word across fields | Quick search finds a connection only when every word you type appears somewhere in it (name, host, user, folder and so on), and an empty search shows everything. |
 | an empty password removes the saved one, undefined keeps it | Saving a connection without touching the password keeps the saved one; clearing it really removes it, for one connection and in a bulk edit. |
 | copyPasswordFrom copies the encrypted password unless a new one is given | Duplicate carries the saved password over to the copy, unless you type a new one or clear it, and never changes an existing connection. |
+| a saved password stays with its server and account: not copied to another, dropped when re-pointed | A saved password is not copied to a duplicate that names another host, port, type or username, and is removed when a connection is saved with any of those changed and no new password. Renaming, moving or changing the domain keeps it, and changing the host back does not bring it back. |
 | bulk update by username changes only that username | Bulk edit by username changes exactly the connections with that username and no others. |
 | bulk update by folder includes subfolders but not lookalike names | Bulk edit of folder "Prod" also changes "Prod/Windows" but not a different folder called "Production". |
 | bulk update respects ticked ids | Bulk edit changes only the rows you left ticked in the preview. |
@@ -87,6 +88,7 @@ All steps use local terminals only. No SSH, RDP or VNC session is opened. The SS
 | tab groups follow the sidebar order, even for a subfolder made later | A subfolder created after another top-level folder still has its tabs placed where the sidebar draws it (inside its parent), not at the end. |
 | tab right-click: rename, duplicate, reconnect, close others | From a tab's right-click menu: Rename changes its title, Duplicate opens the same two sessions with the same name, Close other tabs leaves only it, Reconnect gives fresh terminals under the same name, and after one session's saved connection is deleted, Reconnect keeps that session running and says so. |
 | saved commands: edited in the dialog, run on start, run again from the pane menu | The Saved commands box is shown for a local terminal and hidden for RDP; a command typed in it is saved; marked "Run on start" it runs when the connection opens (the terminal shows its output); the pane header's "Run:" runs it again; and the sidebar's "Run:" with no session open opens one and runs it there. |
+| saved password: kept on an edit, asked for again when the server changes, copied by Duplicate only to the same server | The password box says "(copied)" or "(unchanged)" until the host is changed, then asks for the password again; a duplicate saved for another host has no password, an edit that changes nothing keeps it, and an edit that changes the host removes it. |
 | the sidebar grip widens the list, collapse still hides it, and the width survives a reload | Dragging the sidebar's edge widens it by the distance dragged, Ctrl+B-style collapse still slides it fully out at the new width, and after a reload the width is the same. This step reloads the window, so it must stay last. |
 
 The two drag steps do not use a real mouse drag. Real mouse drags sent through DevTools do not start HTML drag-and-drop, so the test fires synthetic `dragstart`, `dragover` and `drop` events on the row and the folder. It proves the drop handling works, not that a real mouse drag starts one. (The two gutter steps do use real mouse events.)
@@ -150,7 +152,7 @@ It says nothing about whether the code works.
 - Encrypting passwords with the system keyring when saving, and decrypting them when connecting: not tested at all (the store tests use stand-in strings).
 - The "system keyring is locked or unavailable" error: not tested at all.
 - The renderer never receiving passwords, only whether one is stored: not tested at all.
-- The edit dialog's "clear password" box and the "(unchanged)" / "(copied)" hints: logic tested, UI not.
+- The edit dialog's "clear password" box: logic tested, UI not. The "(unchanged)" / "(copied)" / "Enter it again" hints: tested in the UI for a changed host.
 
 ### Connections and folders in the sidebar
 
@@ -162,7 +164,7 @@ It says nothing about whether the code works.
 - Open or closed folder state following a moved folder, and being remembered across restarts: not tested at all.
 - Delete connection (with its confirm box and the `.bak` it writes): logic tested, UI not.
 - Delete folder: the refusal and its message for a non-empty folder are tested in the UI. Deleting an empty folder: logic tested, UI not.
-- Duplicate: logic tested, UI not.
+- Duplicate: logic tested; in the UI only what happens to the saved password.
 - New subfolder, New connection here, Open all in split (and the "first 4 of N" toast): not tested at all.
 - Editing an existing connection, switching protocol (port placeholder, RDP-only fields), tags, and the admin session box: not tested at all.
 - Connecting by double-click, Enter on a row, or "Connect in new tab" / "Connect in split" from the menu: not tested at all.

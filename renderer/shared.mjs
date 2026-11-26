@@ -10,6 +10,9 @@ export const inFolder = (folder, f) => folder === f || (folder || '').startsWith
 // 'a/b/c' -> 'a/b'; a top-level folder -> ''.
 export const parentOf = (f) => f.slice(0, Math.max(0, f.lastIndexOf('/')));
 
+// What a saved password is for: this server and this account. Under any other, it is not sent (store.js, upsert).
+export const account = (c) => JSON.stringify([c.protocol, c.host, c.port || null, c.username || '']);
+
 // Quick search: every word of q must appear somewhere in the connection.
 export function matches(conn, q) {
   q = q.trim().toLowerCase();

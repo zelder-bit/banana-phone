@@ -3,7 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-const { ICONS, inFolder, parentOf, matches } = require('./renderer/shared.mjs');
+const { ICONS, inFolder, parentOf, matches, account } = require('./renderer/shared.mjs');
 
 // `ordered`: array order is the order the user chose. Only files from before drag-to-reorder lack it.
 const empty = () => ({ ordered: true, folders: [], folderIcons: {}, connections: [] });
@@ -151,16 +151,22 @@ function upsert(data, input) {
   }
   if (copyPasswordFrom && !conn.id && conn.password === undefined) { // new connections only
     const src = data.connections.find((c) => c.id === copyPasswordFrom);
-    if (src?.password) conn.password = src.password; // copied still encrypted: never decrypted on the way
+    // Copied still encrypted, never decrypted on the way, and only to the server and account it was saved for.
+    if (src?.password && account(src) === account(conn)) conn.password = src.password;
   }
   if (!conn.id) conn.id = crypto.randomUUID();
   const i = data.connections.findIndex((c) => c.id === conn.id);
-  const was = i >= 0 ? agreedTo(data.connections[i]) : null;
-  if (i >= 0) data.connections[i] = { ...data.connections[i], ...conn };
+  const old = i >= 0 ? data.connections[i] : undefined;
+  const was = old && agreedTo(old);
+  if (old) data.connections[i] = { ...old, ...conn };
   else data.connections.push(conn);
-  const saved = data.connections[i >= 0 ? i : data.connections.length - 1];
-  // Only RDP has drives. A connection changed to another type loses its shares, and the user's agreement with them.
+  const saved = data.connections[old ? i : data.connections.length - 1];
+  // Only RDP has drives. A connection changed to another type loses its shares.
   if (saved.protocol !== 'rdp' || !saved.shares) delete saved.shares;
+  // The page saves connections freely, so what was given for one server or account does not follow the
+  // connection to another: neither the saved password (unless one came with this save, for the new server:
+  // it must never be sent to a server of the page's choosing) nor the user's agreement to its shared folders.
+  if (old && conn.password === undefined && account(saved) !== account(old)) delete saved.password;
   if (!saved.shares || agreedTo(saved) !== was) delete saved.shareOk;
   fillFolders(data);
   return conn;

@@ -38,14 +38,37 @@ test('an empty password removes the saved one, undefined keeps it', () => {
 test('copyPasswordFrom copies the encrypted password unless a new one is given', () => {
   const d = sample();
   d.connections[0].password = 'ENC';
-  const copy = store.upsert(d, { name: 'dc01 copy', copyPasswordFrom: 'a' });
+  const same = { host: '10.0.0.1', protocol: 'rdp', username: 'admin' }; // the server and account of 'a'
+  const copy = store.upsert(d, { ...same, name: 'dc01 copy', copyPasswordFrom: 'a' });
   assert.strictEqual(copy.password, 'ENC');
   assert.ok(!('copyPasswordFrom' in d.connections.at(-1)));
-  assert.strictEqual(store.upsert(d, { name: 'other', password: 'NEW', copyPasswordFrom: 'a' }).password, 'NEW');
-  assert.strictEqual(store.upsert(d, { name: 'cleared', password: '', copyPasswordFrom: 'a' }).password, '');
-  assert.strictEqual(store.upsert(d, { name: 'gone', copyPasswordFrom: 'nope' }).password, undefined);
+  assert.strictEqual(store.upsert(d, { ...same, name: 'other', password: 'NEW', copyPasswordFrom: 'a' }).password, 'NEW');
+  assert.strictEqual(store.upsert(d, { ...same, name: 'cleared', password: '', copyPasswordFrom: 'a' }).password, '');
+  assert.strictEqual(store.upsert(d, { ...same, name: 'gone', copyPasswordFrom: 'nope' }).password, undefined);
   store.upsert(d, { id: 'b', copyPasswordFrom: 'a' });
   assert.strictEqual(d.connections[1].password, undefined);
+});
+
+test('a saved password stays with its server and account: not copied to another, dropped when re-pointed', () => {
+  const d = sample();
+  d.connections[0].password = 'ENC';
+  const same = { host: '10.0.0.1', protocol: 'rdp', username: 'admin' };
+  for (const other of [{ host: 'evil.example' }, { port: 3390 }, { protocol: 'vnc' }, { username: 'guest' }]) {
+    assert.strictEqual(store.upsert(d, { ...same, ...other, name: 'copy', copyPasswordFrom: 'a' }).password, undefined, `copied to ${JSON.stringify(other)}`);
+    const e = sample();
+    e.connections[0].password = 'ENC';
+    store.upsert(e, { id: 'a', ...other });
+    assert.ok(!('password' in e.connections[0]), `kept for ${JSON.stringify(other)}`);
+  }
+  // Anything else may change, and a password that comes with the save is for the new server.
+  store.upsert(d, { id: 'a', ...same, name: 'renamed', folder: 'Lab', domain: 'OTHER', port: undefined });
+  assert.strictEqual(d.connections[0].password, 'ENC');
+  store.upsert(d, { id: 'a', host: 'new.lan', password: 'NEW' });
+  assert.strictEqual(d.connections[0].password, 'NEW');
+  // Changing it back does not bring the old one back.
+  store.upsert(d, { id: 'a', host: 'elsewhere' });
+  store.upsert(d, { id: 'a', host: 'new.lan' });
+  assert.strictEqual(d.connections[0].password, undefined);
 });
 
 test('bulk update by username changes only that username', () => {

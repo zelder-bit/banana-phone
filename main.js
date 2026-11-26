@@ -59,7 +59,7 @@ const mayShare = (p) => picked.has(p) || data.connections.some((c) => c.shares?.
 
 // shareOk is dropped: the page may ask for shared folders, but only the user agrees to them (shareFor, below).
 change('store:save', ({ password, shareOk, ...conn }) => {
-  if (password !== undefined) conn.password = enc(password); // undefined = keep existing
+  if (password !== undefined) conn.password = enc(password); // undefined = keep existing, while it is for the same server and account
   // Every folder in the list must be one the user chose, and the answer is the same whichever is not and whatever
   // is on disk. What a list must be that needs no look at the disk is asked here too; the rest waits for the connect.
   const list = Array.isArray(conn.shares) ? conn.shares : [];
