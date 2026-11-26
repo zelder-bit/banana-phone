@@ -132,7 +132,8 @@ It says nothing about whether the code works.
 - The RDP certificate trust on first use and the "certificate changed" dialog: logic tested, UI not (the fingerprint probe and the pinned settings are tested; the trust store and dialog are not).
 - Any real RDP or VNC session through guacd and Docker: not tested at all.
 - Starting guacd, reusing a running container of the right image, replacing one of the wrong image, restarting after the container dies, and stopping it on quit only if this launch started it: not tested at all.
-- The "Docker is not installed" message: not tested at all.
+- The "Docker is not installed" message: tested together with the installed guacd (`guacd.test.js`, "without Docker…"), with a stand-in `guacd` program.
+- A real guacd installed on the computer (version 1.6.0 or newer) carrying a session: not tested at all; only the stand-in has been run.
 - The remote screen scaling to the pane and asking the server for the pane size: not tested at all.
 - A remote session ending: "Disconnected", an error, or a normal sign-out closing the pane: not tested at all.
 - Keyboard input reaching only the focused remote pane: not tested at all.

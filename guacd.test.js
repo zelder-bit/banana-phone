@@ -392,3 +392,86 @@ test('resolveHost looks names up with the system resolver (including /etc/hosts)
   assert.strictEqual(await resolveHost('10.1.2.3'), '10.1.2.3');
   await assert.rejects(resolveHost('no-such-host.invalid'), /Could not look up no-such-host\.invalid/);
 });
+
+test('a guacd of this computer is used only if it is new enough to pin certificates', () => {
+  const { guacdTooOld, localGuacdArgs } = require('./guacd');
+  for (const ok of ['1.6.0', '1.6.1', '1.10.0', '2.0.0']) assert.strictEqual(guacdTooOld(`Guacamole proxy daemon (guacd) version ${ok}\n`), '', ok);
+  for (const old of ['1.5.5', '1.3.0', '0.9.14']) assert.match(guacdTooOld(`Guacamole proxy daemon (guacd) version ${old}\n`), new RegExp(`is ${old.replaceAll('.', '\\.')}, and 1\\.6\\.0 or newer`), old);
+  for (const none of ['', 'guacd: command not found', 'version one']) assert.match(guacdTooOld(none), /not installed/);
+  assert.deepStrictEqual(localGuacdArgs(40001), ['-f', '-b', '127.0.0.1', '-l', '40001']); // foreground, this computer only
+});
+
+test('without Docker, RDP and VNC run on the guacd of this computer, and a shared folder is refused', async (t) => {
+  // A PATH with no docker on it, and a stand-in guacd that answers -v (slowly, if the file `slow` is there) and listens where it is told.
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bp-guacd-'));
+  const file = (name, text) => fs.writeFileSync(path.join(dir, name), text);
+  file('guacd.js', `const fs = require('fs'), a = process.argv.slice(2);
+if (a[0] === '-v') return setTimeout(() => console.log('Guacamole proxy daemon (guacd) version ' + fs.readFileSync('${dir}/version', 'utf8')), fs.existsSync('${dir}/slow') ? 500 : 0);
+fs.appendFileSync('${dir}/log', a.join(' ') + '\\n');
+if (fs.existsSync('${dir}/broken')) { console.error('guacd: Unable to bind socket'); process.exit(1); }
+fs.writeFileSync('${dir}/pid', String(process.pid));
+require('net').createServer().listen(Number(a[a.indexOf('-l') + 1]), a[a.indexOf('-b') + 1]);`);
+  fs.writeFileSync(path.join(dir, 'guacd'), `#!/bin/sh\nexec "${process.execPath}" "${dir}/guacd.js" "$@"\n`, { mode: 0o755 });
+  const PATH = process.env.PATH;
+  process.env.PATH = dir;
+  const { openRemote, stopGuacd } = require('./guacd');
+  t.after(() => { stopGuacd(); process.env.PATH = PATH; fs.rmSync(dir, { recursive: true, force: true }); });
+  const vnc = { protocol: 'vnc', host: '127.0.0.1' };
+  const started = () => (fs.existsSync(path.join(dir, 'log')) ? fs.readFileSync(path.join(dir, 'log'), 'utf8').trim().split('\n') : []);
+  const listening = (port) => new Promise((r) => net.connect(port, '127.0.0.1').once('connect', function () { this.destroy(); r(true); }).once('error', () => r(false)));
+
+  // A Docker that is installed but fails is not swapped for this guacd, however good it is: Docker's own error is shown.
+  file('version', '1.6.0');
+  fs.writeFileSync(path.join(dir, 'docker'), '#!/bin/sh\necho "Cannot connect to the Docker daemon" >&2\nexit 1\n', { mode: 0o755 });
+  await assert.rejects(openRemote(vnc, 'pw'), /^Error: Cannot connect to the Docker daemon\nThe guacd installed on this computer is used only when Docker is not installed\.$/);
+  assert.deepStrictEqual(started(), []);
+  fs.rmSync(path.join(dir, 'docker'));
+
+  // Too old to pin a certificate: not started, and the message says what is missing on both sides.
+  file('version', '1.5.5');
+  await assert.rejects(openRemote(vnc, 'pw'), /Docker: Docker is not installed\nguacd: the guacd installed on this computer is 1\.5\.5/);
+  assert.deepStrictEqual(started(), []);
+  // New enough, but it fails to start: what it said reaches the user.
+  file('version', '1.6.0');
+  file('broken', '');
+  await assert.rejects(openRemote(vnc, 'pw'), /guacd did not start listening on 127\.0\.0\.1:\d+: guacd: Unable to bind socket/);
+  fs.rmSync(path.join(dir, 'broken'));
+
+  // Two panes at once share one guacd, on a port of its own, and each token says where it is.
+  const tokens = (await Promise.all([openRemote(vnc, 'pw'), openRemote(vnc, 'pw')]))
+    .map((u) => new Crypt('AES-256-CBC', key).decrypt(new URL(u).searchParams.get('token')));
+  const port = tokens[0].connection.guacdPort;
+  assert.strictEqual(tokens[1].connection.guacdPort, port);
+  assert.deepStrictEqual(started().slice(1), [`-f -b 127.0.0.1 -l ${port}`]);
+  assert.notStrictEqual(port, 4822);
+  assert.strictEqual(await listening(port), true);
+
+  // A shared folder is never handed to this guacd: no container, no share.
+  await assert.rejects(openRemote({ protocol: 'rdp', host: '127.0.0.1', id: 'c1' }, 'pw', { fingerprint: 'AA:BB', nla: false }, { id: 'c1', path: dir, dev: '64', ino: '1' }), /A shared folder needs Docker/);
+  assert.strictEqual(started().length, 2);
+
+  // guacd dies, and its port is then anyone's. Whatever answers there next is not sent a session: a new guacd is started.
+  process.kill(Number(fs.readFileSync(path.join(dir, 'pid'), 'utf8')));
+  for (let i = 0; i < 50 && await listening(port); i++) await sleep(100);
+  await sleep(300); // time for the app to hear that its child has ended
+  const squatter = net.createServer().listen(port, '127.0.0.1');
+  t.after(() => squatter.close());
+  await new Promise((r) => squatter.once('listening', r));
+  const next = new Crypt('AES-256-CBC', key).decrypt(new URL(await openRemote(vnc, 'pw')).searchParams.get('token')).connection.guacdPort;
+  assert.notStrictEqual(next, port);
+  assert.strictEqual(started().length, 3);
+
+  // Quitting stops it.
+  stopGuacd();
+  for (let i = 0; i < 50 && await listening(next); i++) await sleep(100);
+  assert.strictEqual(await listening(next), false);
+
+  // Quitting while guacd is still being asked for its version: it is not started afterwards.
+  file('slow', '');
+  const late = openRemote(vnc, 'pw');
+  await sleep(100);
+  stopGuacd();
+  await assert.rejects(late, /banana-phone is quitting/);
+  assert.strictEqual(started().length, 3);
+});

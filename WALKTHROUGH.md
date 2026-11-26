@@ -32,7 +32,7 @@ It speaks three kinds of connection:
 | --- | --- | --- | --- |
 | `ssh` | Linux servers | xterm.js terminal | `ssh2` |
 | `local` | a shell on this machine | xterm.js terminal | `node-pty` |
-| `rdp` / `vnc` | Windows (Active Directory), xrdp, VNC desktops | a `<canvas>` drawn by Guacamole | `guacd` (in Docker) + `guacamole-lite` + `guacamole-common-js` |
+| `rdp` / `vnc` | Windows (Active Directory), xrdp, VNC desktops | a `<canvas>` drawn by Guacamole | `guacd` (in Docker, or the one installed) + `guacamole-lite` + `guacamole-common-js` |
 
 Here is how data moves:
 
@@ -48,7 +48,7 @@ Here is how data moves:
                      └──────────────▶ guacamole-lite ◀─────────────┘   │   │
                                             │ TCP 127.0.0.1:4822       │   │
                                             ▼                          │   │
-                                  guacd (Docker container)             │   │
+                                  guacd (Docker, or installed)         │   │
                                             │ RDP / VNC                │   │
                                             ▼                          │   │
                                    Windows / xrdp / VNC host           │   │
@@ -71,7 +71,7 @@ banana-phone/
 ├── main.js             Electron main process: window, IPC handlers, SSH, local shells
 ├── preload.js          exposes a safe `window.bp` API to the page
 ├── store.js            load/save connections.json, search, bulk update (pure logic)
-├── guacd.js            starts guacd in Docker, runs the websocket bridge, makes tokens
+├── guacd.js            starts guacd (Docker, or the installed one), runs the bridge, makes tokens
 ├── pagefilter.js       on the bridge: drops the page's requests for files before guacd sees them
 ├── share.js            shared folders: which folders may be shared, what the user agreed to (pure logic)
 ├── store.test.js       tests for store.js
@@ -782,7 +782,7 @@ app.on('will-quit', () => {
 });
 ```
 
-Closing the window and being killed by the system (logout sends `SIGTERM`) both go through `will-quit`, which ends every session and stops the guacd container.
+Closing the window and being killed by the system (logout sends `SIGTERM`) both go through `will-quit`, which ends every session and stops guacd (the container, or the process started without Docker).
 
 ---
 
@@ -841,7 +841,7 @@ Note `onData` strips the IPC event object (`_e`) before calling the page's funct
 
 Drawing a Windows desktop inside a web page is a hard problem that the **Apache Guacamole** project has already solved. It has three parts, and banana-phone uses all three:
 
-1. **guacd**: a C program that speaks RDP, VNC and SSH to real servers and translates everything into the simple text-based *Guacamole protocol* ("draw this image here", "mouse moved there"). We run the official Docker image.
+1. **guacd**: a C program that speaks RDP, VNC and SSH to real servers and translates everything into the simple text-based *Guacamole protocol* ("draw this image here", "mouse moved there"). We run the official Docker image or, where Docker is not installed, a guacd installed on the computer.
 2. **guacamole-lite**: a small Node.js server that accepts **websocket** connections from the page and forwards them to guacd over TCP.
 3. **guacamole-common-js**: the browser library that draws the Guacamole protocol onto a `<canvas>` and sends your keyboard and mouse back.
 
@@ -855,7 +855,7 @@ const IMAGE = 'guacamole/guacd:1.6.0@sha256:8974eaa9ba32f713daf311e7cc8cd7e4cdfb
 
 const docker = (args) => new Promise((resolve, reject) =>
   execFile('docker', args, { timeout: 300000 }, (err, stdout, stderr) =>
-    err ? reject(new Error(err.code === 'ENOENT' ? 'Docker is not installed. …' : (stderr || err.message).trim()))
+    err ? reject(err.code === 'ENOENT' ? Object.assign(new Error('Docker is not installed'), { code: 'NO_DOCKER' }) : new Error((stderr || err.message).trim()))
         : resolve(stdout.trim())));
 ```
 
@@ -863,39 +863,111 @@ const docker = (args) => new Promise((resolve, reject) =>
 * `execFile` runs a program with an **argument array**, not a shell command string. Nothing in the arguments can be misread as shell syntax, which avoids injection bugs.
 
 ```js
-let starting;
-let startedHere = false; // only stop a guacd this launch created
-function ensureGuacd() {
-  return (starting ||= (async () => {
-    // Reuse a running container only if it is the image this version expects.
-    const running = await docker(['inspect', '-f', '{{.State.Running}} {{.Config.Image}}', NAME]).catch(() => '');
-    if (running !== `true ${IMAGE}`) {
-      await docker(['rm', '-f', NAME]).catch(() => {});
-      await docker(['run', '-d', '--rm', '--name', NAME, '-p', `127.0.0.1:${GUACD_PORT}:4822`, IMAGE]);
-      startedHere = true;
-    }
-    for (let i = 0; i < 50; i++) {
-      if (await portOpen()) return;
-      await new Promise((r) => setTimeout(r, 200));
-    }
-    throw new Error('guacd did not start listening on 127.0.0.1:4822');
-  })().catch((e) => { starting = null; throw e; }));
+async function startDockerGuacd() {
+  // Reuse a running container only if it is the image this version expects.
+  const running = await docker(['inspect', '-f', '{{.State.Running}} {{.Config.Image}}', NAME]).catch(() => '');
+  if (running !== `true ${IMAGE}`) {
+    await docker(['rm', '-f', NAME]).catch(() => {});
+    await docker(['run', '-d', '--rm', '--name', NAME, '-p', `127.0.0.1:${GUACD_PORT}:4822`, IMAGE]);
+    startedHere = true;
+  }
+  for (let i = 0; i < 50; i++) {
+    if (await portOpen(GUACD_PORT)) return GUACD_PORT;
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  throw new Error('guacd did not start listening on 127.0.0.1:4822');
 }
 ```
 
-* `starting ||= (…)` is **logical OR assignment**: only assign if `starting` is currently falsy. If you open four RDP panes at once, all four share the *same* start-up Promise instead of racing to start four containers.
-* `(async () => { … })()` defines an async arrow function and immediately calls it (an *IIFE*: immediately invoked function expression).
 * `docker inspect -f` prints fields of the container using a Go template: here whether it is running and which image it came from, e.g. `true guacamole/guacd:1.6.0@sha256:8974…`. Docker reports the image under the exact name the container was started with, digest included, so the comparison with `IMAGE` still holds. A container left over from an older banana-phone (an older guacd that cannot pin certificates, or one started by tag alone) is replaced instead of reused.
 * `-p 127.0.0.1:4822:4822` publishes guacd's port **only on localhost**, so other machines on your network cannot use your guacd.
 * `--rm` deletes the container when it stops; nothing is left behind.
-* The loop polls up to 10 s (50 × 200 ms) for the port to accept connections.
-* If anything fails, `.catch` clears `starting` so the next attempt tries again rather than reusing a failed Promise.
+* The loop polls up to 10 s (50 × 200 ms) for the port to accept connections, and the function answers with the port guacd is on.
 * `startedHere` records whether *this* launch created the container. On quit, `stopGuacd` only stops a container it started, so it never cuts off sessions belonging to something else that was already using it.
-* If the container dies later (Docker restarted, crash), the cached Promise would still say "started". `openRemote` checks the port first and forgets the cache when nothing answers:
+
+### Without Docker: the guacd installed on this computer
+
+Some machines have no Docker. If a `guacd` program is installed (on the `PATH`), banana-phone can start that instead. Two things have to be right first: its version, and where it listens.
 
 ```js
-  if (starting && !(await portOpen())) starting = null; // container died or Docker restarted: start again
+const MIN_GUACD = [1, 6, 0];
+function guacdTooOld(out) {
+  const m = /version (\d+)\.(\d+)\.(\d+)/.exec(out);
+  if (!m) return 'guacd is not installed on this computer';
+  const older = MIN_GUACD.map((n, i) => Number(m[i + 1]) - n).find((d) => d !== 0) < 0;
+  return older ? `the guacd installed on this computer is ${m.slice(1).join('.')}, and ${MIN_GUACD.join('.')} or newer is needed (an older one would not check the RDP server's certificate)` : '';
+}
+const localGuacdArgs = (port) => ['-f', '-b', '127.0.0.1', '-l', String(port)];
 ```
+
+* **The version matters for safety, not for features.** guacd ignores settings it does not know. `cert-fingerprints`, the setting that pins the RDP server's certificate (below), arrived in 1.6.0. An older guacd would connect without checking anything and say nothing. So `guacd -v` is asked first, and anything older than 1.6.0 is not used. The guacd a distribution packages is often older than that.
+* `guacdTooOld` takes the text `guacd -v` printed and answers with a reason, or an empty string when the version will do. The three numbers are compared in order: the first one that differs from the minimum decides (`find((d) => d !== 0)`), so 1.10.0 is newer than 1.6.0 although "10" sorts before "6" as text.
+* `localGuacdArgs` is the whole command line: `-f` keeps guacd in the foreground (as a child of the app, so it can be stopped), `-b 127.0.0.1` makes it listen on this computer only, `-l` is the port. Both functions only compute values, so `guacd.test.js` checks them directly.
+
+```js
+let local; // the guacd process this launch started, if Docker is not installed
+let quit = new AbortController(); // stopGuacd aborts it: that ends the guacd started here, and stops a start still under way
+async function startLocalGuacd(signal) {
+  const version = await new Promise((resolve) => execFile('guacd', ['-v'], { timeout: 10000 }, (err, stdout, stderr) => resolve(err ? '' : stdout + stderr)));
+  const why = guacdTooOld(version);
+  if (why) throw new Error(why);
+  const port = await freePort();
+  if (signal.aborted) throw new Error('banana-phone is quitting'); // stopGuacd ran meanwhile: do not start what nothing would stop
+  const child = local = spawn('guacd', localGuacdArgs(port), { signal, stdio: ['ignore', 'ignore', 'pipe'] });
+  let said = '', gone = false, up = false;
+  child.stderr.on('data', (d) => { said = (said + d).slice(-500); }); // read always, so guacd never waits on a full pipe
+  child.on('error', (e) => { said = e.message; gone = true; });
+  // Once it has ended its port is free for any program to take, so the port is forgotten with it.
+  child.on('exit', () => { gone = true; if (local === child) { local = null; if (up) starting = null; } });
+  for (let i = 0; i < 50 && !gone; i++) {
+    if (await portOpen(port)) { up = true; return port; }
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  child.kill();
+  throw new Error(`guacd did not start listening on 127.0.0.1:${port}${said.trim() && `: ${said.trim()}`}`);
+}
+```
+
+* `freePort` asks the system for a port nothing is using (it listens on port 0, reads which port it was given, and closes again). Port 4822 is not used here: Debian's `guacd` package starts a guacd service of its own on it, and that one may be an older version, or not ours to stop.
+* `spawn` starts the program and returns at once, unlike `execFile`, which waits for it to end. `stdio` says what the child's input, output and error output are joined to: the first two to nothing, the third to a *pipe* the app reads. The last 500 characters guacd wrote there go into the error message if it does not come up, so "address already in use" or a missing library is what you see, not only "did not start".
+* If guacd ends before its port answers (`gone`), the loop stops at once instead of waiting the full ten seconds.
+* If it ends *after* it was up, `starting` is cleared with it. Its port is then free, and any program on the computer could take it; a remembered port would send the next session's settings, password included, to whatever answered there.
+* **Stopping.** An `AbortController` is a standard switch: `quit.abort()` flips it, and everything holding its `signal` hears about it. `spawn` is given the signal, so Node itself ends the guacd process when `stopGuacd` calls `quit.abort()` on quit; `stopGuacd` then makes a fresh controller for whatever is started next. The same signal covers a quit that comes *while* guacd is being started: if `guacd -v` or the free port is still being waited for, `signal.aborted` is true by the time the answer comes, and guacd is not started at all, since nothing would be left to stop it. `ensureGuacd` (below) takes the signal before it tries Docker, so a quit during that wait counts too.
+* If banana-phone is killed outright, guacd is left running on its localhost port until you log out; the `shortcut:` comment in the source says so.
+
+```js
+let starting; // a Promise of the port the plain guacd listens on
+let startedHere = false; // only stop a guacd this launch created
+function ensureGuacd() {
+  const { signal } = quit; // this launch's, taken now: a quit while Docker is still being tried must reach the guacd started after it
+  return (starting ||= startDockerGuacd().catch((viaDocker) => {
+    // A Docker that is installed and failed (not running, no permission, no image) is to be put right, not quietly swapped for the weaker way.
+    if (viaDocker.code !== 'NO_DOCKER') throw new Error(`${viaDocker.message}\nThe guacd installed on this computer is used only when Docker is not installed.`);
+    return startLocalGuacd(signal).catch((viaLocal) => {
+      throw new Error(`RDP and VNC need Docker, or guacd ${MIN_GUACD.join('.')} or newer installed on this computer.\nDocker: ${viaDocker.message}\nguacd: ${viaLocal.message}`);
+    });
+  }).catch((e) => { starting = null; throw e; }));
+}
+```
+
+* `starting ||= (…)` is **logical OR assignment**: only assign if `starting` is currently falsy. If you open four RDP panes at once, all four share the *same* start-up Promise instead of racing to start four guacds.
+* **Docker first, the installed guacd second.** In Docker, guacd is shut in a container that holds nothing of yours. The installed guacd runs as *you*, and guacd does whatever a connection to its port asks. On a computer you share, another account could connect to that port and have your guacd act for it: for instance, show your home folder as a drive to an RDP server of its choosing. guacd offers nothing to prevent that: it has no login of its own, and it can listen only on a network port, not on a unix socket whose file permissions would keep others out. So the installed guacd is used only where Docker is not installed, and never for shared folders. "Not installed" means exactly that: the `docker` program was not found (the `NO_DOCKER` code from `docker()`). A Docker that is there and fails, because it is not running, you are not in the `docker` group, or the image could not be downloaded, is something to put right; moving you to the weaker way without a word would be the wrong answer to it. Its own message is shown, with a line saying the installed guacd is used only when Docker is not installed. It is also the way that could not be run for real while this was written (no guacd 1.6 package was at hand), only with a stand-in program in the tests.
+* If Docker is not installed and the installed guacd cannot be used either, the message names both reasons, one per line, e.g. "Docker: Docker is not installed" and "guacd: the guacd installed on this computer is 1.5.5, and 1.6.0 or newer is needed".
+* If anything fails, the last `.catch` clears `starting` so the next attempt tries again rather than reusing a failed Promise.
+* If guacd dies later (Docker restarted, a crash), the cached Promise would still say "started". `openRemote` calls `forgetDeadGuacd` first, which tries the port and forgets the cache when nothing answers:
+
+```js
+// Forgets a guacd that was started and no longer answers (it died, or Docker restarted), so that the next call starts one.
+async function forgetDeadGuacd() {
+  const was = starting;
+  if (!was) return;
+  const port = await was.catch(() => null); // a start that failed has already cleared `starting` itself
+  if (port && !(await portOpen(port)) && starting === was) starting = null; // unless someone else already started the next one
+}
+```
+
+* `was.catch(() => null)` waits for the start and turns a failed one into `null`: a failed start has cleared `starting` already (the last `.catch` in `ensureGuacd`), so there is nothing to forget.
+* `starting === was` matters when two panes open at once after guacd died. Both find the port silent; the first clears `starting` and begins a new start, and the second must not clear *that* one too, or two guacds would be started.
 
 ### The websocket bridge
 
@@ -1095,10 +1167,14 @@ async function openRemote(conn, password, cert, share) {
   let guacdPort; // guacamole-lite reads this from the token and calls net.connect(guacdPort, host), which takes a socket path too
   const release = share && hold(share); // before the first await: from here on the share's container is not stopped as idle
   try {
-    if (share) guacdPort = await ensureShare(share);
-    else {
-      if (starting && !(await portOpen())) starting = null; // container died or Docker restarted: start again
-      await ensureGuacd();
+    if (share) {
+      // Never the guacd of this computer: it runs as you and follows links, so nothing would keep the server inside the folder.
+      guacdPort = await ensureShare(share).catch((e) => {
+        throw e.code === 'NO_DOCKER' ? new Error('A shared folder needs Docker, which is not installed: its container is what keeps the remote computer inside that one folder. Install Docker, or take the shared folder off this connection.') : e;
+      });
+    } else {
+      await forgetDeadGuacd();
+      guacdPort = await ensureGuacd();
     }
     const port = await ensureBridge();
     const host = await resolveHost(conn.host);
@@ -1137,12 +1213,13 @@ function remoteSettings(conn, password, cert, share) {
 }
 ```
 
-**Why the app looks up the name, not guacd.** guacd runs inside a Docker container, and Docker gives the container only a copy of the host's `/etc/resolv.conf` (the list of DNS servers). Your own machine resolves names through more than that: `/etc/hosts`, mDNS for `.local` names, and DNS servers a VPN sets for particular domains (*split DNS*, e.g. "ask the office DNS server about `*.prod.example.com`"). The container sees none of those, so a private name that works in Remmina or `ping` could fail in guacd. `resolveHost` looks the name up in the app, through the same system resolver every other program uses (`dns.promises.lookup` calls the C library's `getaddrinfo`), and hands guacd the address instead.
+**Why the app looks up the name, not guacd.** guacd usually runs inside a Docker container, and Docker gives the container only a copy of the host's `/etc/resolv.conf` (the list of DNS servers). Your own machine resolves names through more than that: `/etc/hosts`, mDNS for `.local` names, and DNS servers a VPN sets for particular domains (*split DNS*, e.g. "ask the office DNS server about `*.prod.example.com`"). The container sees none of those, so a private name that works in Remmina or `ping` could fail in guacd. `resolveHost` looks the name up in the app, through the same system resolver every other program uses (`dns.promises.lookup` calls the C library's `getaddrinfo`), and hands guacd the address instead.
 
 * `{ ...conn, host }` makes a copy of the connection with `host` replaced (the *spread* syntax), so the saved connection keeps its name.
 * `conn = { ...conn }` at the top copies the connection before the first `await`. Starting a container takes seconds, and the saved connection could be edited meanwhile; the session uses the values that were checked.
-* `...(guacdPort && { guacdPort })` adds the property only when there is one: spreading `undefined` adds nothing. For a shared folder it is the path of the unix socket that leads to that folder's guacd, and because it sits inside the encrypted token with the settings, the page cannot send one share's settings to another share's folder.
+* `...(guacdPort && { guacdPort })` adds the property only when there is one: spreading `undefined` adds nothing. Without a share it is the port `ensureGuacd` answered with: 4822 for Docker, or the port the installed guacd was started on. For a shared folder it is the path of the unix socket that leads to that folder's guacd, and because it sits inside the encrypted token with the settings, the page cannot send one share's settings to another share's folder.
 * `hold(share)` and `release` keep a shared folder's container from being stopped while this session needs it ("Shared folders: only while in use", below). `release?.()` calls it only if there is one: `?.` skips the call when `release` is `null`, as it is for a connection without a share.
+* **A shared folder never goes to the installed guacd.** `ensureShare` only knows Docker. Without Docker it fails, and the message is replaced by one that says why a share needs it. The missing Docker is recognised by a `code` put on the error where it is made (`NO_DOCKER`), not by its wording, so the sentence can be changed without breaking this. The connection is refused, not opened without its folder or with a guacd that nothing fences in: you asked for a share, and a session that quietly lacked it, or quietly had more, would both be wrong.
 * `order: 'ipv4first'` prefers an IPv4 address, because Docker's default network has no IPv6.
 * Connecting by address is safe for the certificate check: guacd accepts only the pinned fingerprint, whatever name or address it dialled.
 
@@ -2398,6 +2475,8 @@ You hold **Shift** and double-click `dc01` (RDP, `admin` / `CORP`) while an SSH 
 | SSH man-in-the-middle | Trust-on-first-use host key fingerprints; a changed key is only accepted after you confirm it in a warning dialog that defaults to Cancel. |
 | RDP server impersonation | The certificate fingerprint is saved on first use and pinned in guacd (`cert-fingerprints`); a changed certificate is only accepted after you confirm it, and the newly trusted one is pinned instead. guacd is told to use exactly the TLS or NLA security seen during the check, so an impostor cannot fall back to legacy RDP; servers offering only legacy RDP security are refused. |
 | Other machines using your guacd | guacd and the websocket bridge listen on `127.0.0.1` only. |
+| An installed guacd that is too old to check certificates | One older than 1.6.0 would ignore `cert-fingerprints` and connect unchecked, so it is not used, and the message says which version was found. |
+| An installed guacd, which runs as you, being used for a shared folder | Never: shared folders start only in Docker, and are refused with a clear message where Docker is missing. |
 | A shared folder giving away more than that folder | Each connection that shares has its own guacd container with only that folder mounted, read-only unless you tick otherwise, running as you with no capabilities. Links pointing out of the folder lead nowhere in there. |
 | A read-only share that is writable in places | Read-only is asked for at every level (`bind-recursive=readonly`), so a drive mounted inside the folder is read-only too. Docker older than Engine 25 cannot do that, and a read-only share is refused there rather than started. |
 | guacd itself being turned against you by what a server sends | Its container's own files are read-only, its `/tmp` is memory, and its processes are limited in number; it has no capabilities and runs as you. What it can reach is the one folder and the network. |
@@ -2414,7 +2493,7 @@ You hold **Shift** and double-click `dc01` (RDP, `admin` / `CORP`) while an SSH 
 
 Known trade-offs of shared folders: the remote computer, and anything running on it, can read the whole shared folder (and change it, if you allowed that) for as long as the session is open; what it writes there is as trustworthy as that computer, so think before opening or running it; an ordinary folder that happens to hold secrets is not recognised as such; and a drive plugged in during a session shows up in the next one, once the last session of that connection has been closed for about ten seconds (up to a minute more if a pane of it was started and never connected).
 
-Known trade-offs: the first connection to a server is trusted without proof (the nature of trust on first use: check the fingerprint shown in the toast if it matters); VNC connections cannot be verified at all; and anyone who can run Docker commands as your user can also inspect the guacd container.
+Known trade-offs: the first connection to a server is trusted without proof (the nature of trust on first use: check the fingerprint shown in the toast if it matters); VNC connections cannot be verified at all; anyone who can run Docker commands as your user can also inspect the guacd container; and where Docker is not installed and the guacd installed on the computer runs instead, it runs as you and obeys whoever connects to its localhost port, so on a computer shared with people you do not trust, another account could use it to reach your files while it runs. Use Docker there.
 
 ---
 
@@ -2612,7 +2691,7 @@ Covered: multi-word search, that an empty password removes the saved one while a
 
 `scripts/share.itest.js` (`npm run test:share`) is the one test that touches the real things, so it is not part of `npm test`. It needs Docker, an RDP server on this machine (xrdp, standing in for Windows) and a second account to log in as; CI's `share` job installs all three on a fresh machine. The test calls `rdpFingerprint` and `openRemote` exactly as `main.js` does, opens the websocket the page would open, and then looks at the redirected drive *as the logged-in account*: what a program on the remote computer could do. It checks that a read-only share can be read and not changed, not even on a drive mounted inside the folder, that guacd can write nowhere in its container but `/tmp`, that a writable one can be changed and that the new files are yours, that links pointing out of the folder lead nowhere, that the container has one mount, no port and no way in from the network, that a token cannot be used twice, that a folder swapped for a link to another one is not shared, that closing the last session stops its container and the next session starts it again, and that quitting stops the containers. `docs/shared-folders-check.md` lists the results and what is left to check by hand on a real Windows host.
 
-`guacd.test.js` also checks `remoteSettings`: the RDP settings pin the certificate, ask for the admin session only when it is ticked, and turn the drive on (and guacd's own file transfer off) only for an RDP connection that was given a share. For shared folders it checks the `docker run` arguments (read-only at every level unless `writable` is exactly `true`, your user and groups, a read-only container with a `/tmp` of its own, this launch's network and a memory limit, no published port, bad paths refused), that a read-only share is not started on a Docker Engine older than 25 while a writable one is, that `shareBlocker` names rootless Docker, Podman, SELinux and Docker Desktop from sample `docker info` and `docker version` answers (nothing for an ordinary Docker, and a refusal for an answer that cannot be read) and that no container is started when it does, and, with a stand-in `docker` program on the `PATH`, that `ensureShare` starts the container once, creates its network first, sweeps only a crashed launch's leftover containers and network, refuses a container whose mounted folder is not the one that was examined, that its socket is private and carries bytes both ways through `docker exec`, and that `stopGuacd` stops the container, then removes the network and the socket. Another covers tokens: one use, one minute, and each share's token naming its own guacd on the one bridge. The last one covers the idle container, with the clock mocked (`t.mock.timers`) so that minutes pass at once: an open session or a token that is still good keeps it, it is removed ten seconds after the last of them, a session within those ten seconds keeps it, a session arriving during the removal starts a new one after it, and a connect that fails lets go.
+`guacd.test.js` also checks `remoteSettings`: the RDP settings pin the certificate, ask for the admin session only when it is ticked, and turn the drive on (and guacd's own file transfer off) only for an RDP connection that was given a share. For shared folders it checks the `docker run` arguments (read-only at every level unless `writable` is exactly `true`, your user and groups, a read-only container with a `/tmp` of its own, this launch's network and a memory limit, no published port, bad paths refused), that a read-only share is not started on a Docker Engine older than 25 while a writable one is, that `shareBlocker` names rootless Docker, Podman, SELinux and Docker Desktop from sample `docker info` and `docker version` answers (nothing for an ordinary Docker, and a refusal for an answer that cannot be read) and that no container is started when it does, and, with a stand-in `docker` program on the `PATH`, that `ensureShare` starts the container once, creates its network first, sweeps only a crashed launch's leftover containers and network, refuses a container whose mounted folder is not the one that was examined, that its socket is private and carries bytes both ways through `docker exec`, and that `stopGuacd` stops the container, then removes the network and the socket. Two tests cover the guacd installed on the computer: the version rule and the command line, and then, with a stand-in `guacd` on a `PATH` that has no `docker`, that a Docker which is installed but failing is not replaced by it, that a too-old one is not started, that what a failing one printed reaches the error, that two panes share one guacd on a port of its own, that a shared folder is refused, that a guacd which died is replaced and another program answering on its old port is not used, that `stopGuacd` ends the process, and that a quit while guacd is still being started leaves none running. Another covers tokens: one use, one minute, and each share's token naming its own guacd on the one bridge. The last one covers the idle container, with the clock mocked (`t.mock.timers`) so that minutes pass at once: an open session or a token that is still good keeps it, it is removed ten seconds after the last of them, a session within those ten seconds keeps it, a session arriving during the removal starts a new one after it, and a connect that fails lets go.
 
 ---
 
@@ -2652,7 +2731,7 @@ APPIMAGE_EXTRACT_AND_RUN=1 ./dist/banana-phone-0.1.0.AppImage
 
 Requirements on the machine running it:
 
-* **Docker** (and your user in the `docker` group) for RDP and VNC. The first RDP connection pulls `guacamole/guacd:1.6.0` (about 100 MB), named by its digest so it is the same image every time. SSH and local terminals work without Docker.
+* **Docker** (and your user in the `docker` group) for RDP and VNC. The first RDP connection pulls `guacamole/guacd:1.6.0` (about 100 MB), named by its digest so it is the same image every time. Where Docker is not installed, a `guacd` 1.6.0 or newer on the `PATH` is used instead, but not for shared folders. SSH and local terminals need neither.
 * A keyring (GNOME Keyring or KWallet) for proper password encryption.
 
 Data lives in `~/.config/banana-phone/`: `connections.json`, `connections.json.bak`, `known_hosts.json`, and `share-key.json` (the key agreements to share a folder are signed with, encrypted by the keyring; delete it and every share is asked about again).
