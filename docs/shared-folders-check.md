@@ -38,7 +38,9 @@ A second review, of the pull requests themselves, added these:
 - **Agreements are signed.** They were a plain hash of things written in the app's own files; they are now signed with a key kept behind the system keyring.
 - **The container is tighter**: its own files read-only, `/tmp` in memory, a limit on processes. It also runs in the groups you are in, so a folder you reach through a group is not empty on the remote side.
 
-`npm run test:ui` covers the edit dialog (the box is there for RDP only, the home folder is refused, read-only unless ticked, the page cannot write an agreement), and `npm test` covers the folder rules, the agreement, the `docker run` arguments and the relay.
+A third pass found that guacd answers a request for a folder's listing even with its file transfer off, so the page (the app's own window) could learn the names of the files in a shared folder. The bridge now drops the two instructions that ask guacd's filesystem for anything (`get` and `put`) before they reach guacd (issue #61). Checked by hand against the real `guacamole/guacd:1.6.0` image with a read-only share: asked for the folder's listing, guacd sent the file names when the filter was taken out, and nothing with it in. That run got no further than the server's login, so a signed-in session through the filter is covered only by `npm test`, where a stand-in guacd receives keys, mouse and clipboard unchanged; the Windows checklist below exercises it for real.
+
+`npm run test:ui` covers the edit dialog (the box is there for RDP only, the home folder is refused, read-only unless ticked, the page cannot write an agreement), and `npm test` covers the folder rules, the agreement, the `docker run` arguments, the relay and the bridge's filter.
 
 ## Not checked yet: do this once against Windows
 
@@ -60,7 +62,6 @@ xrdp is not Windows. Before relying on the feature, connect to a real Windows ho
 
 ## Known limits
 
-- The page (the app's own window) can ask guacd for the names of the files in a folder you shared, though not their contents.
 - An ordinary folder that holds secrets is not recognised: only the home folder itself, hidden folders, `~/snap`, system folders and the app's own folder are refused.
 - A share's container runs until banana-phone quits. It cannot be reached in between without a new session being opened and checked.
 - Shared team folders work, but think about who else can write there: what a share shows is whatever is in the folder at the time. Files the remote side creates are readable by you alone (mode 600, and 700 for folders), so teammates will not see them until you change that: `chmod -R g+rX <folder>` after a session. Nothing set on the folder beforehand helps, because guacd asks for exactly that mode when it creates a file (`open(…, S_IRUSR | S_IWUSR)` and `mkdir(…, S_IRWXU)` in its `fs.c`, still so in 1.6.0). A setgid folder gives the new file the team's group but no rights for it, and default ACLs (`setfacl -d`) are inherited but switched off, since the mode asked for becomes the new file's ACL mask (`getfacl` shows `group::rwx #effective:---`). Both were tried on ext4. The app does not loosen the files itself: it would be changing permissions on names the remote side chose, in a folder others can write to. The real fix belongs upstream, in guacamole-server: guacd leaving the mode to the umask.

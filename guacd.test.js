@@ -239,6 +239,39 @@ test('a token opens one websocket, soon, and says itself which guacd it is for',
   assert.notStrictEqual(a.once, b.once);
 });
 
+test('the bridge drops the page\'s requests for files, however they are cut up, and passes the rest', async (t) => {
+  const { fromPage, ensureBridge, ticket, stopGuacd } = require('./guacd');
+  const through = (...messages) => { const out = []; const f = fromPage((i) => out.push(i)); for (const m of messages) f(Buffer.from(m)); return out.join(''); };
+  const rest = '4.sync,2.10;5.mouse,1.1,1.2,1.0;3.key,5.65307,1.1;9.clipboard,1.0,10.text/plain;4.blob,1.0,4.aGk=;3.end,1.0;3.ack,1.1,2.OK,1.0;3.nop;';
+  assert.strictEqual(through(rest), rest, 'screen, mouse, keys and clipboard pass as they are');
+  assert.strictEqual(through('3.get,1.0,1./;3.nop;3.put,1.0,1.1,10.text/plain,2./x;'), '3.nop;');
+  assert.strictEqual(through('3.g', 'et,1.0,', '1./;3.n', 'op;'), '3.nop;', 'cut across messages');
+  assert.strictEqual(through('3.nop,14.;3.get,1.0,1./;'), '3.nop,14.;3.get,1.0,1./;', 'inside a value it is only text');
+  assert.strictEqual(through('3.nop,1.😀;3.get,1.0,1./;'), '3.nop,1.😀;', 'lengths count characters the way guacd counts them');
+  assert.strictEqual(through('3abc.get,1.0,1./;03.nop;'), '3.nop;', 'guacd is sent what was understood, not what was written');
+  assert.throws(() => through('get.files;'), /length/);
+  assert.throws(() => through('4.get\0,1.0,1./;'), /NUL/, 'guacd would read that name as get');
+  assert.throws(() => through('9999999.', 'x'.repeat(1 << 20), 'x'), /does not end/);
+
+  // The real bridge, with a stand-in for guacd that does the handshake and then keeps what it is sent.
+  let got = '';
+  const guacd = net.createServer((s) => s.on('error', () => {}).on('data', (d) => {
+    got += d;
+    if (got.endsWith('6.select,3.vnc;')) s.write('4.args,13.VERSION_1_1_0,8.hostname;');
+    if (/7\.connect,[^;]*;$/.test(got)) { got = ''; s.write('5.ready,2.$1;'); }
+  }));
+  await new Promise((r) => guacd.listen(0, '127.0.0.1', r));
+  t.after(() => { stopGuacd(); guacd.close(); });
+  const token = encryptToken({ once: ticket(), connection: { type: 'vnc', settings: { hostname: 'h' }, guacdPort: guacd.address().port } });
+  const ws = new WebSocket(`ws://127.0.0.1:${await ensureBridge()}/?token=${encodeURIComponent(token)}`, 'guacamole');
+  t.after(() => ws.close());
+  await new Promise((resolve, reject) => { ws.onmessage = resolve; ws.onerror = reject; }); // guacd's "ready", passed on to the page
+  ws.send('3.get,1.0,1./;4.sync,1.1;3.g');
+  ws.send('et,1.0,1./;3.key,2.65,1.1;');
+  for (let i = 0; i < 100 && !got.endsWith('3.key,2.65,1.1;'); i++) await new Promise((r) => setTimeout(r, 20));
+  assert.strictEqual(got, '4.sync,1.1;3.key,2.65,1.1;');
+});
+
 test('resolveHost looks names up with the system resolver (including /etc/hosts)', async () => {
   const { resolveHost } = require('./guacd');
   assert.strictEqual(await resolveHost('localhost'), '127.0.0.1'); // from /etc/hosts, which guacd's container never sees
