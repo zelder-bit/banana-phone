@@ -50,11 +50,17 @@ const change = (channel, fn, backup = false) => ipcMain.handle(channel, (_e, ...
   return { ...publicView(), result };
 });
 
+// Which folder a saved connection may share: one the user chose in the system's folder dialog in this
+// launch (share:pick adds it here, by its real path), or one that is already saved. The folder is not
+// looked at, so the answer tells the page nothing about what is on disk.
+// The set only grows, folders chosen and then never saved included: each passed the folder rules, so none need forgetting.
+const picked = new Set();
+const mayShare = (p) => picked.has(p) || data.connections.some((c) => c.share?.path === p);
+
 // shareOk is dropped: the page may ask for a shared folder, but only the user agrees to one (shareFor, below).
 change('store:save', ({ password, shareOk, ...conn }) => {
   if (password !== undefined) conn.password = enc(password); // undefined = keep existing
-  // Saved as its real path, so what is shown, agreed to and mounted are the same folder.
-  if (conn.share?.path) conn.share = { ...conn.share, path: share.checkFolder(String(conn.share.path), shareRules()) };
+  if (conn.share?.path && !mayShare(conn.share.path)) throw new Error('Not saved: choose the shared folder with the Choose… button.');
   store.upsert(data, conn); // its return value holds the encrypted password, so it is not passed on
 });
 change('store:delete', (id) => store.remove(data, id), true);
@@ -156,13 +162,18 @@ function agreementKey() {
 }
 
 // The edit dialog's "Choose…" button. The page is sandboxed and cannot browse folders itself.
+// What the user chose is remembered (`picked`, above) as its real path, so that what is shown, saved,
+// agreed to and mounted are the same folder.
 ipcMain.handle('share:pick', async (_e, from) => {
   const { canceled, filePaths } = await dialog.showOpenDialog(win, {
     title: 'Folder to share with the remote computer',
     defaultPath: typeof from === 'string' && path.isAbsolute(from) ? from : os.homedir(),
     properties: ['openDirectory', 'createDirectory'],
   });
-  return canceled || !filePaths[0] ? null : share.checkFolder(filePaths[0], shareRules());
+  if (canceled || !filePaths[0]) return null;
+  const folder = share.checkFolder(filePaths[0], shareRules());
+  picked.add(folder);
+  return folder;
 });
 
 // The folder an RDP connection shares, as guacd.openRemote wants it, or null. The folder is checked again
