@@ -70,6 +70,11 @@ function ensureBridge(guacd = GUACD_PORT) {
 //    guacd's port on localhost is harmless; this one would hand the folder to any program or user on
 //    this computer that connected to it. The only way in is `docker exec`, through relay() below.
 const DRIVE = '/drive'; // where the folder appears inside the container
+// guacd has a second way to move files: through the Guacamole connection itself, to and from the page.
+// The folder is the whole feature here, so that way is closed. Left open, guacd makes a "Download"
+// folder in your folder, and a file the remote side moves into it is sent to the page instead of
+// being moved; the page takes no files, so the move would seem to work and do nothing.
+const NO_TRANSFER = { 'disable-download': 'true', 'disable-upload': 'true' };
 const shares = new Map(); // container name -> { starting: Promise of its relay's socket path }
 const me = () => `${process.getuid()}:${process.getgid()}`;
 
@@ -244,7 +249,7 @@ function remoteSettings(conn, password, cert, share) {
     });
     if (conn.adminSession) settings.console = 'true'; // the server's console / admin session, like mstsc /admin
     // The shared folder as a drive: "Shared on banana-phone" in Explorer, \\tsclient\Shared in a path.
-    if (share) Object.assign(settings, { 'enable-drive': 'true', 'drive-path': DRIVE, 'drive-name': 'Shared', 'client-name': 'banana-phone' });
+    if (share) Object.assign(settings, { 'enable-drive': 'true', 'drive-path': DRIVE, 'drive-name': 'Shared', 'client-name': 'banana-phone', ...NO_TRANSFER });
   } else if (conn.username) settings.username = conn.username;
   return settings;
 }
