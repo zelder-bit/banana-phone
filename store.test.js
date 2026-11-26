@@ -209,14 +209,14 @@ test('upsert keeps only well-formed saved commands', () => {
 test('a shared folder is kept only well-formed, only on RDP, and loses its agreement when removed', () => {
   const d = sample();
   const share = () => d.connections[0].share;
-  store.upsert(d, { id: 'a', share: { path: ' /home/user/Projects ', writable: 'yes', extra: 1 } });
+  store.upsert(d, { id: 'a', share: { path: '/home/user/Projects', writable: 'yes', extra: 1 } });
   assert.deepStrictEqual(share(), { path: '/home/user/Projects', writable: false }); // writable only when exactly true
   store.upsert(d, { id: 'a', share: { path: '/home/user/Projects', writable: true } });
   assert.deepStrictEqual(share(), { path: '/home/user/Projects', writable: true });
   d.connections[0].shareOk = 'agreed'; // main.js sets this once the user has agreed
   store.upsert(d, { id: 'a', name: 'dc01 renamed' }); // an edit that does not mention the share keeps both
   assert.deepStrictEqual([share().path, d.connections[0].shareOk], ['/home/user/Projects', 'agreed']);
-  for (const off of [null, '', '/home/user/Projects', { path: '' }, { path: 42 }, {}]) {
+  for (const off of [null, '', '/home/user/Projects', { path: '' }, { path: '  ' }, { path: 42 }, {}]) {
     Object.assign(d.connections[0], { share: { path: '/x', writable: false }, shareOk: 'agreed' });
     store.upsert(d, { id: 'a', share: off });
     assert.ok(!('share' in d.connections[0]) && !('shareOk' in d.connections[0]), JSON.stringify(off));
@@ -228,4 +228,36 @@ test('a shared folder is kept only well-formed, only on RDP, and loses its agree
   store.upsert(d, { id: 'a', protocol: 'ssh' });
   assert.ok(!('share' in d.connections[0]) && !('shareOk' in d.connections[0]));
   assert.ok(store.upsert(d, { name: 'new rdp', protocol: 'rdp', share: { path: '/srv/files' } }).share.path === '/srv/files');
+});
+
+test("an agreement ends with any change to what was agreed, and cannot be saved in or brought back", () => {
+  const d = sample();
+  const c = () => d.connections[0];
+  const agree = () => { Object.assign(c(), { share: { path: '/srv/files', writable: true }, host: '10.0.0.1', username: 'admin', domain: 'CORP', shareOk: 'agreed' }); delete c().port; delete c().adminSession; };
+  // What the edit dialog sends when nothing was changed keeps the agreement.
+  agree();
+  store.upsert(d, { id: 'a', name: 'dc01', protocol: 'rdp', host: '10.0.0.1', port: undefined, username: 'admin', domain: 'CORP', adminSession: false, share: { path: '/srv/files', writable: true } });
+  assert.strictEqual(c().shareOk, 'agreed');
+  for (const change of [{ share: { path: '/srv/files', writable: false } }, { share: { path: '/srv/other', writable: true } }, { host: '10.0.0.2' }, { port: 3390 }, { username: 'guest' }, { domain: 'OTHER' }, { adminSession: true }]) {
+    agree();
+    store.upsert(d, { id: 'a', ...change });
+    assert.ok(!('shareOk' in c()), JSON.stringify(change));
+    // Changing it back does not bring the old agreement back: the user made it read-only, so writable is a new question.
+    store.upsert(d, { id: 'a', share: { path: '/srv/files', writable: true }, host: '10.0.0.1', port: undefined, username: 'admin', domain: 'CORP', adminSession: false });
+    assert.ok(!('shareOk' in c()), `back from ${JSON.stringify(change)}`);
+  }
+  // Nothing that is saved can carry an agreement in.
+  agree(); delete c().shareOk;
+  store.upsert(d, { id: 'a', shareOk: 'forged' });
+  assert.ok(!('shareOk' in c()));
+  assert.ok(!('shareOk' in store.upsert(d, { name: 'new', protocol: 'rdp', share: { path: '/srv/files' }, shareOk: 'forged' })));
+  // Bulk edit: another account ends it, a new password does not.
+  agree();
+  store.bulkUpdate(d, { ids: ['a'], username: 'admin' }, { password: 'ENC' });
+  assert.strictEqual(c().shareOk, 'agreed');
+  store.bulkUpdate(d, { ids: ['a'], username: 'admin' }, { username: 'svc' });
+  assert.ok(!('shareOk' in c()));
+  agree();
+  store.bulkUpdate(d, { ids: ['a'], username: 'admin' }, { domain: 'NEW' });
+  assert.ok(!('shareOk' in c()));
 });

@@ -19,8 +19,12 @@ For RDP and VNC connections
   (SSH and local terminals work without Docker)
 
 For shared folders on RDP connections
-  - Nothing more than the above. Each shared folder gets a small guacd
-    container of its own, which is stopped when banana-phone quits.
+  - Each shared folder gets a small guacd container of its own, which
+    is stopped when banana-phone quits.
+  - Docker Engine 25 or newer, and Linux 5.12 or newer, for a read-only
+    share (docker version shows the Engine). Older ones cannot keep a
+    drive mounted inside the folder read-only, so banana-phone refuses
+    to start the share. Writable shares work on older Engines.
   - The folder's path must not contain a comma or a double quote.
   - Not checked yet: rootless Docker, Podman, and systems where Docker
     enforces SELinux (Fedora, RHEL). The folder may show up empty or
