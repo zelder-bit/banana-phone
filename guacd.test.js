@@ -69,6 +69,90 @@ test('RDP settings: pinned certificate, and the admin (console) session only whe
   assert.ok(!('console' in remoteSettings({ protocol: 'vnc', host: 'k', adminSession: true }, 'pw')));
 });
 
+// ---- shared folders ----
+
+test('the drive is on only for an RDP connection that was given a share', () => {
+  const { remoteSettings } = require('./guacd');
+  const cert = { fingerprint: 'AA:BB', nla: true };
+  const rdp = { protocol: 'rdp', host: 'dc01' };
+  const s = remoteSettings(rdp, 'pw', cert, { path: '/home/u/Projects' });
+  // The path guacd gets is the mount point in its container, never the folder's real path.
+  assert.deepStrictEqual([s['enable-drive'], s['drive-path'], s['drive-name'], s['client-name']], ['true', '/drive', 'Shared', 'banana-phone']);
+  assert.ok(!JSON.stringify(s).includes('/home/u'));
+  for (const plain of [remoteSettings(rdp, 'pw', cert), remoteSettings({ protocol: 'vnc', host: 'k' }, 'pw', undefined, { path: '/x' })]) {
+    assert.ok(!Object.keys(plain).some((k) => /drive|client-name/.test(k)));
+  }
+});
+
+test("a share's container sees only that folder, read-only by default, as you, with no port", () => {
+  const { shareRunArgs, shareName } = require('./guacd');
+  const args = shareRunArgs('n', { path: '/home/u/My Files' });
+  const after = (a, flag) => a[a.indexOf(flag) + 1];
+  assert.strictEqual(after(args, '--mount'), 'type=bind,source=/home/u/My Files,target=/drive,readonly');
+  assert.strictEqual(after(args, '--user'), `${process.getuid()}:${process.getgid()}`);
+  assert.strictEqual(after(args, '--cap-drop'), 'ALL');
+  assert.strictEqual(after(args, '--security-opt'), 'no-new-privileges');
+  assert.ok(!args.some((a) => /^(-p|-P|--publish|--publish-all|-v|--volume|--privileged|--network|--net)/.test(a)));
+  assert.strictEqual(args.filter((a) => a === '--mount').length, 1);
+  assert.deepStrictEqual(args.slice(-3), ['guacamole/guacd:1.6.0', '-b', '127.0.0.1']); // guacd on the container's own loopback
+  // Writable only when asked in so many words.
+  assert.strictEqual(after(shareRunArgs('n', { path: '/srv/x', writable: true }), '--mount'), 'type=bind,source=/srv/x,target=/drive');
+  for (const writable of [undefined, null, false, 'true', 1, {}]) assert.match(after(shareRunArgs('n', { path: '/srv/x', writable }), '--mount'), /,readonly$/);
+  // A path that could add mount options of its own, or is no path at all, starts nothing.
+  for (const bad of ['relative/x', '', '/a,readonly=false', '/a,source=/', '/a"b', '/a\nb', '/a\u0000b', undefined, null, 42, ['/a']]) {
+    assert.throws(() => shareRunArgs('n', { path: bad }), /cannot be shared/, String(bad));
+  }
+  assert.throws(() => shareRunArgs('n', undefined), /cannot be shared/);
+  // One container per folder and mode, named for this user.
+  assert.match(shareName({ path: '/a' }), new RegExp(`^banana-phone-guacd-${process.getuid()}-[0-9a-f]{12}$`));
+  assert.strictEqual(shareName({ path: '/a' }), shareName({ path: '/a', writable: false }));
+  assert.notStrictEqual(shareName({ path: '/a' }), shareName({ path: '/a', writable: true }));
+  assert.notStrictEqual(shareName({ path: '/a' }), shareName({ path: '/b' }));
+});
+
+// A stand-in for the docker program: writes down what it was asked, and `exec -i` (the relay's way in) echoes.
+function fakeDocker(t) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bp-docker-'));
+  const log = path.join(dir, 'log');
+  fs.writeFileSync(path.join(dir, 'docker'), `#!/bin/sh\necho "$*" >> "${log}"\n[ "$1 $2" = "exec -i" ] && exec cat\n[ "$1" = inspect ] && echo true\nexit 0\n`, { mode: 0o755 });
+  const before = { PATH: process.env.PATH, XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR };
+  Object.assign(process.env, { PATH: `${dir}:${before.PATH}`, XDG_RUNTIME_DIR: dir });
+  t.after(() => {
+    process.env.PATH = before.PATH;
+    if (before.XDG_RUNTIME_DIR === undefined) delete process.env.XDG_RUNTIME_DIR; else process.env.XDG_RUNTIME_DIR = before.XDG_RUNTIME_DIR;
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+  return () => (fs.existsSync(log) ? fs.readFileSync(log, 'utf8').trim().split('\n') : []);
+}
+
+test('a share starts its container once, is reached through a private socket, and is stopped on quit', async (t) => {
+  const calls = fakeDocker(t);
+  const { ensureShare, shareName, stopGuacd } = require('./guacd');
+  const share = { path: fs.mkdtempSync(path.join(os.tmpdir(), 'bp-share-')) };
+  const name = shareName(share);
+  const [sock, again] = await Promise.all([ensureShare(share), ensureShare(share)]);
+  assert.strictEqual(sock, again);
+  const runs = calls().filter((c) => c.startsWith('run '));
+  assert.strictEqual(runs.length, 1);
+  assert.match(runs[0], new RegExp(`--name ${name} .*--mount type=bind,source=${share.path},target=/drive,readonly `));
+  assert.ok(calls().some((c) => c.startsWith('ps -a --filter name=banana-phone-guacd-'))); // leftovers of a crashed launch were looked for
+  // Only this user may connect: the socket and the folder around it.
+  assert.strictEqual(fs.statSync(sock).mode & 0o777, 0o600);
+  assert.strictEqual(fs.statSync(path.dirname(sock)).mode & 0o777, 0o700);
+  // Bytes go in and come back through `docker exec -i <container> nc 127.0.0.1 4822`.
+  const echoed = await new Promise((resolve, reject) => {
+    const c = net.connect(sock);
+    c.on('error', reject);
+    c.on('data', (d) => { resolve(d.toString()); c.destroy(); });
+    c.write('6.select,3.rdp;');
+  });
+  assert.strictEqual(echoed, '6.select,3.rdp;');
+  assert.ok(calls().includes(`exec -i ${name} nc 127.0.0.1 4822`));
+  stopGuacd();
+  assert.ok(calls().includes(`stop -t 1 ${name}`));
+  assert.ok(!fs.existsSync(path.dirname(sock)));
+});
+
 test('resolveHost looks names up with the system resolver (including /etc/hosts)', async () => {
   const { resolveHost } = require('./guacd');
   assert.strictEqual(await resolveHost('localhost'), '127.0.0.1'); // from /etc/hosts, which guacd's container never sees
