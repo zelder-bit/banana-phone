@@ -528,6 +528,8 @@ test('tabs, splits, gutter and dialogs', { timeout: 120000 }, async (t) => {
     const setHost = (h) => app.eval(`(() => { const i = document.querySelector('#edit-form').elements.host; i.value = '${h}'; i.dispatchEvent(new Event('input', { bubbles: true })); })()`);
     const has = (name) => `(async () => (await window.bp.get()).connections.find((c) => c.name === '${name}')?.hasPassword)()`;
     const submit = async () => { await app.eval('document.querySelector("#edit-form").requestSubmit()'); await app.waitFor('!document.querySelector("#edit-dlg").open'); };
+    // CI has no keyring, so safeStorage cannot encrypt there: a stand-in that only marks the text is enough to test what is kept.
+    await app.main(`Object.assign(require('electron').safeStorage, { encryptString: (t) => Buffer.from('x' + t), decryptString: (b) => b.toString().slice(1) })`);
     await app.click('#new-conn');
     await app.waitFor('document.querySelector("#edit-dlg").open');
     await app.eval(`(() => { const f = document.querySelector('#edit-form').elements; f.name.value = 'pwbox'; f.host.value = 'one.test'; f.username.value = 'u'; f.password.value = 'not-a-real-one'; })()`);
