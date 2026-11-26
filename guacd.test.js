@@ -82,6 +82,33 @@ test('the clipboard goes only the ways the connection allows, for RDP and VNC, a
   }
 });
 
+test('through a gateway: both certificates pinned, NLA, the gateway named with its own account', () => {
+  const { remoteSettings } = require('./guacd');
+  const conn = { protocol: 'rdp', host: 'dc01.corp.internal', username: 'admin', gatewayHost: 'gw.example', gatewayUsername: 'me', gatewayDomain: 'CORP' };
+  const s = remoteSettings(conn, 'pw', { fingerprint: 'AA:BB', nla: true }, null, { gateway: { fingerprint: 'CC:DD', password: 'gwpw' } });
+  assert.deepStrictEqual([s.security, s['cert-fingerprints'], s.hostname, s.password], ['nla', 'sha256:AA:BB,sha256:CC:DD', 'dc01.corp.internal', 'pw']);
+  assert.deepStrictEqual([s['gateway-hostname'], s['gateway-port'], s['gateway-username'], s['gateway-domain'], s['gateway-password']], ['gw.example', '443', 'me', 'CORP', 'gwpw']);
+  assert.strictEqual(remoteSettings({ ...conn, gatewayPort: 8443 }, 'pw', { fingerprint: 'AA:BB', nla: true }, null, { gateway: { fingerprint: 'CC:DD' } })['gateway-port'], '8443');
+  // Without the gateway's certificate in hand there is no gateway: saved fields alone do not make one.
+  assert.ok(!Object.keys(remoteSettings(conn, 'pw', { fingerprint: 'AA:BB', nla: true })).some((k) => k.startsWith('gateway-')));
+});
+
+test("tlsFingerprint reads a gateway's certificate, and fails fast on what is not TLS", async () => {
+  const { tlsFingerprint } = require('./guacd');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bp-cert-'));
+  execFileSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1', '-subj', '/CN=fake-gateway',
+    '-keyout', path.join(dir, 'k.pem'), '-out', path.join(dir, 'c.pem')], { stdio: 'ignore' });
+  const cert = fs.readFileSync(path.join(dir, 'c.pem'));
+  const gateway = tls.createServer({ key: fs.readFileSync(path.join(dir, 'k.pem')), cert }, (s) => s.on('error', () => {}));
+  const hangUp = net.createServer((s) => s.end());
+  await Promise.all([gateway, hangUp].map((srv) => new Promise((r) => srv.listen(0, '127.0.0.1', r))));
+  try {
+    assert.strictEqual(await tlsFingerprint('127.0.0.1', gateway.address().port), new X509Certificate(cert).fingerprint256);
+    assert.strictEqual(await tlsFingerprint('localhost', gateway.address().port), new X509Certificate(cert).fingerprint256);
+    await assert.rejects(tlsFingerprint('127.0.0.1', hangUp.address().port), /127\.0\.0\.1:\d+: /);
+  } finally { gateway.close(); hangUp.close(); }
+});
+
 // ---- shared folders ----
 
 // A share as main.js hands it over (see shareName in guacd.js), with one folder in it.
@@ -362,6 +389,12 @@ test('a token opens one websocket, soon, and says itself which guacd it is for',
   assert.notStrictEqual(a.connection.guacdPort, b.connection.guacdPort);
   assert.strictEqual(a.connection.settings['enable-drive'], 'true');
   assert.notStrictEqual(a.once, b.once);
+
+  // Through a gateway the names swap roles: the gateway's is looked up here, since guacd in Docker dials it;
+  // the server's is left as written, for the gateway to look up where it means something.
+  const u = new URL(await openRemote({ ...conn, id: 'c1', host: 'dc01.corp.invalid', gatewayHost: 'localhost' }, 'pw', cert, share('c1', 'bp-a-'), { gateway: { fingerprint: 'CC:DD', password: 'gwpw' } }));
+  const { settings } = new Crypt('AES-256-CBC', key).decrypt(u.searchParams.get('token')).connection;
+  assert.deepStrictEqual([settings.hostname, settings['gateway-hostname'], settings['gateway-port'], settings['cert-fingerprints']], ['dc01.corp.invalid', '127.0.0.1', '443', 'sha256:AA:BB,sha256:CC:DD']);
 });
 
 test('the bridge drops the page\'s requests for files, however they are cut up, and passes the rest', async (t) => {

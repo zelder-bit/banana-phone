@@ -184,10 +184,10 @@ dialog::backdrop { background: rgb(30 20 10 / 45%); backdrop-filter: blur(3px); 
 #edit-dlg:not([data-proto="rdp"]) .rdp-only, #edit-dlg[data-proto="local"] .net,
 #edit-dlg[data-proto="ssh"] .remote-only, #edit-dlg[data-proto="local"] .remote-only,
 #edit-dlg[data-proto="rdp"] .term-only, #edit-dlg[data-proto="vnc"] .term-only { display: none; }
-.cmds, .share-box { border: 2px solid var(--line); border-radius: 12px; padding: 6px 12px 10px; margin: 0; display: grid; gap: 8px; }
-.cmds legend, .share-box legend { font-weight: 700; font-size: .85rem; padding: 0 4px; }
-.cmds .row, .share-box .row { align-items: flex-end; }
-.share-box p { margin: 0; }
+.cmds, .share-box, .gateway-box { border: 2px solid var(--line); border-radius: 12px; padding: 6px 12px 10px; margin: 0; display: grid; gap: 8px; }
+.cmds legend, .share-box legend, .gateway-box legend { font-weight: 700; font-size: .85rem; padding: 0 4px; }
+.cmds .row, .share-box .row, .gateway-box .row { align-items: flex-end; }
+.share-box p, .gateway-box p { margin: 0; }
 #share-rows { display: grid; gap: 8px; }
 .share-box .share-row { align-items: center; }
 .share-row input[type="text"] { flex: 1; min-width: 0; }

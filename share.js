@@ -4,6 +4,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
+const { gatewayPort } = require('./renderer/shared.mjs');
 
 // Is `p` the folder `dir` or somewhere under it? Both are real, absolute paths.
 const within = (p, dir) => p === dir || p.startsWith(dir === '/' ? '/' : dir + '/');
@@ -174,6 +175,7 @@ function question(conn, folders, { fingerprint, firstSeen = false } = {}) {
         : writable.length ? `${server}${account} will be able to read everything in these folders, and to change and delete everything in ${writable.length === 1 ? 'the one' : `the ${writable.length}`} marked CAN BE CHANGED.`
         : `${server}${account} will be able to read everything in ${these}, but not change it.`)
       + ' So will any program running there.'
+      + (conn.gatewayHost ? `\n\nThe connection goes through the gateway ${plain(conn.gatewayHost)}:${gatewayPort(conn)}.` : '')
       + (runs.length ? `\n\n${one ? 'This folder holds' : 'What can be changed holds'} ${runs.join(' and ')}. A server that can change files here can change what this computer runs.` : '')
       + (firstSeen ? `\n\nThis is the first time banana-phone has connected to ${server}, so nothing yet confirms it is the computer you mean. If that matters, compare its certificate before you share (SHA256):\n${fingerprint}` : '')
       + `\n\nYou are asked once for ${these}, this server and this account, and again if any of them changes.`,
@@ -181,7 +183,7 @@ function question(conn, folders, { fingerprint, firstSeen = false } = {}) {
 }
 
 // What a share's approval stands for: these folders in this order, each shared this way, with this account on the server
-// at this address showing this certificate. Change any of them and the user is asked again.
+// at this address showing this certificate, through this gateway if there is one. Change any of them and the user is asked again.
 // It is signed with `key`, which main.js keeps behind the system keyring: the things it covers are
 // all written in files anyone running as you can change, so a plain hash of them could be worked out
 // and written in beside them.
@@ -189,6 +191,8 @@ function approvalOf(conn, fingerprint, key) {
   if (!Buffer.isBuffer(key) || key.length < 32) throw new Error('An agreement to share a folder needs a key to be signed with');
   return crypto.createHmac('sha256', key).update(JSON.stringify([
     conn.shares.map((s) => [s.path, s.writable === true]), conn.host, conn.port || 3389, conn.username || '', conn.domain || '', conn.adminSession === true, fingerprint,
+    // Only said when there is one, so agreements made before gateways existed still stand.
+    ...(conn.gatewayHost ? [conn.gatewayHost, gatewayPort(conn), conn.gatewayUsername || '', conn.gatewayDomain || ''] : []),
   ])).digest('hex');
 }
 

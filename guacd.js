@@ -11,7 +11,7 @@ const url = require('url');
 const GuacamoleLite = require('guacamole-lite');
 const Crypt = require('guacamole-lite/lib/Crypt');
 require('./pagefilter'); // before any session: the page's requests for files never reach guacd
-const { clipboardWays } = require('./renderer/shared.mjs');
+const { clipboardWays, gatewayPort } = require('./renderer/shared.mjs');
 
 const NAME = 'banana-phone-guacd';
 // 1.6 adds cert-fingerprints; still serves guacamole-common-js 1.5 clients. The digest is the one of the multi-platform
@@ -464,9 +464,28 @@ function probeRdp(host, port, tlsOptions) {
   });
 }
 
+// A Remote Desktop Gateway is an HTTPS server: the SHA-256 fingerprint ("AB:CD:…") of the certificate it shows.
+// shortcut: no retry for a certificate that only allows RSA key exchange (see rdpFingerprint); add it if a gateway turns up with one.
+// The gateway is dialled by address, as guacd will dial it (see openRemote), so both are shown the same certificate:
+// a server with several picks one by the name it is asked for, and an address is no name.
+async function tlsFingerprint(host, port) {
+  const address = await resolveHost(host);
+  return new Promise((resolve, reject) => {
+    const t = tls.connect({ host: address, port, rejectUnauthorized: false }, () => {
+      const fingerprint = t.getPeerCertificate().fingerprint256;
+      t.destroy();
+      fingerprint ? resolve(fingerprint) : reject(new Error(`${host} sent no certificate`));
+    });
+    const fail = (msg) => { t.destroy(); reject(new Error(msg)); }; // no-op once resolved
+    t.setTimeout(10000, () => fail(`${host}:${port} did not answer in time`));
+    t.once('error', (e) => fail(`${host}:${port}: ${e.message}`));
+  });
+}
+
 // cert: required for RDP (the result of rdpFingerprint), ignored for VNC.
 // share: the folders to show the RDP server as a drive (see shareName), already checked and agreed to. VNC has no drives.
-async function openRemote(conn, password, cert, share) {
+// gateway: for an RDP connection that goes through one, { fingerprint: of the gateway's certificate, password }.
+async function openRemote(conn, password, cert, share, { gateway } = {}) {
   if (conn.protocol !== 'rdp') share = null;
   conn = { ...conn }; // as it is now: a change made while Docker starts must not reach a session already agreed to
   let guacdPort; // guacamole-lite reads this from the token and calls net.connect(guacdPort, host), which takes a socket path too
@@ -482,8 +501,10 @@ async function openRemote(conn, password, cert, share) {
       guacdPort = await ensureGuacd();
     }
     const port = await ensureBridge();
-    const host = await resolveHost(conn.host);
-    const token = encryptToken({ once: ticket(release), connection: { type: conn.protocol, settings: remoteSettings({ ...conn, host }, password, cert, share), ...(guacdPort && { guacdPort }) } });
+    // Behind a gateway the server's name is the gateway's to look up: it may mean nothing out here.
+    // The gateway's own name is looked up here like any server's: guacd, in Docker, may not see /etc/hosts or a VPN's DNS.
+    const names = gateway ? { gatewayHost: await resolveHost(conn.gatewayHost) } : { host: await resolveHost(conn.host) };
+    const token = encryptToken({ once: ticket(release), connection: { type: conn.protocol, settings: remoteSettings({ ...conn, ...names }, password, cert, share, { gateway }), ...(guacdPort && { guacdPort }) } });
     return `ws://127.0.0.1:${port}/?token=${encodeURIComponent(token)}`;
   } catch (e) {
     release?.(); // no token was made, so nothing else would let go
@@ -503,7 +524,7 @@ async function resolveHost(host) {
 }
 
 // The guacd connection parameters for one RDP or VNC connection.
-function remoteSettings(conn, password, cert, share) {
+function remoteSettings(conn, password, cert, share, { gateway } = {}) {
   const settings = { hostname: conn.host, port: String(conn.port || (conn.protocol === 'rdp' ? 3389 : 5900)), password: password || '' };
   if (conn.protocol === 'rdp') {
     Object.assign(settings, {
@@ -512,10 +533,17 @@ function remoteSettings(conn, password, cert, share) {
       // impostor fall back to legacy RDP (no certificate) and slip past the pinned fingerprint.
       security: cert.nla ? 'nla' : 'tls',
       // Accept exactly this certificate, self-signed or not; anything else is refused by FreeRDP in guacd.
-      'cert-fingerprints': `sha256:${cert.fingerprint}`,
+      // Through a gateway guacd makes two TLS connections, to the gateway and (inside the tunnel) to the server,
+      // and checks both against this one list: the server's certificate as the user wrote it down, the
+      // gateway's as read a moment ago.
+      'cert-fingerprints': [cert, gateway].filter(Boolean).map((c) => `sha256:${c.fingerprint}`).join(','),
       'resize-method': 'display-update',
     });
     if (conn.adminSession) settings.console = 'true'; // the server's console / admin session, like mstsc /admin
+    if (gateway) Object.assign(settings, {
+      'gateway-hostname': conn.gatewayHost, 'gateway-port': String(gatewayPort(conn)),
+      'gateway-username': conn.gatewayUsername || '', 'gateway-domain': conn.gatewayDomain || '', 'gateway-password': gateway.password || '',
+    });
     // The shared folder as a drive: "Shared on banana-phone" in Explorer, \\tsclient\Shared in a path. Several folders are folders in that one drive.
     if (share) Object.assign(settings, { 'enable-drive': 'true', 'drive-path': DRIVE, 'drive-name': 'Shared', 'client-name': 'banana-phone', ...NO_TRANSFER });
   } else if (conn.username) settings.username = conn.username;
@@ -549,4 +577,4 @@ function stopGuacd() {
 }
 
 // ensureBridge is here for guacd.test.js alone, which sends a page's messages through the real bridge to see what comes out.
-module.exports = { openRemote, remoteSettings, resolveHost, rdpFingerprint, stopGuacd, encryptToken, key, guacdTooOld, localGuacdArgs, shareRunArgs, shareName, shareNet, shareBlocker, ensureShare, sweep, verifyClient, ticket, ensureBridge };
+module.exports = { openRemote, remoteSettings, resolveHost, rdpFingerprint, tlsFingerprint, stopGuacd, encryptToken, key, guacdTooOld, localGuacdArgs, shareRunArgs, shareName, shareNet, shareBlocker, ensureShare, sweep, verifyClient, ticket, ensureBridge };

@@ -3,7 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-const { ICONS, inFolder, parentOf, matches, account, clipboardWord } = require('./renderer/shared.mjs');
+const { ICONS, inFolder, parentOf, matches, account, clipboardWord, gatewayPort, gatewayWho } = require('./renderer/shared.mjs');
 
 // `ordered`: array order is the order the user chose. Only files from before drag-to-reorder lack it.
 const empty = () => ({ ordered: true, folders: [], folderIcons: {}, connections: [] });
@@ -118,10 +118,25 @@ function select(data, filter) {
   });
 }
 
+// An RDP connection may go through a Remote Desktop Gateway. These are kept only while it names one.
+// GATEWAY_ID is what says which gateway, which account there and which server behind it; the password is the rest.
+const GATEWAY_ID = ['gatewayHost', 'gatewayPort', 'gatewayUsername', 'gatewayDomain', 'serverFingerprint'];
+const GATEWAY = [...GATEWAY_ID, 'gatewayPassword'];
+
+// A SHA-256 certificate fingerprint as a person pastes it (colons, spaces, either case, a "sha256:" in
+// front), as it is kept: "AB:CD:…". Nothing given is none; anything else that is not one is refused.
+function fingerprint(s) {
+  if (s == null || s === '') return undefined;
+  const hex = String(s).replace(/^\s*sha-?256\s*:?/i, '').replace(/[\s:]/g, '');
+  if (!/^[0-9a-f]{64}$/i.test(hex)) throw new Error("The server's fingerprint must be the SHA-256 of its certificate: 64 letters and digits (0-9, A-F). Windows shows a shorter SHA-1 \"thumbprint\", which is not it.");
+  return hex.toUpperCase().match(/../g).join(':');
+}
+
 // What the user's agreement to shared folders (shareOk) was about, as far as the store can see: change
 // any of it and the agreement is gone for good, so changing it back does not bring an old one back.
 // (main.js's share.approvalOf adds the server's certificate.)
-const agreedTo = (c) => JSON.stringify([(c.shares || []).map((s) => [s.path, s.writable === true]), c.protocol, c.host, c.port || null, c.username || '', c.domain || '', c.adminSession === true]);
+const agreedTo = (c) => JSON.stringify([(c.shares || []).map((s) => [s.path, s.writable === true]), c.protocol, c.host, c.port || null, c.username || '', c.domain || '', c.adminSession === true,
+  ...GATEWAY_ID.map((k) => (k === 'gatewayPort' ? gatewayPort(c) : c[k] || ''))]); // no port said and 443 are one gateway
 
 // patch keys: username, domain, password (already encrypted). Undefined keys are left alone.
 function bulkUpdate(data, filter, patch) {
@@ -151,10 +166,16 @@ function upsert(data, input) {
   }
   // Clipboard sharing (RDP and VNC) comes from the page too: one of the known words, and anything else shares nothing.
   if (conn.clipboard !== undefined) conn.clipboard = clipboardWord(conn.clipboard); // undefined = keep what is saved
-  if (copyPasswordFrom && !conn.id && conn.password === undefined) { // new connections only
+  // So does the gateway: text or nothing, a port that is one, and the server's fingerprint in one form.
+  for (const k of ['gatewayHost', 'gatewayUsername', 'gatewayDomain']) if (conn[k] !== undefined) conn[k] = typeof conn[k] === 'string' ? conn[k].trim() : '';
+  if (conn.gatewayPort !== undefined) conn.gatewayPort = Number.isInteger(conn.gatewayPort) && conn.gatewayPort > 0 && conn.gatewayPort < 65536 ? conn.gatewayPort : undefined;
+  if (conn.serverFingerprint !== undefined) conn.serverFingerprint = fingerprint(conn.serverFingerprint);
+  if (copyPasswordFrom && !conn.id) { // new connections only
     const src = data.connections.find((c) => c.id === copyPasswordFrom);
     // Copied still encrypted, never decrypted on the way, and only to the server and account it was saved for.
-    if (src?.password && account(src) === account(conn)) conn.password = src.password;
+    if (src?.password && conn.password === undefined && account(src) === account(conn)) conn.password = src.password;
+    // The gateway's goes along only to the same gateway and account: a copy pointed elsewhere must not take it there.
+    if (src?.gatewayPassword && conn.gatewayPassword === undefined && gatewayWho(conn) === gatewayWho(src)) conn.gatewayPassword = src.gatewayPassword;
   }
   if (!conn.id) conn.id = crypto.randomUUID();
   const i = data.connections.findIndex((c) => c.id === conn.id);
@@ -169,6 +190,10 @@ function upsert(data, input) {
   // connection to another: neither the saved password (unless one came with this save, for the new server:
   // it must never be sent to a server of the page's choosing) nor the user's agreement to its shared folders.
   if (old && conn.password === undefined && account(saved) !== account(old)) delete saved.password;
+  // The same for the gateway's password: given for one gateway and one account there (gatewayWho).
+  if (old && conn.gatewayPassword === undefined && gatewayWho(saved) !== gatewayWho(old)) delete saved.gatewayPassword;
+  // A gateway is kept only on RDP while one is named. Without one, nothing of it is kept: not its password, not the fingerprint.
+  if (saved.protocol !== 'rdp' || !saved.gatewayHost) for (const k of GATEWAY) delete saved[k];
   if (!saved.shares || agreedTo(saved) !== was) delete saved.shareOk;
   fillFolders(data);
   return conn;
@@ -178,4 +203,4 @@ function remove(data, id) {
   data.connections = data.connections.filter((c) => c.id !== id);
 }
 
-module.exports = { load, save, matches, select, bulkUpdate, upsert, remove, addFolder, removeFolder, moveConn, moveFolder, setFolderIcon };
+module.exports = { load, save, matches, select, fingerprint, gatewayPort, bulkUpdate, upsert, remove, addFolder, removeFolder, moveConn, moveFolder, setFolderIcon };

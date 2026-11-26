@@ -32,3 +32,8 @@ const CLIPBOARD = { both: [true, true], toRemote: [true, false], fromRemote: [fa
 // The word to go by. Never set (a connection saved before the choice existed): both ways. Anything else unknown: off.
 export const clipboardWord = (mode) => (mode === undefined ? 'both' : typeof mode === 'string' && Object.hasOwn(CLIPBOARD, mode) ? mode : 'off');
 export const clipboardWays = (mode) => { const [toRemote, fromRemote] = CLIPBOARD[clipboardWord(mode)]; return { toRemote, fromRemote }; };
+// A Remote Desktop Gateway is an HTTPS server: 443 unless the connection says otherwise. The one place that says so.
+export const gatewayPort = (c) => Number(c.gatewayPort) || 443;
+// Where a gateway's saved password goes: the gateway and the name it is sent with. The store keeps the
+// password only while these stay the same, and the edit dialog says so while you type.
+export const gatewayWho = (c) => JSON.stringify([c.gatewayHost || '', gatewayPort(c), c.gatewayUsername || '']);
