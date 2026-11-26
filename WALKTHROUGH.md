@@ -77,6 +77,7 @@ banana-phone/
 ├── store.test.js       tests for store.js
 ├── guacd.test.js       tests for tokens, the RDP identity check and shared folders' containers
 ├── share.test.js       tests for share.js
+├── layout.test.js      tests for renderer/layout.mjs
 ├── scripts/
 │   ├── check-walkthrough.js   CI check that this document matches the code
 │   ├── ui.e2e.js       end-to-end test: drives the real app's window (tabs, splits, dialogs)
@@ -98,6 +99,7 @@ banana-phone/
     ├── app.js          all interface behaviour
     ├── clipboard.js    copy/paste between this computer and remote desktops
     ├── shared.mjs      pure helpers both sides use: fruit list, folder paths, search rule
+    ├── layout.mjs      the split tree: how a tab's panes are arranged (pure logic)
     ├── icon.png        window icon
     ├── fonts/          Fredoka (headings) and Nunito (text)
     └── svg/            fruit icons
@@ -115,7 +117,7 @@ electron .  ──▶ main.js ──require──▶ store.js ──require─�
                                      ├─ <link> fruit.css, xterm.css
                                      └─ <script type="module"> app.js
                                               └─ import xterm, addon-fit, guacamole-common-js,
-                                                        clipboard.js, shared.mjs
+                                                        clipboard.js, shared.mjs, layout.mjs
 ```
 
 `shared.mjs` is the one file both sides load. It holds small pure helpers, `FRUITS` (the fruit pictures), `ICONS` (what a folder icon may be: `crate` plus `FRUITS`), `inFolder` and `parentOf` (the folder-path rules), `account` (which server and account a saved password is for), `matches` (the search rule) and `sharingText` (what the page says when a session shares a folder, [§8](#shared-folders-which-folders-and-who-agrees)), so there is one copy of each instead of one in the store and another in the page that could quietly drift apart. The page imports it as an ES module; `store.js` loads it with plain `require()`, which recent Node and Electron allow for an ES module with no top-level `await`.
@@ -1860,18 +1862,19 @@ The colours come from the same palette as fruit-fs, defined once as **custom pro
 * Everything else uses `var(--orange)` etc., so switching theme only means switching these values.
 * The `@media` block follows your system's light/dark setting. The ◐ button sets `data-theme="light"` or `"dark"` on `<html>`, which wins over the system setting through the `:not([data-theme="light"])` and `[data-theme="dark"]` selectors.
 
-The split layouts are pure CSS, driven by one class on each tab's container:
+Splits are boxes inside boxes. Each tab has one `.split` container; inside it, every split of the tab's layout tree (see [§10](#tabs-and-panes-the-data-model)) is a `.node` box holding panes, gutters and further `.node` boxes:
 
 ```css example
-.split       { position: absolute; inset: 0; display: flex; padding: 6px; }  /* h: side by side */
-.split.v     { flex-direction: column; }                                       /* v: stacked */
-.split.grid  { display: grid; grid-template-columns: 1fr 1fr; grid-auto-rows: 1fr; gap: 6px; }
-.pane        { flex: 1 1 0; min-width: 0; min-height: 0; … }
+.split   { position: absolute; inset: 0; display: flex; padding: 6px; }
+.node    { flex: 1 1 4px; min-width: 0; min-height: 0; display: flex; }   /* h: children side by side */
+.node.v  { flex-direction: column; }                                      /* v: children stacked */
+.pane    { flex: 1 1 0; min-width: 0; min-height: 0; … }
 ```
 
-* **Flexbox** (`display: flex`) lays children in a row (or a column with `flex-direction: column`). `flex: 1 1 0` means "start from zero size and share the free space equally". The gutter drag changes a pane's `flex-grow` to give it a bigger share.
+* **Flexbox** (`display: flex`) lays children in a row (or a column with `flex-direction: column`). `flex: 1 1 0` means "start from zero size and share the free space equally". The page sets each child's `flex-grow` from the tree, and a gutter drag changes it to give that child a bigger share.
 * `min-width: 0` matters: by default a flex item will not shrink below its content's size, which would stop terminals from getting narrower.
-* **CSS grid** with `grid-template-columns: 1fr 1fr` makes two equal columns (`fr` = "fraction of free space"); `grid-auto-rows: 1fr` makes rows equal height. Four panes fill a 2×2 grid, three panes fill three cells.
+* A `.node` starts from `4px`, not `0`. A pane has a 2 px border on each side, which the browser adds on top of its share; a nested split has no border, so it is given the same 4 px head start. Without it, a pane would change size by a few pixels whenever its neighbour was split.
+* A grid is not special: it is a column of rows (a `v` box holding `h` boxes), so its gutters can be dragged like any other.
 
 The whole sidebar can be collapsed with the ☰ button or **Ctrl+B**, which gives the sessions the full width:
 
@@ -1992,6 +1995,7 @@ import { FitAddon } from '../node_modules/@xterm/addon-fit/lib/addon-fit.mjs';
 import Guacamole from '../node_modules/guacamole-common-js/dist/esm/guacamole-common.js';
 import { shareClipboard, clean } from './clipboard.js';
 import { FRUITS, ICONS, inFolder, parentOf, matches, sharingText, account } from './shared.mjs';
+import { leaves, preset, kindOf, append, insert, map } from './layout.mjs';
 
 const $ = (s) => document.querySelector(s);
 const el = (tag, props = {}, ...kids) => {
@@ -2004,6 +2008,7 @@ const el = (tag, props = {}, ...kids) => {
 * `import { Terminal } from '…'` is ES-module syntax: take the export named `Terminal`. `import Guacamole from '…'` takes the module's **default** export.
 * There is no bundler (webpack, vite…). The page imports the libraries' ready-made ES-module files straight from `node_modules`, which keeps the build to zero steps.
 * `./shared.mjs` is the helper file `store.js` also loads (see [§2](#2-the-files-and-how-they-fit-together)), so the page and the store agree on folder paths, search and the fruit list by construction.
+* `./layout.mjs` holds the split tree: the arrangement of a tab's panes (see [Tabs and panes](#tabs-and-panes-the-data-model)).
 * `$` is a short alias for `document.querySelector`.
 * `el('div', { className: 'pane' }, child1, child2)` creates an element, copies properties onto it, and appends children. `...kids` is a **rest parameter**: it collects all remaining arguments into an array.
 
@@ -2121,32 +2126,90 @@ sIn.onkeydown = (e) => {
 ### Tabs and panes: the data model
 
 ```js
-// tab  = { id, layout: 'h'|'v'|'grid', panes: [pane], active: pane, root: <div.split>, name? }
+// tab  = { id, tree, panes: [pane], active: pane, root: <div.split>, name? }
+//        tree: how the panes are arranged (see layout.mjs). panes: the tree's panes in reading order.
 // pane = { id, title, protocol, connId, root, body, term?, fit?, sid?, guac?, dispose() }
 const tabs = [];
 let current = null;
 ```
 
-The model is deliberately small:
+* A **tab** holds up to 8 panes (`MAX_PANES`) and a **tree** that says how they are arranged. Its `root` is one `<div class="split">` inside `#stage`. Only the current tab's root is visible (`hidden` on the others).
+* A **pane** is one session. Its `root` element is created once and then only ever *moved* with `append`/`replaceChildren`. Moving a DOM element keeps its state, so a running terminal or remote desktop survives being dragged into another tab or rearranged.
 
-* A **tab** is a list of up to 4 panes plus a layout name. Its `root` is one `<div class="split">` inside `#stage`. Only the current tab's root is visible (`hidden` on the others).
-* A **pane** is one session. Its `root` element is created once and then only ever *moved* between tabs with `appendChild`/`replaceChildren`. Moving a DOM element keeps its state, so a running terminal or remote desktop survives being dragged into another tab or switched from split to grid.
+**The split tree** lives in `renderer/layout.mjs`. It is plain data, with no DOM in it, which is why `layout.test.js` can check it without a window:
+
+```js example
+node = { pane }                                             // a leaf: one session
+     | { dir: 'h' | 'v', children: [node, node, …], sizes: [1, 1, …] }   // a split
+```
+
+A split puts its children side by side (`h`) or one above the other (`v`). A child can itself be a split, and that is all "nested" means: the right half of a side-by-side view can be a `v` split of two more panes. `sizes` holds each child's share of the space. The module has six small functions:
+
+```js
+export const leaves = (n) => (!n ? [] : n.pane ? [n.pane] : n.children.flatMap(leaves));
+```
+
+* `leaves(tree)` lists the panes in reading order. It calls itself for each child (recursion, as in `treeOrder` below). The tab's `panes` list is always `leaves(tree)`, so everything that only needs "the panes of this tab" (the title, the group chip, Ctrl+Alt+Arrow) did not have to change.
+* `preset(panes, layout)` builds the tree for a toolbar button: `h` is one row, `v` one column, and `grid` a column of rows of equal length, as near to square as it can: 2 + 2 for four panes, 3 + 3 + 2 for eight.
+* `kindOf(tree)` names the arrangement: `h`, `v` or `grid` if the tree has exactly the shape `preset` would build for those panes, and `custom` for anything else. Nothing stores the name; it is read off the tree each time, so it cannot be out of date. The toolbar lights the matching button, and a grid that has lost a pane and is no longer a grid stops being called one.
+* `append(tree, pane, dir)` adds one pane at the end of a row or column. The others keep their sizes, so a gutter you dragged stays where you left it.
+* `insert(tree, pane, beside, dir)` splits one pane: the leaf `beside` is replaced by a split holding it and the new pane. If `beside` already sits in a split of that direction, the new pane becomes one more child there and takes half of `beside`'s share, so splitting right twice gives three panes in a row and not a split inside a split.
+* `map(tree, f)` copies the tree, swapping each pane for `f(pane)`. A pane `f` returns nothing for is left out, and a split left with one child is replaced by that child:
+
+```js
+  return children.length > 1 ? { dir: n.dir, children, sizes: n.sizes.filter((_, i) => kids[i]) } : children[0] || null;
+```
+
+Closing a pane and duplicating a tab are both `map`: the first leaves one pane out, the second swaps every pane for its copy.
+
+`app.js` changes a tab's tree only through `setTree`, so the tree and the list cannot drift apart. Adding and removing a pane are the two functions under it:
+
+```js
+function setTree(t, tree) { t.tree = tree; t.panes = leaves(tree); }
+function addPane(t, p, beside, dir) {
+  const kind = kindOf(t.tree);
+  if (!t.panes.includes(beside)) beside = null;
+  if (!beside && kind === 'custom') { // hand-made: split the active pane across its longer side
+    beside = t.active;
+    const { offsetWidth: w, offsetHeight: h } = beside.root;
+    dir = h > w ? 'v' : 'h'; // a hidden tab measures 0 by 0, so there it is always side by side
+  }
+  setTree(t, beside ? insert(t.tree, p, beside, dir)
+    : kind === 'v' || t.panes.length < 2 ? append(t.tree, p, kind) // one more in the row or column; dragged sizes stay
+    : preset([...t.panes, p], 'grid')); // a third pane side by side would be narrow, and a grid's rows change length
+  t.active = p;
+}
+function removePane(t, p) {
+  setTree(t, map(t.tree, (x) => x !== p && x));
+  if (t.active === p) t.active = t.panes[0] || null;
+}
+```
+
+* `addPane` is the one place that decides where a new pane goes, so every way of adding one (Shift+open, Split all, a pane dragged onto a tab) follows the same rules. It asks `kindOf` what the tab looks like now:
+  * **Split right / Split down** name the pane to split (`beside`), and that wins.
+  * A **hand-made** tab (`custom`) is only ever edited, never rebuilt, so your arrangement is kept: the new pane splits the active pane, across whichever side is longer. A tab that is not showing has no size to measure, so there it goes side by side.
+  * A **column** (`v`), or a tab with one pane, gets one more pane at the end with `append`, and dragged sizes stay.
+  * A **row** that would get a third pane becomes a grid, and a **grid** is rebuilt as a grid, because its rows change length. These two start again from equal sizes.
+* `removePane` keeps everyone else's place and size.
+
+Drawing the tree is one more recursive function:
 
 ```js
 function layout(t) {
   const single = t.panes.length === 1;
-  t.root.className = 'split ' + (single ? 'single' : t.layout);
-  const kids = [];
-  t.panes.forEach((p, i) => {
-    if (i > 0) kids.push(gutter(t, i));
-    p.root.classList.toggle('active', p === t.active && !single);
-    kids.push(p.root);
-  });
-  t.root.replaceChildren(...kids);
+  t.root.className = 'split ' + (single ? 'single' : kindOf(t.tree));
+  for (const p of t.panes) p.root.classList.toggle('active', p === t.active && !single);
+  t.root.replaceChildren(...(t.tree ? [draw(t.tree)] : []));
+}
+// A pane draws as itself; a split as a flex box of its children with a gutter between each pair.
+function draw(n, grow = '') {
+  const box = n.pane ? n.pane.root : el('div', { className: 'node ' + n.dir }, ...n.children.flatMap((c, i) => [i ? gutter(n, i) : null, draw(c, n.sizes[i])]));
+  box.style.flexGrow = grow;
+  return box;
 }
 ```
 
-That is the entire layout engine: set a class (`h`, `v`, `grid` or `single`) and put the panes in order with a gutter between neighbours. CSS does the rest.
+That is the entire layout engine. A leaf draws as the pane's own element; a split draws as a `.node` box containing whatever its children draw, with a gutter in front of every child but the first (`el` drops the `null`). Each child gets its share from `sizes` as `flex-grow`, and CSS does the rest. The class on the tab's root (`h`, `v`, `grid`, `custom` or `single`) no longer arranges anything; `single` hides the pane header and border, and the others just say what the tab is showing.
 
 **Tab groups.** Each pane remembers which saved connection it came from (`p.connId`). `groupOf(t)` turns a tab into its group by looking those up in the current `view`:
 
@@ -2176,16 +2239,18 @@ How the user's actions map onto it:
 | Action | What the code does |
 | --- | --- |
 | Double-click / Enter | `connect(id)` → new tab with one pane |
-| Shift + double-click / Shift+Enter | `connect(id, true)` → add pane to current tab (switches to grid at 3+) |
-| ◫ ⬒ ⊞ buttons | set `current.layout` to `h`, `v` or `grid`, then `render()` |
-| **Split all** | `movePane` every open pane into the current tab (up to 4) |
+| Shift + double-click / Shift+Enter | `connect(id, true)` → add pane to current tab (side by side switches to grid at 3+; a hand-made layout splits the active pane). A full tab (8) sends it to a new tab |
+| ◫ ⬒ ⊞ buttons | `setLayout(current, …)`: rebuild the tree with `preset` as `h`, `v` or `grid`, with equal sizes, then `render()` |
+| Right-click a pane header → **Split right** / **Split down** | `connect(p.connId, true, null, undefined, { beside: p, dir })` → another session of the same connection, inside that pane's space. Left out when the tab is full or the connection was deleted |
+| × on a pane | `closePane(p)` → `removePane`: a split left with one child collapses into it |
+| **Split all** | `movePane` every open pane into the current tab (up to 8) |
 | **Tab all** | `movePane(p, null)` for every pane but the first: each gets a new tab |
 | **Full screen current** (Ctrl+Alt+F) | `setFull(current.active)`: adds `.full` to the active pane (`position: fixed; inset: 0`, header hidden) and calls `window.bp.fullScreen(true)`; the pane stays in the DOM. A faint banana at top centre reveals **Minimize** (`window.bp.minimize()`) and **Back to tab** (`setFull(null)`), plus **Ctrl+Alt+Del** when the pane is a remote desktop (see [Remote desktop panes](#remote-desktop-panes-guacamole)). It also leaves when the pane closes or its session ends, and when the window leaves full screen by itself (see below) |
 | ⇱ on a pane / drag a pane header onto the tab bar | `movePane(p, null)` → its own tab |
 | Drag a pane header onto another tab | `movePane(p, thatTab)` → joins that tab's split |
-| Folder menu → Open all in split | opens up to 4 connections of that folder in one tab |
+| Folder menu → Open all in split | opens up to 8 connections of that folder in one tab |
 | Right-click a tab | `tabMenu(e, t)`: see below |
-| Ctrl+Alt+Arrow | move focus between panes in the tab |
+| Ctrl+Alt+Arrow | move focus to the next / previous pane in the tab, in reading order |
 | Ctrl+Tab / Ctrl+Shift+Tab | next / previous tab |
 | Ctrl+Shift+C / Ctrl+Shift+V in a terminal | copy selection / paste |
 
@@ -2198,7 +2263,7 @@ How the user's actions map onto it:
 `flatMap` turns the list of sections into one flat list of rows, putting a `'-'` (separator) in front of every section but the first.
 
 * **Rename…** sets `t.name`; `tabTitle(t)` shows it instead of the automatic title. The box starts with the tab's own name, or empty, so pressing Enter on an unnamed tab doesn't freeze its automatic title; leaving it empty goes back to automatic. Names are not saved between launches.
-* **Duplicate** is `copyTab(t)`: a new tab with the same layout and name, calling `connect(p.connId, false, t2)` for each pane. `connect` takes an optional third argument, the tab to open into.
+* **Duplicate** is `copyTab(t)`: a new tab with the same name, calling `connect(p.connId, false, t2)` for each pane (`connect` takes an optional third argument, the tab to open into) and noting which new pane stands for which old one. It then gives the new tab `map(t.tree, …)`: the old tree with every pane swapped for its copy, so nested splits and dragged sizes come along. A pane whose connection was deleted has no copy and is left out.
 * **Reconnect** makes the same copy, moves it into the old tab's place in `tabs`, then closes the old tab, which ends its sessions. A session whose saved connection was deleted can't be opened again, so it is moved into the new tab still running (with a toast saying so) instead of being closed.
 * **Close other tabs** / **Close tabs to the right** / **Close tab** call `closeTab` on each.
 
@@ -2241,21 +2306,21 @@ function fsControls() { // what sits under the banana is read from the full-scre
 ### The draggable gutter
 
 ```js
-function gutter(t, i) {
+function gutter(n, i) {
   const g = el('div', { className: 'gutter' });
   g.onpointerdown = (e) => {
-    const a = t.panes[i - 1].root, b = t.panes[i].root;
-    const horiz = t.layout === 'h';
+    const a = g.previousElementSibling, b = g.nextElementSibling;
+    const horiz = n.dir === 'h';
     const size = (n) => (horiz ? n.getBoundingClientRect().width : n.getBoundingClientRect().height);
     const total = size(a) + size(b);
     const start = horiz ? e.clientX : e.clientY;
     const sa = size(a);
-    const grow = (Number(a.style.flexGrow) || 1) + (Number(b.style.flexGrow) || 1);
+    const grow = n.sizes[i - 1] + n.sizes[i];
     g.setPointerCapture(e.pointerId);
     g.onpointermove = (m) => {
       const na = Math.max(80, Math.min(total - 80, sa + (horiz ? m.clientX : m.clientY) - start));
-      a.style.flexGrow = (grow * na) / total;
-      b.style.flexGrow = grow - a.style.flexGrow;
+      a.style.flexGrow = n.sizes[i - 1] = (grow * na) / total;
+      b.style.flexGrow = n.sizes[i] = grow - n.sizes[i - 1];
     };
     g.onpointerup = () => { g.onpointermove = null; g.classList.remove('dragging'); };
   };
@@ -2263,21 +2328,21 @@ function gutter(t, i) {
 }
 ```
 
+* A gutter belongs to one split `n` and sits between its children `i - 1` and `i`. Those are simply the elements on either side of it, each a pane or a whole nested split, so one function serves every level of the tree. A gutter deep inside only moves its own two neighbours.
 * **Pointer events** cover mouse, pen and touch with one API. `setPointerCapture` keeps sending `pointermove` to the gutter even when the pointer races over a terminal.
-* The two neighbouring panes share their combined `flex-grow`; dragging just changes how it is split between them. `Math.max(80, Math.min(total - 80, …))` **clamps** the size so neither pane can shrink below 80 px.
+* The two neighbours share their combined `flex-grow`; dragging just changes how it is split between them. The new shares are written to the screen and to `n.sizes` in one go (`a = b = value` assigns both), so the tree remembers them and the next redraw keeps them.
+* `Math.max(80, Math.min(total - 80, …))` **clamps** the size so neither neighbour can shrink below 80 px. That limit is per neighbour: panes inside a nested neighbour can end up smaller.
 
 ### Opening a connection
 
 ```js
-async function connect(connId, split = false, into = null, run) {
+async function connect(connId, split = false, into = null, run, at = {}) {
   const c = connId === 'local' ? { id: 'local', name: 'Terminal', protocol: 'local' } : view.connections.find((x) => x.id === connId);
   if (!c) return;
   const p = makePane(c.name, c.protocol);
   p.connId = c.id;
   let t = into || (split && current && current.panes.length < MAX_PANES ? current : newTab());
-  if (split && t === current && t.layout === 'h' && t.panes.length >= 2) t.layout = 'grid';
-  t.panes.push(p);
-  t.active = p;
+  addPane(t, p, at.beside, at.dir);
   selectTab(t);
   try {
     if (c.protocol === 'rdp' || c.protocol === 'vnc') await openRemote(p, c);
@@ -2287,6 +2352,8 @@ async function connect(connId, split = false, into = null, run) {
   }
 }
 ```
+
+The last parameter, `at`, is where in the tab the pane goes. **Split right** and **Split down** pass `{ beside: pane, dir: 'h' | 'v' }`, naming the pane to split and which way. Everyone else leaves it out; it is then `{}`, and `addPane` places the pane by the tab's layout. `addPane` runs before the first `await`, so the pane is already in its tab when `connect` hands control back; `copyTab` counts on that to learn which new pane it just got.
 
 The pane is shown **first** and filled afterwards, so you see "Connecting to …" with a bobbing banana immediately. Errors from main arrive wrapped as "Error invoking remote method 'session:open': Error: …"; `errText` strips that prefix so you see only the useful part (see [Errors you can see](#errors-you-can-see)).
 
@@ -2665,6 +2732,8 @@ Page updates are not instant, so instead of sleeping for a guessed time the test
 ```
 
 `t.test(name, fn)` inside a test makes **subtests**, so the report shows each step (split, grid, gutter, Tab all, dialogs) as its own pass or fail, while all of them share one running app.
+
+Two subtests are about the split tree. One fills a tab with eight terminals, checks the grid's rows are 3 + 3 + 2, and that a ninth opens a new tab. The other starts from a 2×2 grid and uses a pane header's **Split down** and **Split right**. It measures every pane to see that the new one took half of the split pane's space and nothing else moved, drags the gutter three levels down, splits again with Shift+Terminal, checks that **Duplicate** gives a tab with the same measurements, and closes the extra panes to see the splits collapse back to the 2×2. The tree's own rules (`preset`, `insert`, `map`) are checked without a window in `layout.test.js`, which `npm test` runs.
 
 One subtest is about shared folders. It fills in the edit dialog and checks that the box is shown for RDP only, that the path cannot be typed, that choosing the home folder is refused with the reason in a toast, that a chosen folder is saved by its real path and read-only unless the checkbox is ticked, that **Add a folder** gives a second folder a row and a mode of its own while a row left empty is ignored, that the same folder chosen twice is refused, that ✕ takes a folder out, and that ✕ on the last row removes the share. The system's folder dialog cannot be clicked from DevTools, so the test replaces it: `app.main(expr)` runs an expression in the main process through Node's inspector (`launch` waits for the inspector's address to be printed before it returns), and the test uses it to swap `dialog.showOpenDialog` for a function that answers with the folder the test wants "chosen". It also plays a misbehaving page. It sends `store:save` paths nobody chose (a folder that exists, one that does not, the home folder, `/etc`), alone and in a list beside a folder that was chosen, and checks that all get the very same refusal and nothing is saved; and it sends a made-up `shareOk` and then reads this run's `connections.json` (`app.profile` is the throwaway profile's folder) to see that it never reached the file. A second, short test starts the app with a `connections.json` that already holds a share in the old single-folder form (`launch(saved)` writes it into the profile first) and checks that editing and duplicating that connection save without any choosing, while a path that is not saved is still refused, alone or in a list. The question before sharing is a system dialog too, and is covered by `share.js`'s unit tests and the hand check in `docs/shared-folders-check.md`.
 

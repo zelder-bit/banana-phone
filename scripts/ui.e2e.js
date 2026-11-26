@@ -130,8 +130,8 @@ async function connect(proc, cleanup) {
 
 const SHIFT = 8; // CDP modifier bit
 const count = (sel) => `document.querySelectorAll(${JSON.stringify(sel)}).length`;
-const visiblePanes = 'document.querySelectorAll(".split:not([hidden]) > .pane").length';
-const size = (i, dim) => `document.querySelectorAll(".split:not([hidden]) > .pane")[${i}].getBoundingClientRect().${dim}`;
+const visiblePanes = 'document.querySelectorAll(".split:not([hidden]) .pane").length';
+const size = (i, dim) => `document.querySelectorAll(".split:not([hidden]) .pane")[${i}].getBoundingClientRect().${dim}`;
 
 test('tabs, splits, gutter and dialogs', { timeout: 120000 }, async (t) => {
   const app = await launch();
@@ -149,18 +149,28 @@ test('tabs, splits, gutter and dialogs', { timeout: 120000 }, async (t) => {
     assert.ok(await app.eval('document.querySelector(".split:not([hidden])").classList.contains("grid")'));
   });
 
-  await t.test('a fifth session gets a new tab (4 per tab)', async () => {
+  await t.test('a tab holds eight sessions in a 3+3+2 grid, a ninth gets a new tab', async () => {
+    for (let i = 0; i < 4; i++) await app.click('#new-term', SHIFT);
+    await app.waitFor(`${visiblePanes} === 8 && ${count('.xterm')} === 8`);
+    assert.strictEqual(await app.eval(count('.tab')), 1);
+    assert.strictEqual(await app.eval('[...document.querySelectorAll(".split:not([hidden]) > .node > .node")].map((row) => row.children.length).join()'), '5,5,3'); // panes and the gutters between them
     await app.click('#new-term', SHIFT);
     await app.waitFor(`${count('.tab')} === 2`);
     await app.click('.tab.active .x');
-    await app.waitFor(`${count('.tab')} === 1 && ${visiblePanes} === 4`);
+    await app.waitFor(`${count('.tab')} === 1 && ${visiblePanes} === 8`);
+    // Back to four for the steps below: closing a pane leaves the others where they are.
+    for (let n = 7; n >= 4; n--) {
+      await app.eval('[...document.querySelectorAll(".split:not([hidden]) .pane button[title=Close]")].at(-1).click()');
+      await app.waitFor(`${visiblePanes} === ${n}`);
+    }
+    assert.strictEqual(await app.eval(count('.xterm')), 4);
   });
 
   await t.test('side-by-side gutter drag widens the first pane', async () => {
     await app.click('[data-layout="h"]');
     await app.waitFor('document.querySelector(".split:not([hidden])").classList.contains("h")');
     const before = await app.eval(size(0, 'width'));
-    await app.drag('.split:not([hidden]) > .gutter', 120, 0);
+    await app.drag('.split:not([hidden]) .gutter', 120, 0);
     const after = await app.eval(size(0, 'width'));
     assert.ok(Math.abs(after - before - 120) < 15, `width ${before} -> ${after}, expected about +120`);
   });
@@ -169,9 +179,77 @@ test('tabs, splits, gutter and dialogs', { timeout: 120000 }, async (t) => {
     await app.click('[data-layout="v"]');
     await app.waitFor('document.querySelector(".split:not([hidden])").classList.contains("v")');
     const before = await app.eval(size(0, 'height'));
-    await app.drag('.split:not([hidden]) > .gutter', 0, 60);
+    await app.drag('.split:not([hidden]) .gutter', 0, 60);
     const after = await app.eval(size(0, 'height'));
     assert.ok(Math.abs(after - before - 60) < 15, `height ${before} -> ${after}, expected about +60`);
+    // Adding a session keeps the dragged size: the first pane is still the taller one.
+    await app.click('#new-term', SHIFT);
+    await app.waitFor(`${visiblePanes} === 5 && ${count('.xterm')} === 5`);
+    assert.ok(await app.eval('document.querySelector(".split:not([hidden])").classList.contains("v")'));
+    const [first, second] = [await app.eval(size(0, 'height')), await app.eval(size(1, 'height'))];
+    assert.ok(first - second > 40, `first pane ${first} should still be taller than the second ${second}`);
+    await app.eval('[...document.querySelectorAll(".split:not([hidden]) .pane button[title=Close]")].at(-1).click()');
+    await app.waitFor(`${visiblePanes} === 4`);
+  });
+
+  await t.test('nested splits: split a pane down, then right; inner gutter drag; Shift+open; Duplicate; closing collapses', async () => {
+    // Panes by position in reading order; each as [x, y, width, height], rounded.
+    const rects = async () => JSON.parse(await app.eval(`JSON.stringify([...document.querySelectorAll('.split:not([hidden]) .pane')].map((p) => { const r = p.getBoundingClientRect(); return [r.x, r.y, r.width, r.height].map(Math.round); }))`));
+    const paneMenu = (i, item) => app.eval(`(() => { document.querySelectorAll('.split:not([hidden]) .pane-head')[${i}].dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 50, clientY: 50 }));
+      [...document.querySelectorAll('#menu button')].find((b) => b.textContent === '${item}').click(); })()`);
+    const near = (a, b, what) => assert.ok(Math.abs(a - b) < 3, `${what}: ${a} vs ${b}`);
+    const same = (r, r0, what) => assert.ok(r.every((v, i) => Math.abs(v - r0[i]) < 2), `${what}: ${r} vs ${r0}`); // a pixel of rounding is fine
+    await app.click('[data-layout="grid"]');
+    await app.waitFor('document.querySelector(".split:not([hidden])").classList.contains("grid")');
+    const [a0, b0] = await rects(); // the 2x2 grid: a b / c d
+
+    await paneMenu(1, 'Split down'); // b becomes b over e, inside the top row: a | (b / e)
+    await app.waitFor(`${visiblePanes} === 5 && ${count('.xterm')} === 5`);
+    assert.ok(await app.eval('document.querySelector(".split:not([hidden])").classList.contains("custom")'));
+    assert.strictEqual(await app.eval(count('.layouts .on')), 0, 'no toolbar layout is lit for a hand-made split');
+    let [a, b, e, c] = await rects();
+    same(a, a0, 'the pane beside the split one did not move');
+    near(e[0], b[0], 'e sits under b'); near(e[2], b0[2], 'e is as wide as b was');
+    near(b[3] + e[3] + 6, b0[3], 'b and e share the height b had');
+    near(c[1], a0[1] + a0[3] + 6, 'the bottom row did not move');
+
+    const before = b;
+    await app.drag('.split:not([hidden]) .node .node .node > .gutter', 0, 30); // the gutter between b and e, three levels down
+    [a, b, e, c] = await rects();
+    assert.ok(Math.abs(b[3] - before[3] - 30) < 10, `height ${before[3]} -> ${b[3]}, expected about +30`);
+    near(b[3] + e[3] + 6, b0[3], 'only b and e changed');
+    same(a, a0, 'a is untouched by the inner drag');
+
+    await paneMenu(2, 'Split right'); // e becomes e | f: a | (b / (e | f))
+    await app.waitFor(`${visiblePanes} === 6 && ${count('.xterm')} === 6`);
+    const [, b2, e2, f2] = await rects();
+    same(b2, b, 'the dragged size survived a redraw');
+    near(f2[1], e2[1], 'f is beside e'); near(e2[2] + f2[2] + 6, b2[2], 'e and f share the width e had');
+    near(f2[0], e2[0] + e2[2] + 6, 'f is to the right of e');
+
+    // Shift+open in a hand-made layout splits the active pane (f, wider than tall, so to its right).
+    await app.click('#new-term', SHIFT);
+    await app.waitFor(`${visiblePanes} === 7 && ${count('.xterm')} === 7`);
+    const seven = await rects(), [, , e3, f3, g3] = seven;
+    near(g3[1], f3[1], 'g is beside f'); near(e3[2] + f3[2] + g3[2] + 12, b2[2], 'e, f and g share the width');
+    assert.strictEqual(await app.eval(count('.tab')), 1);
+
+    // Duplicate keeps the arrangement and the dragged sizes.
+    await app.eval(`(() => { document.querySelector('.tab.active').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 50, clientY: 50 }));
+      [...document.querySelectorAll('#menu button')].find((b) => b.textContent === 'Duplicate').click(); })()`);
+    await app.waitFor(`${count('.tab')} === 2 && ${visiblePanes} === 7 && ${count('.xterm')} === 14`);
+    (await rects()).forEach((r, i) => same(r, seven[i], `pane ${i} of the copy`));
+    await app.click('.tab.active .x');
+    await app.waitFor(`${count('.tab')} === 1 && ${visiblePanes} === 7`);
+
+    // Close e, f, then g: each split left with one child collapses, back to the 2x2 arrangement.
+    for (const n of [6, 5, 4]) {
+      await app.eval(`document.querySelectorAll('.split:not([hidden]) .pane button[title=Close]')[2].click()`);
+      await app.waitFor(`${visiblePanes} === ${n}`);
+    }
+    assert.strictEqual(await app.eval(count('.split:not([hidden]) .node .node .node')), 0);
+    assert.ok(await app.eval('document.querySelector(".split:not([hidden])").classList.contains("grid") && document.querySelector("[data-layout=grid]").classList.contains("on")'), 'it is a grid again, and the toolbar says so');
+    assert.deepStrictEqual((await rects()).slice(0, 2), [a0, b0]);
   });
 
   await t.test('Tab all, then Split all', async () => {
@@ -183,7 +261,7 @@ test('tabs, splits, gutter and dialogs', { timeout: 120000 }, async (t) => {
 
   await t.test('Full screen current fills the window, Back to tab restores the split', async () => {
     const rect = 'JSON.stringify(document.querySelector(".pane.full")?.getBoundingClientRect().toJSON())';
-    await app.click('.split:not([hidden]) > .pane ~ .pane');
+    await app.click('.split:not([hidden]) .gutter ~ .pane');
     await app.click('#fullscreen');
     await app.waitFor('!!document.querySelector(".pane.full") && !document.querySelector("#fs-banana").hidden');
     await app.waitFor(`(() => { const r = JSON.parse(${rect}); return r.width === innerWidth && r.height === innerHeight; })()`);
@@ -201,14 +279,16 @@ test('tabs, splits, gutter and dialogs', { timeout: 120000 }, async (t) => {
     await app.eval(`(() => { const s = document.createElement('span'); s.className = 'shared'; s.textContent = 'shared folder: read-only'; s.title = 'Sharing /tmp/x with win.test (read-only)';
       document.querySelector('.pane.active .pane-head .t').after(s); })()`);
     await app.click('#fullscreen');
-    await app.waitFor('!!document.querySelector(".pane.full")');
+    // The window goes full screen too and the banana is centred on it: wait for that before aiming at its buttons.
+    await app.waitFor('!!document.querySelector(".pane.full") && document.querySelector(".pane.full").getBoundingClientRect().width === innerWidth && innerWidth === screen.width');
     await app.mouse('mouseMoved', await app.center('#fs-banana img'));
     assert.deepStrictEqual(JSON.parse(await app.eval(fsShared)), [true, 'shared folder: read-only', 'Sharing /tmp/x with win.test (read-only)']);
     await app.click('#fs-back');
     await app.waitFor('!document.querySelector(".pane.full")');
     await app.eval('document.querySelector(".pane.active .pane-head .shared").remove()');
     await app.click('#fullscreen'); // the same pane, now sharing nothing: no label is left over
-    await app.waitFor('!!document.querySelector(".pane.full")');
+    // The window goes full screen too and the banana is centred on it: wait for that before aiming at its buttons.
+    await app.waitFor('!!document.querySelector(".pane.full") && document.querySelector(".pane.full").getBoundingClientRect().width === innerWidth && innerWidth === screen.width');
     await app.mouse('mouseMoved', await app.center('#fs-banana img'));
     assert.deepStrictEqual(JSON.parse(await app.eval(fsShared)), [false, '', '']);
     await app.click('#fs-back');
@@ -216,7 +296,7 @@ test('tabs, splits, gutter and dialogs', { timeout: 120000 }, async (t) => {
   });
 
   await t.test('the pane button pops a session into its own tab', async () => {
-    await app.click('.split:not([hidden]) > .pane ~ .pane button[title="Own tab"]');
+    await app.click('.split:not([hidden]) .gutter ~ .pane button[title="Own tab"]');
     await app.waitFor(`${count('.tab')} === 2 && ${visiblePanes} === 1`);
   });
 

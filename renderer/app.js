@@ -3,6 +3,7 @@ import { FitAddon } from '../node_modules/@xterm/addon-fit/lib/addon-fit.mjs';
 import Guacamole from '../node_modules/guacamole-common-js/dist/esm/guacamole-common.js';
 import { shareClipboard, clean } from './clipboard.js';
 import { FRUITS, ICONS, inFolder, parentOf, matches, sharingText, account } from './shared.mjs';
+import { leaves, preset, kindOf, append, insert, map } from './layout.mjs';
 
 const $ = (s) => document.querySelector(s);
 const el = (tag, props = {}, ...kids) => {
@@ -12,7 +13,7 @@ const el = (tag, props = {}, ...kids) => {
 };
 const ICON = { ssh: 'banana', rdp: 'orange-slice', vnc: 'grapes', local: 'kiwi' };
 const icon = (p) => el('img', { src: `svg/${ICON[p] || 'lemon'}.svg`, alt: '' });
-const MAX_PANES = 4;
+const MAX_PANES = 8;
 
 let view = { folders: [], folderIcons: {}, connections: [] };
 let selected = null;
@@ -476,7 +477,8 @@ sIn.onkeydown = (e) => {
 };
 
 // ---------------------------------------------------------------- tabs and panes
-// tab  = { id, layout: 'h'|'v'|'grid', panes: [pane], active: pane, root: <div.split>, name? }
+// tab  = { id, tree, panes: [pane], active: pane, root: <div.split>, name? }
+//        tree: how the panes are arranged (see layout.mjs). panes: the tree's panes in reading order.
 // pane = { id, title, protocol, connId, root, body, term?, fit?, sid?, guac?, dispose() }
 
 const tabs = [];
@@ -484,7 +486,7 @@ let current = null;
 const stage = $('#stage');
 
 function newTab() {
-  const t = { id: crypto.randomUUID(), layout: 'h', panes: [], active: null, root: el('div', { className: 'split' }) };
+  const t = { id: crypto.randomUUID(), tree: null, panes: [], active: null, root: el('div', { className: 'split' }) };
   stage.append(t.root);
   tabs.push(t);
   return t;
@@ -526,7 +528,7 @@ function render() {
     return chip ? [chip, tab] : [tab];
   }));
   for (const t of tabs) layout(t);
-  document.querySelectorAll('[data-layout]').forEach((b) => b.classList.toggle('on', current?.layout === b.dataset.layout && current.panes.length > 1));
+  document.querySelectorAll('[data-layout]').forEach((b) => b.classList.toggle('on', current?.panes.length > 1 && kindOf(current.tree) === b.dataset.layout));
 }
 
 // A tab's group: the folder of its sessions ('' = none, e.g. local terminals), or MIXED when they differ.
@@ -542,36 +544,59 @@ const groupChip = (g) => g === MIXED ? el('span', { className: 'tab-group', text
   : !g ? el('span', { className: 'tab-group', textContent: 'No folder', title: 'Local terminals and connections outside any folder' })
   : el('span', { className: 'tab-group', title: g }, el('img', { src: `svg/${view.folderIcons[g] || 'crate'}.svg`, alt: '' }), el('span', { textContent: g.split('/').pop() }));
 
-// Rebuild a tab's split: panes in order with a gutter between each pair.
-function layout(t) {
-  const single = t.panes.length === 1;
-  t.root.className = 'split ' + (single ? 'single' : t.layout);
-  const kids = [];
-  t.panes.forEach((p, i) => {
-    if (i > 0) kids.push(gutter(t, i));
-    p.root.classList.toggle('active', p === t.active && !single);
-    kids.push(p.root);
-  });
-  t.root.replaceChildren(...kids);
+// The only places a tab's panes change, so t.panes always matches the tree.
+function setTree(t, tree) { t.tree = tree; t.panes = leaves(tree); }
+// Add a pane: beside the pane `beside` (to its right for dir 'h', below it for 'v'), or wherever the tab's layout puts it.
+function addPane(t, p, beside, dir) {
+  const kind = kindOf(t.tree);
+  if (!t.panes.includes(beside)) beside = null;
+  if (!beside && kind === 'custom') { // hand-made: split the active pane across its longer side
+    beside = t.active;
+    const { offsetWidth: w, offsetHeight: h } = beside.root;
+    dir = h > w ? 'v' : 'h'; // a hidden tab measures 0 by 0, so there it is always side by side
+  }
+  setTree(t, beside ? insert(t.tree, p, beside, dir)
+    : kind === 'v' || t.panes.length < 2 ? append(t.tree, p, kind) // one more in the row or column; dragged sizes stay
+    : preset([...t.panes, p], 'grid')); // a third pane side by side would be narrow, and a grid's rows change length
+  t.active = p;
+}
+function removePane(t, p) {
+  setTree(t, map(t.tree, (x) => x !== p && x));
+  if (t.active === p) t.active = t.panes[0] || null;
 }
 
-// Drag between two panes to resize them (h / v layouts).
-function gutter(t, i) {
+// Rebuild a tab's split from its tree.
+function layout(t) {
+  const single = t.panes.length === 1;
+  t.root.className = 'split ' + (single ? 'single' : kindOf(t.tree));
+  for (const p of t.panes) p.root.classList.toggle('active', p === t.active && !single);
+  t.root.replaceChildren(...(t.tree ? [draw(t.tree)] : []));
+}
+// A pane draws as itself; a split as a flex box of its children with a gutter between each pair.
+function draw(n, grow = '') {
+  const box = n.pane ? n.pane.root : el('div', { className: 'node ' + n.dir }, ...n.children.flatMap((c, i) => [i ? gutter(n, i) : null, draw(c, n.sizes[i])]));
+  box.style.flexGrow = grow;
+  return box;
+}
+
+// Drag between two children of a split to resize them; the tree remembers the sizes.
+// shortcut: the 80 px minimum is per child, so panes inside a nested child can get smaller; enforce it per pane if that bites.
+function gutter(n, i) {
   const g = el('div', { className: 'gutter' });
   g.onpointerdown = (e) => {
-    const a = t.panes[i - 1].root, b = t.panes[i].root;
-    const horiz = t.layout === 'h';
+    const a = g.previousElementSibling, b = g.nextElementSibling;
+    const horiz = n.dir === 'h';
     const size = (n) => (horiz ? n.getBoundingClientRect().width : n.getBoundingClientRect().height);
     const total = size(a) + size(b);
     const start = horiz ? e.clientX : e.clientY;
     const sa = size(a);
-    const grow = (Number(a.style.flexGrow) || 1) + (Number(b.style.flexGrow) || 1);
+    const grow = n.sizes[i - 1] + n.sizes[i];
     g.setPointerCapture(e.pointerId);
     g.classList.add('dragging');
     g.onpointermove = (m) => {
       const na = Math.max(80, Math.min(total - 80, sa + (horiz ? m.clientX : m.clientY) - start));
-      a.style.flexGrow = (grow * na) / total;
-      b.style.flexGrow = grow - a.style.flexGrow;
+      a.style.flexGrow = n.sizes[i - 1] = (grow * na) / total;
+      b.style.flexGrow = n.sizes[i] = grow - n.sizes[i - 1];
     };
     g.onpointerup = () => { g.onpointermove = null; g.classList.remove('dragging'); };
   };
@@ -581,8 +606,7 @@ function gutter(t, i) {
 const tabTitle = (t) => t.name || (t.panes.length === 1 ? t.panes[0].title : `${t.panes.length} sessions`);
 
 function setLayout(t, l) {
-  t.layout = l;
-  t.panes.forEach((p) => (p.root.style.flexGrow = ''));
+  setTree(t, preset(t.panes, l)); // equal sizes again
   render();
 }
 document.querySelectorAll('[data-layout]').forEach((b) => (b.onclick = () => current && setLayout(current, b.dataset.layout)));
@@ -613,10 +637,12 @@ function tabMenu(e, t) {
 
 // Open the same sessions again in a new tab with the same layout and name. A deleted connection is skipped.
 function copyTab(t) {
-  const t2 = newTab();
-  Object.assign(t2, { layout: t.layout, name: t.name });
-  for (const p of t.panes) connect(p.connId, false, t2);
+  const t2 = newTab(), twin = new Map(); // twin: old pane -> its copy
+  t2.name = t.name;
+  for (const p of t.panes) { const n = t2.panes.length; connect(p.connId, false, t2); if (t2.panes.length > n) twin.set(p, t2.active); }
   if (!t2.panes.length) { dropTab(t2); selectTab(current); return null; }
+  setTree(t2, map(t.tree, (p) => twin.get(p))); // the same arrangement and sizes
+  render();
   return t2;
 }
 // Reconnect = a fresh copy in this tab's place, then close the old sessions. A session whose connection
@@ -645,10 +671,8 @@ function movePane(p, to) {
   if (from === to) return;
   if (to && to.panes.length >= MAX_PANES) return toast(`A tab holds up to ${MAX_PANES} sessions`);
   to ||= newTab();
-  from.panes.splice(from.panes.indexOf(p), 1);
-  if (from.active === p) from.active = from.panes[0] || null;
-  to.panes.push(p);
-  to.active = p;
+  removePane(from, p);
+  addPane(to, p);
   if (!from.panes.length) dropTab(from);
   selectTab(to);
 }
@@ -662,7 +686,6 @@ const allPanes = () => tabs.flatMap((t) => t.panes);
 
 function mergeInto(t) {
   for (const p of allPanes()) if (!t.panes.includes(p) && t.panes.length < MAX_PANES) movePane(p, t);
-  if (t.layout === 'h' && t.panes.length > 2) t.layout = 'grid';
   selectTab(t);
 }
 function explode(t) {
@@ -706,8 +729,7 @@ function closePane(p) {
   p.dispose();
   const t = tabs.find((x) => x.panes.includes(p));
   if (!t) return;
-  t.panes.splice(t.panes.indexOf(p), 1);
-  if (t.active === p) t.active = t.panes[0] || null;
+  removePane(t, p);
   if (!t.panes.length) dropTab(t);
   selectTab(tabs.includes(current) ? current : tabs.at(-1) || null);
 }
@@ -729,7 +751,10 @@ function makePane(title, protocol) {
     // What this kind of session offers of its own, then what every pane has.
     const own = canCtrlAltDel(p) ? [['Send Ctrl+Alt+Del', () => sendCtrlAltDel(p)]]
       : p.term && !p.ended ? cmdsOf(p.connId).map((x) => [`Run: ${x.name}`, () => { runCmd(p, x.cmd); focusPane(p); }]) : [];
-    menu(e, [...own, ...(own.length ? ['-'] : []), ['Own tab', () => movePane(p, null)], ['Close', () => closePane(p), 'danger']]);
+    // Split right / down: another session of the same connection next to this one, inside this pane's space.
+    const again = (p.connId === 'local' || view.connections.some((c) => c.id === p.connId)) && current.panes.length < MAX_PANES;
+    const splits = again ? [['Split right', () => connect(p.connId, true, null, undefined, { beside: p, dir: 'h' })], ['Split down', () => connect(p.connId, true, null, undefined, { beside: p, dir: 'v' })]] : [];
+    menu(e, [...own, ...(own.length ? ['-'] : []), ...splits, ['Own tab', () => movePane(p, null)], ['Close', () => closePane(p), 'danger']]);
   };
   p.body = el('div', { className: 'pane-body', tabIndex: -1 });
   p.root = el('div', { className: 'pane' }, head, p.body);
@@ -745,16 +770,16 @@ function status(p, text, err = false) {
 }
 
 // Open a connection: new tab, or (split) beside the current tab's sessions, or into tab `into`.
+// `at` says where in the tab: { beside: pane, dir: 'h' | 'v' } splits that pane.
+// The pane is added synchronously, before any await: copyTab reads it from the tab right after calling this.
 // `run`: a saved command to type in once the session is up.
-async function connect(connId, split = false, into = null, run) {
+async function connect(connId, split = false, into = null, run, at = {}) {
   const c = connId === 'local' ? { id: 'local', name: 'Terminal', protocol: 'local' } : view.connections.find((x) => x.id === connId);
   if (!c) return;
   const p = makePane(c.name, c.protocol);
   p.connId = c.id;
   let t = into || (split && current && current.panes.length < MAX_PANES ? current : newTab());
-  if (split && t === current && t.layout === 'h' && t.panes.length >= 2) t.layout = 'grid';
-  t.panes.push(p);
-  t.active = p;
+  addPane(t, p, at.beside, at.dir);
   selectTab(t);
   try {
     if (c.protocol === 'rdp' || c.protocol === 'vnc') await openRemote(p, c);

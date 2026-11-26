@@ -7,7 +7,8 @@ Counts are from `npm test` on 2026-11-25 (42 passed, with `share.test.js`) and f
 |---|---|---|
 | Store | `store.test.js` | 19 |
 | Remote desktop | `guacd.test.js` | 13 |
-| UI end-to-end | `scripts/ui.e2e.js` | 1 test with 17 steps |
+| Split tree | `layout.test.js` | 6 (added with nested splits; not in the counts above) |
+| UI end-to-end | `scripts/ui.e2e.js` | 1 test with 20 steps |
 
 ## How to run
 
@@ -63,9 +64,9 @@ These test the pieces of `guacd.js` that do not need Docker. The RDP tests use a
 | the bridge drops the page's requests for files, however they are cut up, and passes the rest | The page cannot ask guacd for the files in a shared folder or their names: those requests are removed between the page and guacd, also when split across messages, while keys, mouse and clipboard pass unchanged. Checked through the real bridge with a stand-in guacd. |
 | resolveHost looks names up with the system resolver (including /etc/hosts) | Host names are looked up the way the rest of the system does (so `/etc/hosts` entries work for RDP and VNC), and an unknown name gives a clear error. |
 
-## UI end-to-end suite (`scripts/ui.e2e.js`, 1 test, 17 steps)
+## UI end-to-end suite (`scripts/ui.e2e.js`, 1 test, 20 steps)
 
-One test, "tabs, splits, gutter and dialogs", starts the real app with an empty throwaway profile and drives it through the Chrome DevTools Protocol with mouse and keyboard events. The 17 steps run in order and share one app, so a failing step can make later ones fail too.
+One test, "tabs, splits, gutter and dialogs", starts the real app with an empty throwaway profile and drives it through the Chrome DevTools Protocol with mouse and keyboard events. The 20 steps run in order and share one app, so a failing step can make later ones fail too.
 
 All steps use local terminals only. No SSH, RDP or VNC session is opened. The SSH connections the test saves have no host and are never connected to; the saved-commands and tab steps use saved *local terminal* connections.
 
@@ -73,9 +74,10 @@ All steps use local terminals only. No SSH, RDP or VNC session is opened. The SS
 |---|---|
 | terminal opens in its own tab | Clicking Terminal opens one tab with a terminal in it. |
 | Shift+Terminal splits, the third pane switches to a 2x2 grid | Shift+clicking Terminal adds sessions to the same tab, and with four sessions the tab switches to a 2x2 grid. |
-| a fifth session gets a new tab (4 per tab) | A tab holds at most four sessions: a fifth opens a new tab, and the tab's close button closes that tab. |
+| a tab holds eight sessions in a 3+3+2 grid, a ninth gets a new tab | A tab holds at most eight sessions, laid out as rows of 3, 3 and 2: a ninth opens a new tab, and the tab's close button closes that tab. Closing four panes with their Close buttons leaves the other four running. |
 | side-by-side gutter drag widens the first pane | In side-by-side layout, dragging the divider with the mouse widens the first pane by about the distance dragged. |
-| stacked gutter drag makes the first pane taller | In stacked layout, dragging the divider makes the first pane taller by about the distance dragged. |
+| stacked gutter drag makes the first pane taller | In stacked layout, dragging the divider makes the first pane taller by about the distance dragged, and it stays taller when another session is added to the tab. |
+| nested splits: split a pane down, then right; inner gutter drag; Shift+open; Duplicate; closing collapses | From a 2x2 grid, a pane header's "Split down" puts a new session under that pane only, in half its space, and no other pane moves; the gutter inside that nested split resizes just those two; "Split right" on the new pane nests one level deeper and the dragged size is kept; Shift+Terminal then splits the active pane; Duplicate gives a tab with the same arrangement and sizes; closing the extra panes brings back the 2x2. |
 | Tab all, then Split all | "Tab all" gives each session its own tab, and "Split all" gathers them back into one tab. |
 | Full screen current fills the window, Back to tab restores the split | The Full screen button pins the selected pane over the whole window and shows the banana; hovering the banana and clicking "Back to tab" puts the four-pane split back with all terminals still there. |
 | full screen repeats the header's shared-folder label under the banana | A pane whose header carries the "shared folder" label shows the same words and tooltip next to the buttons under the banana in full screen, and a pane without the label shows none. The label is placed on a terminal's header by the test, since no RDP server is available. |
@@ -165,7 +167,7 @@ It says nothing about whether the code works.
 - Delete connection (with its confirm box and the `.bak` it writes): logic tested, UI not.
 - Delete folder: the refusal and its message for a non-empty folder are tested in the UI. Deleting an empty folder: logic tested, UI not.
 - Duplicate: logic tested; in the UI only what happens to the saved password.
-- New subfolder, New connection here, Open all in split (and the "first 4 of N" toast): not tested at all.
+- New subfolder, New connection here, Open all in split (and the "first 8 of N" toast): not tested at all.
 - Editing an existing connection, switching protocol (port placeholder, RDP-only fields), tags, and the admin session box: not tested at all.
 - Connecting by double-click, Enter on a row, or "Connect in new tab" / "Connect in split" from the menu: not tested at all.
 - A corrupt `connections.json` showing an error and refusing to start instead of starting empty: not tested at all (only a missing file is tested).
@@ -178,7 +180,7 @@ It says nothing about whether the code works.
 - Switching tabs by clicking, Ctrl+Tab and Ctrl+Shift+Tab, and middle-click to close a tab: not tested at all.
 - The tab menu's layout rows, "Split all into this tab", "Give each session its own tab" and "Close tabs to the right": not tested at all (the toolbar buttons that do the same are).
 - Ctrl+Shift+T for a new terminal and Ctrl+Alt+Arrow to move between panes: not tested at all.
-- The pane Close button, and closing a pane while it is still connecting: not tested at all.
+- Closing a pane while it is still connecting: not tested at all.
 - The shell environment cleanup when running from the AppImage (AppImage variables and paths removed): not tested at all.
 - Reloading the window ending its shells: not tested at all.
 

@@ -2,13 +2,13 @@
 
 ![A pixel-art banana sitting at a desk, typing at a terminal](renderer/banana-typing.gif)
 
-A small, fruity connection manager for Linux: SSH and local terminals, plus RDP (including Active Directory logins) and VNC desktops, in tabs or split views of up to four sessions. Connections live in a collapsible folder tree, are searchable with Ctrl+K, and their credentials can be bulk-edited by username or by folder.
+A small, fruity connection manager for Linux: SSH and local terminals, plus RDP (including Active Directory logins) and VNC desktops, in tabs or split views of up to eight sessions. Connections live in a collapsible folder tree, are searchable with Ctrl+K, and their credentials can be bulk-edited by username or by folder.
 
 ![banana-phone with four sessions in a 2×2 grid: two SSH servers and two local terminals, next to a folder tree with fruit icons. The juice cup in the top bar is full.](docs/screenshots/main.webp)
 
 ## Features
 
-- **Tabs and splits.** Open sessions in tabs, side by side, stacked, or in a 2×2 grid. Drag the gutter between panes to resize them, drag a pane onto another tab, and pop any session out into its own tab. Tabs are grouped by the folder their connections are in, with the folder's icon and name in front of each group.
+- **Tabs and splits.** Open sessions in tabs, side by side, stacked, or in a grid, up to eight in a tab. Right-click a pane's header → Split right / Split down to split just that pane; splits can be nested. Drag the gutter between panes to resize them, drag a pane onto another tab, and pop any session out into its own tab. Tabs are grouped by the folder their connections are in, with the folder's icon and name in front of each group.
 - **Tab right-click menu.** Rename a tab, duplicate or reconnect it, change its layout, pull every session into it or give each its own tab, and close it, the others, or the ones to its right.
 - **Full screen current.** Ctrl+Alt+F makes the active session fill the whole screen. A faint banana at the top brings back Minimize and Back to tab, and says so if the session shares a folder.
 - **Send Ctrl+Alt+Del.** Your own computer takes that key combination, so for a remote desktop it is an option instead: right-click the session's header, or use the button under the banana in full screen.
