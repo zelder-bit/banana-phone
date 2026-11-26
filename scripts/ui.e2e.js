@@ -19,7 +19,7 @@ async function launch() {
   const exited = new Promise((r) => proc.once('exit', r));
   const cleanup = async () => { proc.kill(); await exited; fs.rmSync(profile, { recursive: true, force: true }); };
   try {
-    return await connect(proc, cleanup);
+    return Object.assign(await connect(proc, cleanup), { profile }); // profile: where this run's connections.json is
   } catch (e) {
     await cleanup(); // never leave the app (or its profile) behind when start-up fails
     throw e;
@@ -372,6 +372,59 @@ test('tabs, splits, gutter and dialogs', { timeout: 120000 }, async (t) => {
     await app.eval(`(() => { ${row}.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 50, clientY: 50 }));
       [...document.querySelectorAll('#menu button')].find((b) => b.textContent === 'Run: answer').click(); })()`);
     await app.waitFor(`${answers} === 2 && document.querySelector('.tab.active .t').textContent === 'cmdbox'`);
+  });
+
+  await t.test('shared folder: RDP only, read-only unless ticked, refused for the home folder, emptied to stop sharing', async () => {
+    // Somewhere that may be shared: outside the home folder, and not the app's own folder (this run's profile).
+    const folder = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'bp-ui-share-')));
+    t.after(() => fs.rmSync(folder, { recursive: true, force: true }));
+    const fill = (fields) => app.eval(`(() => { const f = document.querySelector('#edit-form').elements;
+      for (const [k, v] of Object.entries(${JSON.stringify(fields)})) f[k].value = v;
+      f.protocol.dispatchEvent(new Event('change')); })()`);
+    const boxShown = 'document.querySelector("#edit-dlg .share-box").offsetParent !== null';
+    const winbox = '(async () => JSON.stringify((await window.bp.get()).connections.find((c) => c.name === "winbox") || null))()';
+    const onDisk = () => JSON.parse(fs.readFileSync(path.join(app.profile, 'connections.json'), 'utf8')).connections.find((c) => c.name === 'winbox');
+    const editWinbox = async () => {
+      await app.eval(`(() => { [...document.querySelectorAll('#tree .conn')].find((n) => n.textContent.startsWith('winbox')).dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 50, clientY: 50 }));
+        [...document.querySelectorAll('#menu button')].find((b) => b.textContent === 'Edit…').click(); })()`);
+      await app.waitFor('document.querySelector("#edit-dlg").open');
+    };
+
+    await app.click('#new-conn');
+    await app.waitFor('document.querySelector("#edit-dlg").open');
+    await fill({ name: 'winbox', protocol: 'ssh', host: 'win.test' });
+    assert.ok(!(await app.eval(boxShown)), 'no shared folder box for SSH');
+    await fill({ protocol: 'rdp', sharePath: os.homedir() });
+    assert.ok(await app.eval(boxShown), 'shared folder box shown for RDP');
+    await app.click('#edit-dlg .btn.primary');
+    await app.waitFor(`/cannot be shared: it holds your whole home folder/.test(document.querySelector('#toast').textContent)`);
+    assert.strictEqual(await app.eval(winbox), 'null', 'a connection sharing the home folder is not saved');
+
+    await app.click('#new-conn');
+    await app.waitFor('document.querySelector("#edit-dlg").open');
+    await fill({ name: 'winbox', protocol: 'rdp', host: 'win.test', sharePath: ` ${folder}/ ` });
+    await app.click('#edit-dlg .btn.primary');
+    await app.waitFor(`(async () => (await ${winbox}) !== 'null')()`);
+    assert.deepStrictEqual(JSON.parse(await app.eval(winbox)).share, { path: folder, writable: false }); // tidied to its real path, read-only
+
+    await editWinbox();
+    assert.deepStrictEqual(await app.eval(`(() => { const f = document.querySelector('#edit-form').elements; return [f.sharePath.value, f.shareWritable.checked]; })()`), [folder, false]);
+    await app.click('#edit-form [name=shareWritable]');
+    await app.click('#edit-dlg .btn.primary');
+    await app.waitFor(`(async () => JSON.parse(await ${winbox}).share.writable === true)()`);
+
+    // The page can ask for a share but cannot agree to one: an agreement it sends is not kept, and it is never shown one.
+    const id = onDisk().id;
+    await app.eval(`window.bp.save({ id: ${JSON.stringify(id)}, shareOk: 'f'.repeat(64) })`);
+    assert.ok(!('shareOk' in onDisk()), 'a page-made agreement does not reach the file');
+    assert.ok(!('shareOk' in JSON.parse(await app.eval(winbox))));
+    assert.deepStrictEqual(onDisk().share, { path: folder, writable: true });
+
+    await editWinbox();
+    await fill({ sharePath: '' });
+    await app.click('#edit-dlg .btn.primary');
+    await app.waitFor(`(async () => !('share' in JSON.parse(await ${winbox})))()`);
+    assert.ok(!('share' in onDisk()));
   });
 
   await t.test('the sidebar grip widens the list, collapse still hides it, and the width survives a reload', async () => {
