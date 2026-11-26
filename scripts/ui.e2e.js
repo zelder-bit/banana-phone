@@ -640,6 +640,56 @@ test('tabs, splits, gutter and dialogs', { timeout: 120000 }, async (t) => {
     for (const left of [1, 0]) { await menuOf('Delete'); await app.waitFor(`[...document.querySelectorAll('#tree .conn')].filter((n) => n.textContent.startsWith('pwbox')).length === ${left}`); }
   });
 
+  await t.test('clipboard sharing: a choice for RDP and VNC, saved, shown again, and the page follows it', async () => {
+    const fill = (fields) => app.eval(`(() => { const f = document.querySelector('#edit-form').elements;
+      for (const [k, v] of Object.entries(${JSON.stringify(fields)})) f[k].value = v;
+      f.protocol.dispatchEvent(new Event('change')); })()`);
+    const shown = 'document.querySelector("#edit-form [name=clipboard]").offsetParent !== null';
+    const onDisk = () => JSON.parse(fs.readFileSync(path.join(app.profile, 'connections.json'), 'utf8')).connections.find((c) => c.name === 'clipbox');
+
+    await app.click('#new-conn');
+    await app.waitFor('document.querySelector("#edit-dlg").open');
+    assert.strictEqual(await app.eval('document.querySelector("#edit-form").elements.clipboard.value'), 'both'); // as before the choice existed
+    for (const [protocol, want] of [['ssh', false], ['local', false], ['rdp', true], ['vnc', true]]) {
+      await fill({ protocol });
+      assert.strictEqual(await app.eval(shown), want, protocol);
+    }
+    await fill({ name: 'clipbox', protocol: 'vnc', host: 'clip.test', clipboard: 'toRemote' });
+    await app.click('#edit-dlg .btn.primary');
+    await app.waitFor(`(async () => (await window.bp.get()).connections.some((c) => c.name === 'clipbox' && c.clipboard === 'toRemote'))()`);
+    assert.strictEqual(onDisk().clipboard, 'toRemote');
+
+    await app.eval(`(() => { [...document.querySelectorAll('#tree .conn')].find((n) => n.textContent.startsWith('clipbox')).dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 50, clientY: 50 }));
+      [...document.querySelectorAll('#menu button')].find((b) => b.textContent === 'Edit…').click(); })()`);
+    await app.waitFor('document.querySelector("#edit-dlg").open');
+    assert.strictEqual(await app.eval('document.querySelector("#edit-form").elements.clipboard.value'), 'toRemote');
+    await fill({ clipboard: 'off' });
+    await app.click('#edit-dlg .btn.primary');
+    await app.waitFor(`(async () => (await window.bp.get()).connections.some((c) => c.name === 'clipbox' && c.clipboard === 'off'))()`);
+
+    // The page cannot widen it with a word of its own: main saves that as "not shared".
+    await app.eval(`window.bp.save({ id: ${JSON.stringify(onDisk().id)}, clipboard: 'everything' })`);
+    assert.strictEqual(onDisk().clipboard, 'off');
+
+    // The page's own clipboard code, with a stand-in for the Guacamole client: [took a remote copy, sent the local clipboard].
+    const tried = await app.eval(`(async () => {
+      const { shareClipboard } = await import('./clipboard.js');
+      const out = {};
+      for (const mode of [undefined, 'both', 'toRemote', 'fromRemote', 'off', 'everything']) {
+        let refused = false, sent = false;
+        const stream = { sendAck: () => { refused = true; }, sendBlob() {}, sendEnd() {} };
+        const client = { createClipboardStream: () => { sent = true; return stream; } };
+        const clip = shareClipboard(client, document.createElement('div'), { clipboardRead: async () => 'local text', clipboardWrite() {} }, mode);
+        client.onclipboard(stream, 'text/plain');
+        clip.onConnected();
+        await new Promise((r) => setTimeout(r, 50));
+        out[mode] = [!refused, sent];
+      }
+      return JSON.stringify(out);
+    })()`);
+    assert.deepStrictEqual(JSON.parse(tried), { undefined: [true, true], both: [true, true], toRemote: [false, true], fromRemote: [true, false], off: [false, false], everything: [false, false] });
+  });
+
   await t.test('the sidebar grip widens the list, collapse still hides it, and the width survives a reload', async () => {
     const sideW = 'document.querySelector("#side").getBoundingClientRect().width';
     const before = await app.eval(sideW);

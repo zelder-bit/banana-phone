@@ -69,6 +69,19 @@ test('RDP settings: pinned certificate, and the admin (console) session only whe
   assert.ok(!('console' in remoteSettings({ protocol: 'vnc', host: 'k', adminSession: true }, 'pw')));
 });
 
+test('the clipboard goes only the ways the connection allows, for RDP and VNC, and no way at all for a word not known', () => {
+  const { remoteSettings } = require('./guacd');
+  const cert = { fingerprint: 'AA:BB', nla: true };
+  // [leaves the remote desktop (guacd: copy), reaches it (guacd: paste)]
+  const ways = { both: [true, true], toRemote: [false, true], fromRemote: [true, false], off: [false, false], sideways: [false, false], true: [false, false], constructor: [false, false] };
+  for (const conn of [{ protocol: 'rdp', host: 'dc01' }, { protocol: 'vnc', host: 'k' }]) {
+    for (const [clipboard, want] of [[undefined, [true, true]], ['', [false, false]], [null, [false, false]], [['both'], [false, false]], ...Object.entries(ways)]) {
+      const s = remoteSettings({ ...conn, clipboard }, 'pw', cert);
+      assert.deepStrictEqual([s['disable-copy'] !== 'true', s['disable-paste'] !== 'true'], want, `${conn.protocol} ${clipboard}`);
+    }
+  }
+});
+
 // ---- shared folders ----
 
 // A share as main.js hands it over (see shareName in guacd.js), with one folder in it.

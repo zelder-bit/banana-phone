@@ -311,6 +311,7 @@ function editConn(c = { protocol: 'ssh' }) {
   form.elements.clearPassword.onchange = (e) => { form.elements.password.disabled = e.target.checked; };
   d.dataset.proto = c.protocol || 'ssh';
   form.elements.adminSession.checked = !!c.adminSession;
+  form.elements.clipboard.value = c.clipboard || 'both';
   // One row for each shared folder, and always at least one: an empty row shares nothing.
   const rows = $('#share-rows');
   const shareRow = (s = {}) => {
@@ -348,6 +349,7 @@ function editConn(c = { protocol: 'ssh' }) {
     if (!conn.id) delete conn.id;
     if (conn.folder) { openFolders.add(conn.folder); saveOpen(); }
     conn.adminSession = conn.protocol === 'rdp' && f.adminSession.checked;
+    conn.clipboard = f.clipboard.value; // kept for every type, so a limit survives a change to SSH and back
     // Rows left empty are not folders. No folder at all (or not RDP) = not shared.
     conn.shares = conn.protocol !== 'rdp' ? [] : [...rows.children]
       .map((r) => ({ path: r.querySelector('[name=sharePath]').value, writable: r.querySelector('[name=shareWritable]').checked })).filter((s) => s.path);
@@ -887,7 +889,7 @@ async function openRemote(p, c) {
   ro.observe(p.body);
   display.onresize = fitDisplay;
 
-  const clip = shareClipboard(client, p.body, window.bp);
+  const clip = shareClipboard(client, p.body, window.bp, c.clipboard);
   const fail = (msg) => { p.failed = true; unfull(p); status(p, msg, true); }; // the one way a remote session ends in error
   client.onstatechange = (s) => {
     if (s === 3) { status(p, null); clip.onConnected(); } // CONNECTED

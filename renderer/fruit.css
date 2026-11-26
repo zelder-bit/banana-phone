@@ -182,6 +182,7 @@ dialog::backdrop { background: rgb(30 20 10 / 45%); backdrop-filter: blur(3px); 
 .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 6px; }
 #edit-dlg[data-proto="rdp"] .ssh-only, #edit-dlg[data-proto="vnc"] .ssh-only, #edit-dlg[data-proto="local"] .ssh-only,
 #edit-dlg:not([data-proto="rdp"]) .rdp-only, #edit-dlg[data-proto="local"] .net,
+#edit-dlg[data-proto="ssh"] .remote-only, #edit-dlg[data-proto="local"] .remote-only,
 #edit-dlg[data-proto="rdp"] .term-only, #edit-dlg[data-proto="vnc"] .term-only { display: none; }
 .cmds, .share-box { border: 2px solid var(--line); border-radius: 12px; padding: 6px 12px 10px; margin: 0; display: grid; gap: 8px; }
 .cmds legend, .share-box legend { font-weight: 700; font-size: .85rem; padding: 0 4px; }

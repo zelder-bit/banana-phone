@@ -145,7 +145,8 @@ It says nothing about whether the code works.
 
 ### Clipboard
 
-- Text clipboard sharing with remote desktops, both directions, and that it is not echoed back: not tested at all.
+- Text clipboard sharing with remote desktops, both directions, and that it is not echoed back: not tested against a real remote desktop.
+- The per-connection clipboard choice: tested as settings (`guacd.test.js`: `disable-copy` and `disable-paste` for each word), as saved data (`store.test.js`: an unknown word is saved as `off`) and in the page (a `scripts/ui.e2e.js` step, with a stand-in for the Guacamole client). That guacd itself drops the clipboard in a closed direction is not tested: it needs a real RDP or VNC server.
 - Paste sanitising (`clean` in `renderer/clipboard.js`, which strips control characters from pasted text): not tested at all, not even as a unit test.
 - Ctrl+Shift+C and Ctrl+Shift+V in a terminal: not tested at all.
 

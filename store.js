@@ -3,7 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-const { ICONS, inFolder, parentOf, matches, account } = require('./renderer/shared.mjs');
+const { ICONS, inFolder, parentOf, matches, account, clipboardWord } = require('./renderer/shared.mjs');
 
 // `ordered`: array order is the order the user chose. Only files from before drag-to-reorder lack it.
 const empty = () => ({ ordered: true, folders: [], folderIcons: {}, connections: [] });
@@ -149,6 +149,8 @@ function upsert(data, input) {
     conn.shares = tidyShares(conn.shares); // each path as main.js let it through
     if (!conn.shares.length) conn.shares = undefined;
   }
+  // Clipboard sharing (RDP and VNC) comes from the page too: one of the known words, and anything else shares nothing.
+  if (conn.clipboard !== undefined) conn.clipboard = clipboardWord(conn.clipboard); // undefined = keep what is saved
   if (copyPasswordFrom && !conn.id && conn.password === undefined) { // new connections only
     const src = data.connections.find((c) => c.id === copyPasswordFrom);
     // Copied still encrypted, never decrypted on the way, and only to the server and account it was saved for.
