@@ -103,7 +103,8 @@ test("a share's container sees only that folder, read-only by default, as you, w
   assert.strictEqual(after(args, '--tmpfs'), `/tmp:uid=${process.getuid()},gid=${process.getgid()},mode=700`); // the home FreeRDP writes to
   assert.match(after(args, '--pids-limit'), /^\d+$/);
   assert.strictEqual(args.filter((a) => a === '--mount').length, 1);
-  assert.deepStrictEqual(args.slice(-3), ['guacamole/guacd:1.6.0', '-b', '127.0.0.1']); // guacd on the container's own loopback
+  assert.deepStrictEqual(args.slice(-2), ['-b', '127.0.0.1']); // guacd on the container's own loopback
+  assert.match(args.at(-3), /^guacamole\/guacd:1\.6\.0@sha256:[0-9a-f]{64}$/); // by digest: a tag can be pointed at another image
   // Writable only when asked in so many words.
   assert.strictEqual(after(shareRunArgs('n', { path: '/srv/x', writable: true }), '--mount'), 'type=bind,source=/srv/x,target=/drive');
   for (const writable of [undefined, null, false, 'true', 1, {}]) assert.match(after(shareRunArgs('n', { path: '/srv/x', writable }), '--mount'), /,target=\/drive,readonly,bind-recursive=readonly,/);

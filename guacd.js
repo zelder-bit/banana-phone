@@ -12,7 +12,9 @@ const GuacamoleLite = require('guacamole-lite');
 const Crypt = require('guacamole-lite/lib/Crypt');
 
 const NAME = 'banana-phone-guacd';
-const IMAGE = 'guacamole/guacd:1.6.0'; // 1.6 adds cert-fingerprints; still serves guacamole-common-js 1.5 clients
+// 1.6 adds cert-fingerprints; still serves guacamole-common-js 1.5 clients. The digest is the one of the multi-platform
+// index (x86 and ARM), from `docker buildx imagetools inspect guacamole/guacd:1.6.0`: a tag can be moved, a digest cannot.
+const IMAGE = 'guacamole/guacd:1.6.0@sha256:8974eaa9ba32f713daf311e7cc8cd7e4cdfba1edea39eed75524e78ef4b08f4f';
 const GUACD_PORT = 4822;
 const key = crypto.randomBytes(32); // per-launch: tokens die with the app
 

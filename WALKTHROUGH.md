@@ -848,7 +848,9 @@ Drawing a Windows desktop inside a web page is a hard problem that the **Apache 
 
 ```js
 const NAME = 'banana-phone-guacd';
-const IMAGE = 'guacamole/guacd:1.6.0'; // 1.6 adds cert-fingerprints; still serves guacamole-common-js 1.5 clients
+// 1.6 adds cert-fingerprints; still serves guacamole-common-js 1.5 clients. The digest is the one of the multi-platform
+// index (x86 and ARM), from `docker buildx imagetools inspect guacamole/guacd:1.6.0`: a tag can be moved, a digest cannot.
+const IMAGE = 'guacamole/guacd:1.6.0@sha256:8974eaa9ba32f713daf311e7cc8cd7e4cdfba1edea39eed75524e78ef4b08f4f';
 
 const docker = (args) => new Promise((resolve, reject) =>
   execFile('docker', args, { timeout: 300000 }, (err, stdout, stderr) =>
@@ -882,7 +884,7 @@ function ensureGuacd() {
 
 * `starting ||= (…)` is **logical OR assignment**: only assign if `starting` is currently falsy. If you open four RDP panes at once, all four share the *same* start-up Promise instead of racing to start four containers.
 * `(async () => { … })()` defines an async arrow function and immediately calls it (an *IIFE*: immediately invoked function expression).
-* `docker inspect -f` prints fields of the container using a Go template: here whether it is running and which image it came from, e.g. `true guacamole/guacd:1.6.0`. A container left over from an older banana-phone (an older guacd that cannot pin certificates) is replaced instead of reused.
+* `docker inspect -f` prints fields of the container using a Go template: here whether it is running and which image it came from, e.g. `true guacamole/guacd:1.6.0@sha256:8974…`. Docker reports the image under the exact name the container was started with, digest included, so the comparison with `IMAGE` still holds. A container left over from an older banana-phone (an older guacd that cannot pin certificates, or one started by tag alone) is replaced instead of reused.
 * `-p 127.0.0.1:4822:4822` publishes guacd's port **only on localhost**, so other machines on your network cannot use your guacd.
 * `--rm` deletes the container when it stops; nothing is left behind.
 * The loop polls up to 10 s (50 × 200 ms) for the port to accept connections.
@@ -2211,7 +2213,7 @@ You hold **Shift** and double-click `dc01` (RDP, `admin` / `CORP`) while an SSH 
 | A bad bulk edit | Preview with checkboxes, a confirmation, and `connections.json.bak` before every bulk edit or delete. |
 | Half-written file after a crash | Write to `.tmp`, then atomic rename. |
 
-Known trade-offs of shared folders: the remote computer, and anything running on it, can read the whole shared folder (and change it, if you allowed that) for as long as the session is open; what it writes there is as trustworthy as that computer, so think before opening or running it; the page can learn the names of the files in a folder you shared, though not their contents; an ordinary folder that happens to hold secrets is not recognised as such; the page can find out whether a folder exists by trying to save it as a share (saving has to say whether it worked); the guacd image is named by its tag, not by a digest; and the share's container is stopped when banana-phone quits, not when the session ends (it cannot be reached in between without a new token).
+Known trade-offs of shared folders: the remote computer, and anything running on it, can read the whole shared folder (and change it, if you allowed that) for as long as the session is open; what it writes there is as trustworthy as that computer, so think before opening or running it; the page can learn the names of the files in a folder you shared, though not their contents; an ordinary folder that happens to hold secrets is not recognised as such; the page can find out whether a folder exists by trying to save it as a share (saving has to say whether it worked); and the share's container is stopped when banana-phone quits, not when the session ends (it cannot be reached in between without a new token).
 
 Known trade-offs: the first connection to a server is trusted without proof (the nature of trust on first use: check the fingerprint shown in the toast if it matters); VNC connections cannot be verified at all; and anyone who can run Docker commands as your user can also inspect the guacd container.
 
@@ -2450,7 +2452,7 @@ APPIMAGE_EXTRACT_AND_RUN=1 ./dist/banana-phone-0.1.0.AppImage
 
 Requirements on the machine running it:
 
-* **Docker** (and your user in the `docker` group) for RDP and VNC. The first RDP connection pulls `guacamole/guacd:1.6.0` (about 100 MB). SSH and local terminals work without Docker.
+* **Docker** (and your user in the `docker` group) for RDP and VNC. The first RDP connection pulls `guacamole/guacd:1.6.0` (about 100 MB), named by its digest so it is the same image every time. SSH and local terminals work without Docker.
 * A keyring (GNOME Keyring or KWallet) for proper password encryption.
 
 Data lives in `~/.config/banana-phone/`: `connections.json`, `connections.json.bak`, `known_hosts.json`, and `share-key.json` (the key agreements to share a folder are signed with, encrypted by the keyring; delete it and every share is asked about again).

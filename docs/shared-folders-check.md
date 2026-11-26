@@ -4,7 +4,7 @@ RDP shared folders ([README](../README.md#features), [walkthrough §8](../WALKTH
 
 ## Checked automatically, on every pull request
 
-`npm run test:share` (`scripts/share.itest.js`, the `share` job in CI) runs the app's own connection code against the real `guacamole/guacd:1.6.0` image and an **xrdp** server standing in for Windows, then looks at the drive from inside the RDP session:
+`npm run test:share` (`scripts/share.itest.js`, the `share` job in CI) runs the app's own connection code against the real `guacamole/guacd:1.6.0` image (pinned by digest in `guacd.js`) and an **xrdp** server standing in for Windows, then looks at the drive from inside the RDP session:
 
 | Check | Read-only share | Writable share |
 | --- | --- | --- |
@@ -70,7 +70,6 @@ xrdp is not Windows. Before relying on the feature, connect to a real Windows ho
 - Writing to a read-only share fails on the remote side with an unhelpful message (guacd reports it as an invalid parameter), not with "access denied".
 - Many organisations set their Windows servers to refuse redirected drives (the CIS and DISA baselines both say to). The session then opens without the drive, and nothing on this side can tell.
 - The page can find out whether a folder exists by trying to save it as a share, since saving has to say whether it worked. It learns nothing of what is in it.
-- The guacd image is named by its tag (`guacamole/guacd:1.6.0`), not by a digest, so it is whatever Docker Hub serves under that name. Pinning the digest needs a machine that can ask Docker Hub for it: `docker buildx imagetools inspect guacamole/guacd:1.6.0`.
 
 ## Not checked, and not expected to work without changes
 
