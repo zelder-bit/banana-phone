@@ -2,7 +2,7 @@ import { Terminal } from '../node_modules/@xterm/xterm/lib/xterm.mjs';
 import { FitAddon } from '../node_modules/@xterm/addon-fit/lib/addon-fit.mjs';
 import Guacamole from '../node_modules/guacamole-common-js/dist/esm/guacamole-common.js';
 import { shareClipboard, clean } from './clipboard.js';
-import { FRUITS, ICONS, inFolder, parentOf, matches } from './shared.mjs';
+import { FRUITS, ICONS, inFolder, parentOf, matches, sharingText } from './shared.mjs';
 
 const $ = (s) => document.querySelector(s);
 const el = (tag, props = {}, ...kids) => {
@@ -799,7 +799,7 @@ async function openRemote(p, c) {
   status(p, `Connecting to ${c.host}…`);
   const { url, notice, shared } = await window.bp.open(c.id);
   // What this session can reach on this computer is said out loud and stays on the pane's header.
-  const sharing = shared && `Sharing ${shared.path} with ${c.host} (${shared.writable ? 'it can change files' : 'read-only'})`;
+  const sharing = shared && sharingText(shared, c.host);
   if (notice || sharing) toast([notice, sharing].filter(Boolean).join(' · '), 12000); // long enough to compare the fingerprint
   if (sharing) {
     p.root.classList.add('sharing'); // keeps the header, and so the label, even when the pane has the tab to itself

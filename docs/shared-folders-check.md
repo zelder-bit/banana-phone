@@ -68,7 +68,7 @@ xrdp is not Windows. Before relying on the feature, connect to a real Windows ho
 - A drive plugged in, or anything else mounted inside the shared folder, *after* the first session to a server does not show up until banana-phone is restarted: the container keeps the mounts it started with.
 - Windows is not told when a file changes on this computer. Press F5 in Explorer to see it.
 - Writing to a read-only share fails on the remote side with an unhelpful message (guacd reports it as an invalid parameter), not with "access denied".
-- Many organisations set their Windows servers to refuse redirected drives (the CIS and DISA baselines both say to). The session then opens without the drive, and nothing on this side can tell.
+- Many organisations set their Windows servers to refuse redirected drives (the CIS and DISA baselines both say to). The session then opens without the drive, and nothing on this side can tell, so the toast shown on connecting (and the tooltip of the pane's *shared folder* label) always adds: "If no drive appears there, the server may be set to refuse shared drives."
 - The page can find out whether a folder exists by trying to save it as a share, since saving has to say whether it worked. It learns nothing of what is in it.
 
 ## Not checked, and not expected to work without changes

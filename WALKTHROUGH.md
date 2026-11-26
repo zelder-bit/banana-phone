@@ -117,7 +117,7 @@ electron .  ──▶ main.js ──require──▶ store.js ──require─�
                                                         clipboard.js, shared.mjs
 ```
 
-`shared.mjs` is the one file both sides load. It holds small pure helpers, `FRUITS` (the fruit pictures), `ICONS` (what a folder icon may be: `crate` plus `FRUITS`), `inFolder` and `parentOf` (the folder-path rules) and `matches` (the search rule), so there is one copy of each instead of one in the store and another in the page that could quietly drift apart. The page imports it as an ES module; `store.js` loads it with plain `require()`, which recent Node and Electron allow for an ES module with no top-level `await`.
+`shared.mjs` is the one file both sides load. It holds small pure helpers, `FRUITS` (the fruit pictures), `ICONS` (what a folder icon may be: `crate` plus `FRUITS`), `inFolder` and `parentOf` (the folder-path rules), `matches` (the search rule) and `sharingText` (what the page says when a session shares a folder, [§8](#shared-folders-which-folders-and-who-agrees)), so there is one copy of each instead of one in the store and another in the page that could quietly drift apart. The page imports it as an ES module; `store.js` loads it with plain `require()`, which recent Node and Electron allow for an ES module with no top-level `await`.
 
 ---
 
@@ -1428,7 +1428,7 @@ function agreementKey() {
 * The answer counts only for what the dialog showed. A system dialog takes time, and the connection could be saved or bulk-edited while it is open; if it is no longer the same object with the same hash, nothing is shared.
 * `shareFor` runs after the certificate check, so "this server" means the one whose identity was just verified.
 
-The page shows what a session can reach: a toast when it connects (`Sharing … with … (read-only)`), and a label on the pane's header for as long as it is open (full screen hides the header, as it hides everything else).
+The page shows what a session can reach: a toast when it connects (`Sharing … with … (read-only). If no drive appears there, the server may be set to refuse shared drives.`), and a label on the pane's header for as long as it is open, with the same words as its tooltip (full screen hides the header, as it hides everything else). The second sentence is said every time because the page cannot know: guacd offers the drive, the server may silently decline it, and the session opens the same either way. The wording is `sharingText` in `shared.mjs`, where `store.test.js` can reach it.
 
 Shares are set one connection at a time. Bulk edit does not set them, and **Duplicate** copies the folder but not the agreement, so the copy asks when it first connects.
 
@@ -1638,7 +1638,7 @@ import { Terminal } from '../node_modules/@xterm/xterm/lib/xterm.mjs';
 import { FitAddon } from '../node_modules/@xterm/addon-fit/lib/addon-fit.mjs';
 import Guacamole from '../node_modules/guacamole-common-js/dist/esm/guacamole-common.js';
 import { shareClipboard, clean } from './clipboard.js';
-import { FRUITS, ICONS, inFolder, parentOf, matches } from './shared.mjs';
+import { FRUITS, ICONS, inFolder, parentOf, matches, sharingText } from './shared.mjs';
 
 const $ = (s) => document.querySelector(s);
 const el = (tag, props = {}, ...kids) => {
@@ -1982,7 +1982,7 @@ async function openRemote(p, c) {
   status(p, `Connecting to ${c.host}…`);
   const { url, notice, shared } = await window.bp.open(c.id);
   // What this session can reach on this computer is said out loud and stays on the pane's header.
-  const sharing = shared && `Sharing ${shared.path} with ${c.host} (${shared.writable ? 'it can change files' : 'read-only'})`;
+  const sharing = shared && sharingText(shared, c.host);
   if (notice || sharing) toast([notice, sharing].filter(Boolean).join(' · '), 12000); // long enough to compare the fingerprint
   if (sharing) {
     p.root.classList.add('sharing'); // keeps the header, and so the label, even when the pane has the tab to itself
@@ -2008,7 +2008,7 @@ async function openRemote(p, c) {
 * `if (p.closed) return;` handles closing a pane while it still says "Connecting" (the first RDP connection may wait minutes while Docker downloads guacd). `closePane` sets `p.closed = true`; without this check the connection would carry on in a pane nobody can see. Terminals do the same and close the session main just opened.
 * `const [base, query] = url.split('?')` is **array destructuring**: the first piece goes to `base`, the second to `query`.
 * `WebSocketTunnel(base)` is the connection to guacamole-lite; `client.connect(query)` appends the token plus the pane's current size, so the remote desktop starts at exactly the right resolution.
-* `shared` is the folder main mounted for this session, if any ([§8](#shared-folders-which-folders-and-who-agrees)). `[notice, sharing].filter(Boolean).join(' · ')` joins whichever of the two messages exist; `.after(…)` puts the label right behind the pane's title. A pane alone in its tab normally has no header; the `sharing` class keeps it (one CSS rule), so the label is there for as long as the folder is reachable.
+* `shared` is the folder main mounted for this session, if any ([§8](#shared-folders-which-folders-and-who-agrees)); `sharingText` (from `shared.mjs`) puts it into words. `[notice, sharing].filter(Boolean).join(' · ')` joins whichever of the two messages exist; `.after(…)` puts the label right behind the pane's title. A pane alone in its tab normally has no header; the `sharing` class keeps it (one CSS rule), so the label is there for as long as the folder is reachable.
 * `display.getElement()` is a `<div>` containing layered `<canvas>` elements that guacd's drawing instructions paint on.
 * `Guacamole.Mouse` turns browser mouse events into remote mouse events; the `true` in `sendMouseState(state, true)` corrects for the display's scaling.
 * `Guacamole.Keyboard(p.body)` listens **only on that pane**, so with four desktops in a grid your typing goes only to the one you clicked. It sends X11 "keysyms", which handle keyboard layouts and modifier keys properly. `return false` stops the browser acting on the key itself (e.g. Ctrl+W would otherwise not reach Windows).
