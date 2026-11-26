@@ -11,15 +11,38 @@ const electron = require('electron'); // in plain Node this is the path to the E
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-async function launch() {
+// saved: what connections.json holds when the app starts (default: no file).
+async function launch(saved) {
   const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'bp-ui-'));
-  const args = ['.', '--remote-debugging-port=0', `--user-data-dir=${profile}`];
+  if (saved) fs.writeFileSync(path.join(profile, 'connections.json'), JSON.stringify(saved));
+  const args = ['--inspect=0', '.', '--remote-debugging-port=0', `--user-data-dir=${profile}`]; // --inspect: see `main` below
   if (process.env.CI) args.push('--no-sandbox'); // CI runners cannot set up Chromium's sandbox
   const proc = spawn(electron, args, { cwd: path.join(__dirname, '..'), stdio: ['ignore', 'ignore', 'pipe'] });
   const exited = new Promise((r) => proc.once('exit', r));
+  let log = '';
+  proc.stderr.on('data', (d) => { log += d; });
+  // Runs an expression in the main process, through Node's inspector: for what no click in the page
+  // can reach, such as the system's folder dialog.
+  let inspector; // its address, set below once Node has printed it
+  const main = (expr) => new Promise((resolve, reject) => {
+    const ws = new WebSocket(inspector);
+    ws.onerror = () => reject(new Error('could not connect to the main process'));
+    ws.onopen = () => ws.send(JSON.stringify({ id: 1, method: 'Runtime.evaluate', params: { expression: expr, includeCommandLineAPI: true } })); // which is what gives the expression `require`
+    ws.onmessage = (e) => {
+      const d = JSON.parse(e.data);
+      if (d.id !== 1) return;
+      ws.close();
+      d.error || d.result.exceptionDetails ? reject(new Error(`main process: ${JSON.stringify(d.error || d.result.exceptionDetails)}`)) : resolve();
+    };
+  });
   const cleanup = async () => { proc.kill(); await exited; fs.rmSync(profile, { recursive: true, force: true }); };
   try {
-    return Object.assign(await connect(proc, cleanup), { profile }); // profile: where this run's connections.json is
+    const app = await connect(proc, cleanup);
+    // Node prints "Debugger listening on ws://…" on stderr too, but nothing says it comes before the window is ready.
+    for (const end = Date.now() + 10000; !(inspector = /Debugger listening on (ws:\S+)/.exec(log)?.[1]); await sleep(50)) {
+      if (Date.now() > end) throw new Error(`the main process's inspector did not start within 10 s:\n${log}`);
+    }
+    return Object.assign(app, { profile, main }); // profile: where this run's connections.json is
   } catch (e) {
     await cleanup(); // never leave the app (or its profile) behind when start-up fails
     throw e;
@@ -394,13 +417,19 @@ test('tabs, splits, gutter and dialogs', { timeout: 120000 }, async (t) => {
     await app.waitFor(`${answers} === 2 && document.querySelector('.tab.active .t').textContent === 'cmdbox'`);
   });
 
-  await t.test('shared folder: RDP only, read-only unless ticked, refused for the home folder, emptied to stop sharing', async () => {
+  await t.test('shared folder: RDP only, chosen in the folder dialog only, read-only unless ticked, refused for the home folder, emptied to stop sharing', async () => {
     // Somewhere that may be shared: outside the home folder, and not the app's own folder (this run's profile).
     const folder = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'bp-ui-share-')));
     t.after(() => fs.rmSync(folder, { recursive: true, force: true }));
     const fill = (fields) => app.eval(`(() => { const f = document.querySelector('#edit-form').elements;
       for (const [k, v] of Object.entries(${JSON.stringify(fields)})) f[k].value = v;
       f.protocol.dispatchEvent(new Event('change')); })()`);
+    // Stands in for the user choosing `dir` in the system's folder dialog, then clicks Choose….
+    const choose = async (dir) => {
+      await app.main(`require('electron').dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [${JSON.stringify(dir)}] })`);
+      await app.click('#share-pick');
+    };
+    const sharePath = 'document.querySelector("#edit-form").elements.sharePath.value';
     const boxShown = 'document.querySelector("#edit-dlg .share-box").offsetParent !== null';
     const winbox = '(async () => JSON.stringify((await window.bp.get()).connections.find((c) => c.name === "winbox") || null))()';
     const onDisk = () => JSON.parse(fs.readFileSync(path.join(app.profile, 'connections.json'), 'utf8')).connections.find((c) => c.name === 'winbox');
@@ -414,15 +443,22 @@ test('tabs, splits, gutter and dialogs', { timeout: 120000 }, async (t) => {
     await app.waitFor('document.querySelector("#edit-dlg").open');
     await fill({ name: 'winbox', protocol: 'ssh', host: 'win.test' });
     assert.ok(!(await app.eval(boxShown)), 'no shared folder box for SSH');
-    await fill({ protocol: 'rdp', sharePath: os.homedir() });
+    await fill({ protocol: 'rdp' });
     assert.ok(await app.eval(boxShown), 'shared folder box shown for RDP');
-    await app.click('#edit-dlg .btn.primary');
+    assert.ok(await app.eval('document.querySelector("#edit-form").elements.sharePath.readOnly'), 'the path cannot be typed');
+    await choose(os.homedir());
     await app.waitFor(`/cannot be shared: it holds your whole home folder/.test(document.querySelector('#toast').textContent)`);
-    assert.strictEqual(await app.eval(winbox), 'null', 'a connection sharing the home folder is not saved');
+    assert.strictEqual(await app.eval(sharePath), '', 'the home folder is not taken');
 
-    await app.click('#new-conn');
-    await app.waitFor('document.querySelector("#edit-dlg").open');
-    await fill({ name: 'winbox', protocol: 'rdp', host: 'win.test', sharePath: ` ${folder}/ ` });
+    // A page that sends a path of its own gets one answer, whether the folder is there or not, and nothing is saved.
+    const refused = (dir) => app.eval(`window.bp.save({ name: 'sneak', protocol: 'rdp', host: 'win.test', share: { path: ${JSON.stringify(dir)}, writable: false } }).then(() => 'saved', (e) => e.message)`);
+    const answer = await refused(folder);
+    assert.match(answer, /choose the shared folder with the Choose… button/);
+    for (const dir of [path.join(folder, 'not-there'), os.homedir(), '/etc']) assert.strictEqual(await refused(dir), answer);
+    assert.strictEqual(await app.eval('(async () => (await window.bp.get()).connections.some((c) => c.name === "sneak"))()'), false);
+
+    await choose(`${folder}/`);
+    await app.waitFor(`${sharePath} === ${JSON.stringify(folder)}`); // shown by its real path
     await app.click('#edit-dlg .btn.primary');
     await app.waitFor(`(async () => (await ${winbox}) !== 'null')()`);
     assert.deepStrictEqual(JSON.parse(await app.eval(winbox)).share, { path: folder, writable: false }); // tidied to its real path, read-only
@@ -441,7 +477,8 @@ test('tabs, splits, gutter and dialogs', { timeout: 120000 }, async (t) => {
     assert.deepStrictEqual(onDisk().share, { path: folder, writable: true });
 
     await editWinbox();
-    await fill({ sharePath: '' });
+    await app.click('#share-none');
+    assert.deepStrictEqual(await app.eval(`(() => { const f = document.querySelector('#edit-form').elements; return [f.sharePath.value, f.shareWritable.checked]; })()`), ['', false]);
     await app.click('#edit-dlg .btn.primary');
     await app.waitFor(`(async () => !('share' in JSON.parse(await ${winbox})))()`);
     assert.ok(!('share' in onDisk()));
@@ -460,4 +497,15 @@ test('tabs, splits, gutter and dialogs', { timeout: 120000 }, async (t) => {
     await app.eval('location.reload()'); // last test: the reload drops every open session
     await app.waitFor(`document.readyState === "complete" && Math.abs(${sideW} - ${after}) < 2`);
   });
+});
+
+// Shares saved before this launch (by an older version too) were never chosen in this launch's folder dialog.
+test('a share saved earlier is kept on edit and on Duplicate, with no choosing again', async (t) => {
+  const folder = '/bp-ui/not-there'; // saving does not look at the folder, so it need not exist
+  const app = await launch({ ordered: true, connections: [{ id: 'old', name: 'old', protocol: 'rdp', host: 'win.test', share: { path: folder, writable: false } }] });
+  t.after(() => app.close());
+  const save = (conn) => app.eval(`window.bp.save(${JSON.stringify(conn)}).then((v) => v.connections.filter((c) => c.share?.path === ${JSON.stringify(folder)}).length, (e) => e.message)`);
+  assert.strictEqual(await save({ id: 'old', name: 'old', protocol: 'rdp', host: 'win.test', share: { path: folder, writable: true } }), 1);
+  assert.strictEqual(await save({ name: 'old copy', protocol: 'rdp', host: 'win.test', share: { path: folder, writable: true } }), 2);
+  assert.match(await save({ name: 'other', protocol: 'rdp', host: 'win.test', share: { path: folder + '2', writable: false } }), /choose the shared folder/);
 });

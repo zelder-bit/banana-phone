@@ -138,7 +138,7 @@ function upsert(data, input) {
   // Whether that folder may be shared at all is main.js's question (share.js); `writable` must be said outright.
   if (conn.share !== undefined) {
     const s = conn.share;
-    conn.share = typeof s?.path === 'string' && s.path.trim() ? { path: s.path, writable: s.writable === true } : undefined; // the path as main.js checked it
+    conn.share = typeof s?.path === 'string' && s.path.trim() ? { path: s.path, writable: s.writable === true } : undefined; // the path as main.js let it through
   }
   if (copyPasswordFrom && !conn.id && conn.password === undefined) { // new connections only
     const src = data.connections.find((c) => c.id === copyPasswordFrom);

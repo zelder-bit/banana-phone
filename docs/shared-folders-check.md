@@ -42,13 +42,13 @@ A second review, of the pull requests themselves, added these:
 
 A third pass found that guacd answers a request for a folder's listing even with its file transfer off, so the page (the app's own window) could learn the names of the files in a shared folder. The bridge now drops the two instructions that ask guacd's filesystem for anything (`get` and `put`) before they reach guacd (issue #61). Checked by hand against the real `guacamole/guacd:1.6.0` image with a read-only share: asked for the folder's listing, guacd sent the file names when the filter was taken out, and nothing with it in. That run got no further than the server's login, so a signed-in session through the filter is covered only by `npm test`, where a stand-in guacd receives keys, mouse and clipboard unchanged; the Windows checklist below exercises it for real.
 
-`npm run test:ui` covers the edit dialog (the box is there for RDP only, the home folder is refused, read-only unless ticked, the page cannot write an agreement), and `npm test` covers the folder rules, the agreement, the `docker run` arguments, the relay and the bridge's filter.
+`npm run test:ui` covers the edit dialog (the box is there for RDP only, the home folder is refused, read-only unless ticked, the page cannot write an agreement, and a path the page sends without your choosing it in the folder dialog gets one refusal whether the folder exists or not), and `npm test` covers the folder rules, the agreement, the `docker run` arguments, the relay and the bridge's filter.
 
 ## Not checked yet: do this once against Windows
 
 xrdp is not Windows. Before relying on the feature, connect to a real Windows host with a share and tick these off. About ten minutes.
 
-1. Edit an RDP connection, choose a folder with a few files in it, leave the checkbox unticked, and connect. The system dialog asks whether to share: **Share and connect**.
+1. Edit an RDP connection, choose a folder with a few files in it (**Choose…**; the path cannot be typed), leave the checkbox unticked, and connect. The system dialog asks whether to share: **Share and connect**.
 2. In Explorer, *This PC* shows **Shared on banana-phone**, and `\\tsclient\Shared` opens it.
    - [ ] the drive is there, and opening it does not drop the session (there is an old report of guacd failing on Explorer's `desktop.ini` lookup)
    - [ ] files open; non-ASCII names and names with spaces look right
@@ -72,7 +72,6 @@ xrdp is not Windows. Before relying on the feature, connect to a real Windows ho
 - Windows is not told when a file changes on this computer. Press F5 in Explorer to see it.
 - Writing to a read-only share fails on the remote side with an unhelpful message (guacd reports it as an invalid parameter), not with "access denied".
 - Many organisations set their Windows servers to refuse redirected drives (the CIS and DISA baselines both say to). The session then opens without the drive, and nothing on this side can tell, so the toast shown on connecting (and the tooltip of the pane's *shared folder* label) always adds: "If no drive appears there, the server may be set to refuse shared drives."
-- The page can find out whether a folder exists by trying to save it as a share, since saving has to say whether it worked. It learns nothing of what is in it.
 
 ## Refused, with the reason
 

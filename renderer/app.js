@@ -306,7 +306,9 @@ function editConn(c = { protocol: 'ssh' }) {
   form.elements.sharePath.value = c.share?.path || '';
   form.elements.shareWritable.checked = c.share?.writable === true;
   // Main shows the folder dialog and answers with the folder's real path, or rejects (toasted) if it may not be shared.
-  $('#share-pick').onclick = async () => { const p = await window.bp.pickFolder(form.elements.sharePath.value.trim()); if (p) form.elements.sharePath.value = p; };
+  // The path cannot be typed: main saves a share only for a folder chosen this way, or one already saved.
+  $('#share-pick').onclick = async () => { const p = await window.bp.pickFolder(form.elements.sharePath.value); if (p) form.elements.sharePath.value = p; };
+  $('#share-none').onclick = () => { form.elements.sharePath.value = ''; form.elements.shareWritable.checked = false; };
   form.elements.port.placeholder = DEFAULT_PORT[d.dataset.proto] || '';
   form.elements.protocol.onchange = () => { d.dataset.proto = form.elements.protocol.value; form.elements.port.placeholder = DEFAULT_PORT[d.dataset.proto] || ''; };
   const cmds = editCmds(c.commands);
@@ -327,7 +329,7 @@ function editConn(c = { protocol: 'ssh' }) {
     if (!conn.id) delete conn.id;
     if (conn.folder) { openFolders.add(conn.folder); saveOpen(); }
     conn.adminSession = conn.protocol === 'rdp' && f.adminSession.checked;
-    conn.share = conn.protocol === 'rdp' && f.sharePath.value.trim() ? { path: f.sharePath.value.trim(), writable: f.shareWritable.checked } : null; // null = not shared
+    conn.share = conn.protocol === 'rdp' && f.sharePath.value ? { path: f.sharePath.value, writable: f.shareWritable.checked } : null; // null = not shared
     if (conn.protocol === 'ssh' || conn.protocol === 'local') {
       conn.commands = cmds.map((x) => ({ ...x, name: x.name.trim() || x.cmd.trim() })); // the store drops empty ones
       const empty = cmds.filter((x) => x.name.trim() && !x.cmd.trim()).length;

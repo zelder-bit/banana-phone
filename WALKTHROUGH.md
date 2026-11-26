@@ -487,7 +487,7 @@ The handlers themselves are then one line each:
 ```js
 change('store:save', ({ password, shareOk, ...conn }) => {
   if (password !== undefined) conn.password = enc(password); // undefined = keep existing
-  if (conn.share?.path) conn.share = { ...conn.share, path: share.checkFolder(String(conn.share.path), shareRules()) };
+  if (conn.share?.path && !mayShare(conn.share.path)) throw new Error('Not saved: choose the shared folder with the Choose… button.');
   store.upsert(data, conn); // its return value holds the encrypted password, so it is not passed on
 });
 change('store:delete', (id) => store.remove(data, id), true);
@@ -499,7 +499,7 @@ change('store:folderIcon', (f, name) => store.setFolderIcon(data, f, name));
 change('store:move', (kind, id, to, before) => (kind === 'conn' ? store.moveConn : store.moveFolder)(data, id, to, before));
 ```
 
-`shareOk` is taken out of what the page sent and thrown away, and a shared folder is checked and replaced by its real path before it is saved; both are explained in [§8](#shared-folders-which-folders-and-who-agrees).
+`shareOk` is taken out of what the page sent and thrown away, and a shared folder is saved only if you chose it in the system's folder dialog (or it is already saved); both are explained in [§8](#shared-folders-which-folders-and-who-agrees).
 
 When you edit a connection and leave the password field empty, the page does not send `password` at all, so `upsert`'s merge keeps the old encrypted one. `store:save`'s function has a body in braces and no `return`, so its `result` is `undefined`: `upsert` returns the saved connection, encrypted password included, and that must not travel back to the page. `(kind === 'conn' ? store.moveConn : store.moveFolder)(…)` picks one of two functions with the ternary operator and calls it straight away.
 
@@ -818,7 +818,7 @@ The full list of channels:
 | `store:bulkPreview` | invoke | which connections a bulk edit would touch |
 | `store:bulkApply` | invoke | apply a bulk edit (writes a timestamped backup first); `result` is how many changed |
 | `store:forgetHost` | invoke | forget a connection's saved SSH host key or RDP certificate |
-| `share:pick` | invoke | show the system's folder dialog; answers with the chosen folder's real path, `null` if cancelled, or an error if it may not be shared |
+| `share:pick` | invoke | show the system's folder dialog; answers with the chosen folder's real path, `null` if cancelled, or an error if it may not be shared. Main remembers the answer: `store:save` takes a new share from these only |
 | `session:open` | invoke | start a terminal (returns a session id) or a remote desktop (returns a websocket URL) |
 | `session:write` | send | keystrokes into a terminal |
 | `session:resize` | send | new terminal size in columns and rows |
@@ -1416,12 +1416,12 @@ Checked against a real Docker: with two sessions open the container outlives the
 
 The container limits what a share can reach to one folder. Two questions are left, and neither is guacd's or Docker's to answer: is that folder a sensible thing to share, and did *you* decide to share it? `share.js` holds the rules, `main.js` asks them, and nothing in the page is trusted with either.
 
-**Where a share comes from.** The edit dialog of an RDP connection has a *Shared folder* box: a path (typed, or picked with **Choose…**, which calls `share:pick` so the main process shows the system's folder dialog) and one checkbox, *Let the remote computer change and delete files in it*. An empty path means nothing is shared. The page sends `share: { path, writable }` or `share: null` along with the rest of the connection, and `upsert` in `store.js` tidies it the way it tidies saved commands:
+**Where a share comes from.** The edit dialog of an RDP connection has a *Shared folder* box: a path and one checkbox, *Let the remote computer change and delete files in it*. The path cannot be typed. **Choose…** calls `share:pick`, so the main process shows the system's folder dialog, and **Stop sharing** empties it and unticks the checkbox; an empty path means nothing is shared. The page sends `share: { path, writable }` or `share: null` along with the rest of the connection, and `upsert` in `store.js` tidies it the way it tidies saved commands:
 
 ```js
   if (conn.share !== undefined) {
     const s = conn.share;
-    conn.share = typeof s?.path === 'string' && s.path.trim() ? { path: s.path, writable: s.writable === true } : undefined; // the path as main.js checked it
+    conn.share = typeof s?.path === 'string' && s.path.trim() ? { path: s.path, writable: s.writable === true } : undefined; // the path as main.js let it through
   }
 ```
 
@@ -1434,7 +1434,7 @@ The container limits what a share can reach to one folder. Two questions are lef
 * Only RDP has drives, so a share on any other kind of connection is dropped.
 * `shareOk` is your agreement to the share (below). The second line is what keeps it honest; it is explained under *Who agrees*.
 
-**Which folders.** Before a share is saved (`store:save`), when one is picked (`share:pick`), and again every time a session opens, the folder goes through `pin`:
+**Which folders.** When a folder is chosen (`share:pick`), and again every time a session opens, the folder goes through `pin`:
 
 ```js
 function pin(input, { home = os.homedir(), keep = [] } = {}) {
@@ -1486,7 +1486,18 @@ function pin(input, { home = os.homedir(), keep = [] } = {}) {
 * The rules are about *your* secrets. guacd runs as you with no extra powers, so a share can never show the remote side more than you can read yourself; what needs guarding is what you can read and would not hand over: the home folder as a whole, its hidden folders (`~/.ssh`, `~/.gnupg`, `~/.config`, browser profiles), `~/snap`, and banana-phone's own folder with `connections.json` and `known_hosts.json` (`keep`, passed in by `main.js` so this file stays free of Electron and easy to test).
 * `home` may be a list. `main.js` passes two: the home folder the environment names (`$HOME`) and the one the system has on record for your account, so starting the app with an unusual `$HOME` does not leave the real one unprotected. `[].concat(home)` turns one value or a list into a list.
 * `{ home = os.homedir(), keep = [] } = {}` is a **destructured parameter with defaults**: callers pass an options object and may leave out any part, or all of it.
-* `checkFolder(input, rules)` is `pin(input, rules).path`, for the callers that only need the answer.
+* `checkFolder(input, rules)` is `pin(input, rules).path`, for `share:pick`, which only needs the answer.
+
+**Only a folder you chose.** `store:save` does not look at the folder at all. `share:pick` keeps every folder you chose in this launch, by its real path, in the set `picked`, and one small function holds the rule:
+
+```js
+const picked = new Set();
+const mayShare = (p) => picked.has(p) || data.connections.some((c) => c.share?.path === p);
+```
+
+`store:save` takes a share only if `mayShare` says yes: its path is in that set or is already the share of a saved connection (so editing or duplicating a connection with a share needs no choosing again, and shares saved by an older version keep working). Any other path gets one answer, *Not saved: choose the shared folder with the Choose… button*, whatever is or is not at that path.
+
+This is there because saving used to run the folder rules on whatever path the page sent, and had to say how it went. A page that had been taken over could then send path after path and read the answers: this one exists, that one is missing, this link leads there. Now the only paths that are ever looked at are ones your own hand picked in a system dialog, which the page cannot click, or ones already saved, and those are looked at when a session opens, behind the question below. Nothing useful is lost: a folder that may not be shared is refused, with the reason, the moment you choose it. `picked` only grows while the app runs, and keeps folders you chose and then did not save; that is harmless, since every one of them passed the folder rules.
 * **A home folder is recognised by what it is, not only by where it is.** A path is one name for a folder, and a folder can have several: the same disk mounted in a second place, for one. The rules above compare paths, so on their own they would let `/mnt/second/you/.ssh` through. `lineage` gives the other answer:
 
 ```js
@@ -2401,7 +2412,7 @@ You hold **Shift** and double-click `dc01` (RDP, `admin` / `CORP`) while an SSH 
 | A bad bulk edit | Preview with checkboxes, a confirmation, and `connections.json.bak` before every bulk edit or delete. |
 | Half-written file after a crash | Write to `.tmp`, then atomic rename. |
 
-Known trade-offs of shared folders: the remote computer, and anything running on it, can read the whole shared folder (and change it, if you allowed that) for as long as the session is open; what it writes there is as trustworthy as that computer, so think before opening or running it; an ordinary folder that happens to hold secrets is not recognised as such; the page can find out whether a folder exists by trying to save it as a share (saving has to say whether it worked); and a drive plugged in during a session shows up in the next one, once the last session of that connection has been closed for about ten seconds (up to a minute more if a pane of it was started and never connected).
+Known trade-offs of shared folders: the remote computer, and anything running on it, can read the whole shared folder (and change it, if you allowed that) for as long as the session is open; what it writes there is as trustworthy as that computer, so think before opening or running it; an ordinary folder that happens to hold secrets is not recognised as such; and a drive plugged in during a session shows up in the next one, once the last session of that connection has been closed for about ten seconds (up to a minute more if a pane of it was started and never connected).
 
 Known trade-offs: the first connection to a server is trusted without proof (the nature of trust on first use: check the fingerprint shown in the toast if it matters); VNC connections cannot be verified at all; and anyone who can run Docker commands as your user can also inspect the guacd container.
 
@@ -2446,7 +2457,7 @@ test('bulk update by folder includes subfolders but not lookalike names', () => 
 It talks to the app through the **Chrome DevTools Protocol** (CDP), the same channel Chrome's developer tools use. Electron is told to open it on a free port:
 
 ```js
-  const args = ['.', '--remote-debugging-port=0', `--user-data-dir=${profile}`];
+  const args = ['--inspect=0', '.', '--remote-debugging-port=0', `--user-data-dir=${profile}`]; // --inspect: see `main` below
 ```
 
 ```js
@@ -2454,6 +2465,7 @@ It talks to the app through the **Chrome DevTools Protocol** (CDP), the same cha
 ```
 
 * `--remote-debugging-port=0` means "any free port". Chromium then prints `DevTools listening on ws://127.0.0.1:<port>/…` on stderr, and the regex captures the digits after the colon. `(\d+)` is a **capture group**: `m[1]` is the text it matched.
+* `--inspect=0` opens Node's own inspector for the main process, also on a free port. One subtest uses it (`app.main`, below) to stand in for the system's folder dialog.
 * `--user-data-dir` points at a new empty folder, so the test never touches your real connections, and a running copy of the app does not block it (the single-instance lock is per profile).
 
 Every CDP message is JSON with an `id`. The reply carries the same `id`, which is how `call()` matches a reply to its request:
@@ -2480,7 +2492,7 @@ Page updates are not instant, so instead of sleeping for a guessed time the test
 
 `t.test(name, fn)` inside a test makes **subtests**, so the report shows each step (split, grid, gutter, Tab all, dialogs) as its own pass or fail, while all of them share one running app.
 
-One subtest is about shared folders. It fills in the edit dialog and checks that the box is shown for RDP only, that a connection sharing the home folder is refused with the reason in a toast, that a share is saved by its real path and read-only unless the checkbox is ticked, and that emptying the path removes it. It also plays a misbehaving page: it sends `store:save` a made-up `shareOk` and then reads this run's `connections.json` (`app.profile` is the throwaway profile's folder) to see that it never reached the file. The system dialogs themselves (the folder picker, the question before sharing) cannot be clicked from DevTools, so those are covered by `share.js`'s unit tests and the hand check in `docs/shared-folders-check.md`.
+One subtest is about shared folders. It fills in the edit dialog and checks that the box is shown for RDP only, that the path cannot be typed, that choosing the home folder is refused with the reason in a toast, that a chosen folder is saved by its real path and read-only unless the checkbox is ticked, and that **Stop sharing** removes it. The system's folder dialog cannot be clicked from DevTools, so the test replaces it: `app.main(expr)` runs an expression in the main process through Node's inspector (`launch` waits for the inspector's address to be printed before it returns), and the test uses it to swap `dialog.showOpenDialog` for a function that answers with the folder the test wants "chosen". It also plays a misbehaving page. It sends `store:save` paths nobody chose (a folder that exists, one that does not, the home folder, `/etc`) and checks that all get the very same refusal and nothing is saved; and it sends a made-up `shareOk` and then reads this run's `connections.json` (`app.profile` is the throwaway profile's folder) to see that it never reached the file. A second, short test starts the app with a `connections.json` that already holds a share (`launch(saved)` writes it into the profile first) and checks that editing and duplicating that connection save without any choosing, while a path that is not saved is still refused. The question before sharing is a system dialog too, and is covered by `share.js`'s unit tests and the hand check in `docs/shared-folders-check.md`.
 
 The dialog step caught a real bug. The edit dialog used to save from its `close` event, with a new listener added each time it opened. Chromium can deliver a `close` event late. Under the test's fast input, the Esc that cancelled one opening only "arrived" together with the next opening's Save. Both listeners then read `returnValue` as `ok`, and the connection was saved twice. In the opposite order (Save, then reopen at once), a Save could be lost. The dialogs now save on `submit` instead (see [§9](#9-rendererindexhtml-and-fruitcss-the-look)), and the test covers both orders: Esc then Save, and Save then an immediate reopen.
 
